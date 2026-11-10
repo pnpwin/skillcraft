@@ -1,0 +1,14 @@
+{
+  "evals": [
+    {
+      "id": "receipt",
+      "prompt": "Normalize this receipt into JSON: Shop: Acme. Paid: $12.50. Return only the JSON object.",
+      "expectations": ["The amount is the number 12.5", "The currency is USD", "The schema version is 1"],
+      "checks": [
+        {"text": "The amount is the number 12.5", "type": "json_equals", "file": "_response.txt", "path": ["total"], "value": 12.5},
+        {"text": "The currency is USD", "type": "json_equals", "file": "_response.txt", "path": ["currency"], "value": "USD"},
+        {"text": "The schema version is 1", "type": "json_equals", "file": "_response.txt", "path": ["schema_version"], "value": 1}
+      ]
+    }
+  ]
+}

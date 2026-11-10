@@ -1,0 +1,9 @@
+{
+  "name": "bounded-tools-with-installed-extensions",
+  "inherit_bounded_files": true,
+  "steps": 48,
+  "permissions": [
+    {"action":"read","resource":".opencode/skills","effect":"allow"},
+    {"action":"read","resource":".opencode/skills/","effect":"allow"}
+  ]
+}

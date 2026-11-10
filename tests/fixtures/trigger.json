@@ -1,0 +1,10 @@
+{
+  "evals": [
+    {"id": "receipt-a", "prompt": "Normalize this receipt to JSON: Shop Acme, paid $12.50.", "should_trigger": true, "group": "receipt-a"},
+    {"id": "receipt-b", "prompt": "Extract merchant, currency, and total from this purchase receipt: Oak Books, EUR 23.", "should_trigger": true, "group": "receipt-b"},
+    {"id": "receipt-c", "prompt": "Convert my purchase slip into normalized JSON: Corner Cafe, total USD 8.75.", "should_trigger": true, "group": "receipt-c"},
+    {"id": "math-a", "prompt": "What is 7 plus 5? Answer only the number.", "should_trigger": false, "group": "math-a"},
+    {"id": "translation-a", "prompt": "Translate the word receipt into French. Answer with the translated word.", "should_trigger": false, "group": "translation-a"},
+    {"id": "math-b", "prompt": "What is 3 multiplied by 4? Answer only the number.", "should_trigger": false, "group": "math-b"}
+  ]
+}

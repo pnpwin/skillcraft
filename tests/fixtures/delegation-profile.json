@@ -1,0 +1,7 @@
+{
+  "name": "owned-delegation",
+  "inherit_bounded_files": true,
+  "allow_delegation": true,
+  "steps": 32,
+  "permissions": []
+}

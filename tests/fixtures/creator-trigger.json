@@ -1,0 +1,10 @@
+{
+  "evals": [
+    {"id":"capture","group":"capture","prompt":"We repeat the same document-checking workflow every week. Turn that process into an OpenCode skill with reusable instructions and examples.","should_trigger":true},
+    {"id":"revise","group":"revise","prompt":"My skill instructions only work for the example I wrote them for. Help me generalize them and design meaningful checks before comparing versions.","should_trigger":true},
+    {"id":"select","group":"select","prompt":"My receipt skill is never selected on relevant purchase slips. Help me test its description against realistic positive and near-miss requests.","should_trigger":true},
+    {"id":"prose","group":"prose","prompt":"Improve this ordinary email's wording: Please send the report when you can. Return only the revised email.","should_trigger":false},
+    {"id":"code","group":"code","prompt":"Write a Python function that adds two integers. Return just the code.","should_trigger":false},
+    {"id":"term","group":"term","prompt":"Explain the term skill in one sentence for an English learner; I am not asking to create or evaluate an agent skill.","should_trigger":false}
+  ]
+}

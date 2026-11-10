@@ -1,0 +1,8 @@
+{
+  "name": "shell-file-tasks",
+  "inherit_bounded_files": true,
+  "steps": 48,
+  "permissions": [
+    {"action":"shell","resource":"*","effect":"allow"}
+  ]
+}

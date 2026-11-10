@@ -1,0 +1,17 @@
+{
+  "name": "opencode-skillcraft-runner",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "run": "tsx src/main.ts"
+  },
+  "dependencies": { "@opencode/client": "2.2.6" },
+  "devDependencies": {
+    "@types/node": "22.15.30",
+    "tsx": "4.20.5",
+    "typescript": "5.9.3"
+  }
+}

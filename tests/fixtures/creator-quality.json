@@ -1,0 +1,28 @@
+{
+  "evals": [
+    {
+      "id": "author-receipt",
+      "prompt": "Create a complete OpenCode skill at outputs/receipt-normalizer/SKILL.md. Its purpose is to normalize short receipts to a final JSON object with merchant, total (number), currency (ISO code), schema_version (integer 1). A bare $ means USD; use an explicit currency code when present. Never invent a missing merchant or total: use null for missing fields, with a warnings array naming missing fields. Return JSON without fences when the new skill is used. Provide assertive but bounded activation guidance, realistic input/output examples including a missing field, and three quality cases with expectations at outputs/receipt-normalizer/evals/evals.json. Keep the behavior general rather than tied to one merchant. Do not run model benchmarks or claim user approval; we will run the created skill afterwards. All requirements are specified; write the files now.",
+      "expectations": [
+        "The delivered SKILL.md defines merchant, numeric total, ISO currency, schema_version 1, USD for bare $, null and warnings for missing fields, and JSON-only output",
+        "The instructions and examples generalize across merchants and handle both an ordinary receipt and missing data without invention",
+        "The description clearly covers receipt normalization and excludes nearby unrelated tasks",
+        "The eval file contains three realistic cases and expectations that check meaningful correctness rather than mere file presence",
+        "The output includes a native skill file"
+      ],
+      "checks": [{"text":"The output includes a native skill file","type":"exists","file":"receipt-normalizer/SKILL.md"}]
+    },
+    {
+      "id": "author-editor",
+      "prompt": "Create an OpenCode skill at outputs/brief-editor/SKILL.md for editing short support emails for busy customers. Preserve facts and commitments, use warm plain English, put the action first, avoid hype, and do not invent refunds, deadlines or promises. Include two useful before/after examples and guidance for ambiguous input. This is a subjective writing task: use human preference and optional blind A/B review, not an invented universal quality score. Add a complete review guide at outputs/brief-editor/references/review-guide.md covering how to collect feedback, inspect unwanted changes, generalize improvements and stop when the user is satisfied. Do not run model benchmarks, ask unnecessary questions, or claim a real user has approved. All requirements are specified; write these files now.",
+      "expectations": [
+        "The native skill preserves facts and commitments, leads with the action, uses warm plain English and forbids invented refunds, deadlines or promises",
+        "Two before/after examples are useful, faithful to their inputs and illustrate the intended style",
+        "The workflow handles ambiguity without inventing facts and generalizes beyond the examples",
+        "The review guide distinguishes subjective human preference from objective factual constraints, offers blind comparison and does not invent user approval or a universal score",
+        "The complete review guide is present"
+      ],
+      "checks": [{"text":"The complete review guide is present","type":"exists","file":"brief-editor/references/review-guide.md"}]
+    }
+  ]
+}
