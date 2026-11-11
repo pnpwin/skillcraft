@@ -24,7 +24,7 @@ def summarize(results):
             'accuracy': (counts['tp'] + counts['tn']) / len(valid) if valid else None}
 
 
-def run_eval(skill, evals, workspace, model, *, repeats=3, workers=1, timeout=180, profile=None, historical_baseline=None):
+def run_eval(skill, evals, workspace, model, *, repeats=3, workers=1, timeout=180, profile=None, historical_baseline=None, judge_model=None, judge_profile=None):
     skill, workspace = Path(skill).resolve(), Path(workspace).resolve()
     if repeats < 1 or workers < 1:
         raise ValueError('repeats and workers must be positive')
@@ -35,6 +35,10 @@ def run_eval(skill, evals, workspace, model, *, repeats=3, workers=1, timeout=18
         fixed_profile = workspace / 'snapshots' / 'profile.json'
         write_json(fixed_profile, read_json(profile))
         profile = fixed_profile
+    if judge_profile:
+        fixed_judge_profile = workspace / 'snapshots' / 'judge-profile.json'
+        write_json(fixed_judge_profile, read_json(judge_profile))
+        judge_profile = fixed_judge_profile
     skill_id = safe_id(skill.name)
     snapshot = workspace / 'snapshots' / skill_id
     snapshot_hash = copy_tree(skill, snapshot, skill=True, readonly=True)
@@ -46,19 +50,43 @@ def run_eval(skill, evals, workspace, model, *, repeats=3, workers=1, timeout=18
         write_json(workspace / 'historical-baseline.json', verify(snapshot, historical_baseline))
     write_json(workspace / 'manifest.json', {'schema_version': 1, 'kind': 'trigger', 'skill_id': skill_id,
                'snapshot_hash': snapshot_hash, 'model': model, 'evals': rows, 'repeats': repeats, 'timeout_seconds': timeout,
-               'fixture_hashes': fixture_hashes, 'profile_hash': digest(profile) if profile else None})
+               'fixture_hashes': fixture_hashes, 'profile_hash': digest(profile) if profile else None,
+               'judge_model': judge_model, 'judge_profile_hash': digest(judge_profile) if judge_profile else None})
     jobs = [(row, repeat) for row in rows for repeat in range(1, repeats + 1)]
     def execute(job):
         row, repeat = job
-        result = run_model(row['prompt'], workspace / f'eval-{row["id"]}' / 'natural' / f'run-{repeat:03d}', model,
+        target = workspace / f'eval-{row["id"]}' / 'natural' / f'run-{repeat:03d}'
+        result = run_model(row['prompt'], target, model,
                            mode='trigger', skill=snapshot, skill_id=skill_id, timeout=timeout, profile=profile,
-                           files=fixtures[row['id']])
-        return {'eval_id': row['id'], 'repeat': repeat, 'prompt': row['prompt'], 'should_trigger': row['should_trigger'], **result}
+                           files=fixtures[row['id']], preparation=row.get('preparation'))
+        from scripts.trigger_diagnostics import diagnose
+        diagnostics = diagnose(target, result, skill_id)
+        write_json(target / 'eval_metadata.json', {**row, 'eval_id': row['id'], 'snapshot_hash': snapshot_hash})
+        if judge_model and row.get('expectations'):
+            from scripts.grade import grade_run
+            grade = grade_run(target, row, judge_model=judge_model, judge_profile=judge_profile, timeout=timeout)
+            diagnostics['quality_status'] = 'completed' if grade['evaluation_complete'] else 'incomplete'
+            if grade['evaluation_complete'] and grade['summary']['total']:
+                diagnostics['task_correct'] = grade['summary']['failed'] == 0
+        write_json(target / 'trigger-diagnostics.json', diagnostics)
+        return {'eval_id': row['id'], 'group': row.get('group', row['id']), 'category': row.get('category', 'unspecified'),
+                'capability': row.get('capability', 'unspecified'), 'repeat': repeat, 'prompt': row['prompt'],
+                'should_trigger': row['should_trigger'], 'diagnostics': diagnostics, **result}
     with ThreadPoolExecutor(max_workers=workers) as pool:
         results = list(pool.map(execute, jobs))
     environments = [r['environment'] for r in results if r.get('environment')]
     signatures = {(str(e['background']), str(e['plugins']), e['configuration_fingerprint']) for e in environments}
     summary = summarize(results)
+    summary.update(unique_cases=len(rows), unique_groups=len({row.get('group', row['id']) for row in rows}), repeats=repeats,
+                   observed_loads=sum(r['diagnostics']['skill_loaded'] for r in results),
+                   loads_with_terminal_error=sum(r['diagnostics']['skill_loaded'] and r['status'] != 'completed' for r in results),
+                   scoped_cli_after_load=sum(r['diagnostics']['scoped_cli_after_load'] is True for r in results),
+                   task_correct=sum(r['diagnostics']['task_correct'] is True for r in results),
+                   loaded_and_correct=sum(r['diagnostics']['skill_loaded'] and r['diagnostics']['task_correct'] is True for r in results),
+                   loaded_cli_and_correct=sum(r['diagnostics']['scoped_cli_after_load'] is True and r['diagnostics']['task_correct'] is True for r in results),
+                   quality_unknown=sum(r['diagnostics']['task_correct'] is None for r in results),
+                   quality_errors=sum(r['diagnostics']['quality_status'] == 'incomplete' for r in results),
+                   selection_denominator='completed executions with known successful-load observation; errors excluded and separately counted')
     summary['environment_consistent'] = len(signatures) <= 1
     summary['controlled'] = (len(environments) == len(results) and bool(environments)
                              and all(e['controlled'] for e in environments) and len(signatures) == 1)
@@ -80,11 +108,14 @@ def main():
     p.add_argument('--workspace', type=Path, required=True)
     p.add_argument('--repeats', type=int, default=3)
     p.add_argument('--workers', type=int, default=1)
+    p.add_argument('--judge-model', help='Optional independent task grading, separate from trigger counts')
+    p.add_argument('--judge-profile', type=Path)
     add_runtime_args(p)
     a = p.parse_args()
-    report = run_eval(a.skill, a.evals, a.workspace, a.model, repeats=a.repeats, workers=a.workers, timeout=a.timeout, profile=a.profile)
+    report = run_eval(a.skill, a.evals, a.workspace, a.model, repeats=a.repeats, workers=a.workers, timeout=a.timeout, profile=a.profile,
+                      judge_model=a.judge_model, judge_profile=a.judge_profile)
     print(__import__('json').dumps(report['summary'], indent=2))
-    return 1 if report['summary']['errors'] or not report['summary']['environment_consistent'] else 0
+    return 1 if report['summary']['errors'] or report['summary']['quality_errors'] or not report['summary']['environment_consistent'] else 0
 
 
 if __name__ == '__main__':

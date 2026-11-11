@@ -53,21 +53,25 @@ def get_mime_type(path: Path) -> str:
     return mime or "application/octet-stream"
 
 
-def find_runs(workspace: Path) -> list[dict]:
+def find_runs(workspace: Path, selection=None) -> list[dict]:
     """Recursively find directories that contain an outputs/ subdirectory."""
     runs: list[dict] = []
-    _find_runs_recursive(workspace, workspace, runs)
+    if selection is not None:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from scripts.grading_store import load_selection
+        selection = load_selection(workspace, selection)
+    _find_runs_recursive(workspace, workspace, runs, selection)
     runs.sort(key=lambda r: (str(r.get("eval_id", "")), r["logical_id"]))
     return runs
 
 
-def _find_runs_recursive(root: Path, current: Path, runs: list[dict]) -> None:
+def _find_runs_recursive(root: Path, current: Path, runs: list[dict], selection=None) -> None:
     if not current.is_dir():
         return
 
     outputs_dir = current / "outputs"
     if outputs_dir.is_dir():
-        run = build_run(root, current)
+        run = build_run(root, current, selection)
         if run:
             runs.append(run)
         return
@@ -75,10 +79,10 @@ def _find_runs_recursive(root: Path, current: Path, runs: list[dict]) -> None:
     skip = {"node_modules", ".git", "__pycache__", "skill", "inputs", "snapshots", "judge", "optimizer", "candidates", "selected"}
     for child in sorted(current.iterdir()):
         if child.is_dir() and not child.is_symlink() and child.name not in skip:
-            _find_runs_recursive(root, child, runs)
+            _find_runs_recursive(root, child, runs, selection)
 
 
-def build_run(root: Path, run_dir: Path) -> dict | None:
+def build_run(root: Path, run_dir: Path, selection=None) -> dict | None:
     """Build a run dict with prompt, outputs, and grading data."""
     prompt = ""
     eval_id = None
@@ -138,6 +142,22 @@ def build_run(root: Path, run_dir: Path) -> dict | None:
             if grading:
                 break
 
+    history = []
+    attempt_id = None
+    execution_run_id = run_id
+    if selection is not None:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from scripts.grading_store import read_grading
+        chosen = selection['runs'][logical_id]
+        grading, _, provenance = read_grading(run_dir, chosen['selected'])
+        attempt_id = provenance['attempt_id'] if provenance else 'legacy'
+        run_id = str(run_id) + '@' + attempt_id
+        for item in dict.fromkeys([chosen['selected'], *chosen.get('history', []), 'legacy']):
+            if item == 'legacy' and not (run_dir / 'grading.json').exists():
+                continue
+            g, directory, m = read_grading(run_dir, item, allow_incomplete=True)
+            history.append({'attempt_id': m['attempt_id'] if m else 'legacy', 'status': g.get('status'), 'path': str(directory)})
+
     return {
         "id": run_id,
         "logical_id": logical_id,
@@ -149,6 +169,9 @@ def build_run(root: Path, run_dir: Path) -> dict | None:
         "eval_id": eval_id,
         "outputs": output_files,
         "grading": grading,
+        "execution_run_id": execution_run_id,
+        "grading_attempt_id": attempt_id,
+        "grading_history": history,
     }
 
 
@@ -333,6 +356,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
         previous: dict[str, dict],
         benchmark_path: Path | None,
         *args,
+        selection=None,
         **kwargs,
     ):
         self.workspace = workspace
@@ -340,12 +364,13 @@ class ReviewHandler(BaseHTTPRequestHandler):
         self.feedback_path = feedback_path
         self.previous = previous
         self.benchmark_path = benchmark_path
+        self.selection = selection
         super().__init__(*args, **kwargs)
 
     def do_GET(self) -> None:
         if self.path == "/" or self.path == "/index.html":
             # Regenerate HTML on each request (re-scans workspace for new outputs)
-            runs = find_runs(self.workspace)
+            runs = find_runs(self.workspace, self.selection)
             benchmark = None
             if self.benchmark_path and self.benchmark_path.exists():
                 try:
@@ -384,7 +409,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(length)
             try:
                 data = json.loads(body)
-                save_feedback(self.feedback_path, data, find_runs(self.workspace))
+                save_feedback(self.feedback_path, data, find_runs(self.workspace, self.selection))
                 resp = b'{"ok":true}'
                 self.send_response(200)
             except (json.JSONDecodeError, OSError, ValueError) as e:
@@ -408,6 +433,8 @@ def main() -> None:
     parser.add_argument("--port", "-p", type=int, default=0, help="Server port (default: choose a free port)")
     parser.add_argument('--no-browser', action='store_true')
     parser.add_argument('--import-feedback', type=Path)
+    parser.add_argument('--selection', type=Path, help='Explicit grading selection; use SkillCraft virtualenv')
+    parser.add_argument('--feedback-output', type=Path, help='Separate feedback path for selected historical evidence')
     parser.add_argument("--skill-name", "-n", type=str, default=None, help="Skill name for header")
     parser.add_argument(
         "--previous-workspace", type=Path, default=None,
@@ -428,14 +455,22 @@ def main() -> None:
         print(f"Error: {workspace} is not a directory", file=sys.stderr)
         sys.exit(1)
 
-    runs = find_runs(workspace)
+    if args.selection and not args.static and not args.feedback_output:
+        parser.error('--selection requires --static or a separate --feedback-output')
+    for path in [args.static, args.feedback_output]:
+        if args.selection and path and path.resolve().is_relative_to(workspace):
+            parser.error('Selected historical reviews must write outside the source workspace')
+    runs = find_runs(workspace, args.selection)
     if not runs:
         print(f"No runs found in {workspace}", file=sys.stderr)
         sys.exit(1)
 
     skill_name = args.skill_name or workspace.name.replace("-workspace", "")
-    feedback_path = workspace / "feedback.json"
+    feedback_path = args.feedback_output.resolve() if args.feedback_output else workspace / "feedback.json"
     if args.import_feedback:
+        if args.selection and not args.feedback_output:
+            parser.error('Selected review imports require a separate --feedback-output')
+        feedback_path.parent.mkdir(parents=True, exist_ok=True)
         save_feedback(feedback_path, json.loads(args.import_feedback.read_text()), runs)
         print(f'Imported feedback: {feedback_path}')
         return
@@ -460,7 +495,7 @@ def main() -> None:
         sys.exit(0)
 
     port = args.port
-    handler = partial(ReviewHandler, workspace, skill_name, feedback_path, previous, benchmark_path)
+    handler = partial(ReviewHandler, workspace, skill_name, feedback_path, previous, benchmark_path, selection=args.selection)
     try:
         server = HTTPServer(("127.0.0.1", port), handler)
     except OSError:

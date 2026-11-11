@@ -176,7 +176,7 @@ async function run(r: Request) {
     const connection = await connect();
     client = connection.client;
     const info = await client.server.info();
-    if (info.version !== '2.2.6') throw Error(`Unsupported OpenCode ${info.version}; expected 2.2.6`);
+    if (info.version !== '2.2.7') throw Error(`Unsupported OpenCode ${info.version}; expected 2.2.7`);
     const response = await fetch(new URL('/openapi.json', connection.url), { headers: connection.headers, signal: AbortSignal.timeout(15000) });
     if (!response.ok) throw Error(`OpenAPI HTTP ${response.status}`);
     const spec = await response.json() as { paths: Record<string, unknown> };

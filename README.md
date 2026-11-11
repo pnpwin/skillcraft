@@ -13,7 +13,7 @@ OpenCode plugin or a published npm package.
 
 ## Requirements
 
-- OpenCode server **2.2.6**, with an accessible configured model.
+- OpenCode server **2.2.7**, with an accessible configured model.
 - Python **3.11+** and the dependencies in `requirements.txt`.
 - Node.js **22+** and the locked dependencies under `runner/`.
 - The runner and OpenCode server must share the same absolute filesystem paths.
@@ -90,7 +90,7 @@ For installations migrating from this project's former `skill-creator` identity:
 
 - `SKILL.md`, `references/`: authoring and evaluation methodology.
 - `scripts/`: validation, evaluation, optimization, reporting and packaging.
-- `runner/`: OpenCode 2.2.6 client integration.
+- `runner/`: OpenCode 2.2.7 client integration.
 - `agents/`: independent judge prompt resources.
 - `eval-viewer/`, `assets/`: review interfaces and templates.
 - `tests/`: regression tests and representative fixtures.

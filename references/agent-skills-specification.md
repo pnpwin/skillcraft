@@ -242,7 +242,8 @@ valid for changed instructions, resources or execution conditions.
 ## OpenCode-specific interpretation
 
 Primary runtime source: <https://opencode.ai/docs/skills/>; implementation support
-is currently bounded to the verified 2.2.6 runner/client contract.
+targets the pinned 2.2.7 runner/client contract. Each release still needs fresh
+runtime evidence; historical 2.2.6 probes below are not a new-version acceptance.
 
 OpenCode derives the ID from the path and treats `name` as a display label; runtime
 frontmatter may be optional and descriptions may exceed 1024 characters. A release

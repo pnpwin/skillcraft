@@ -129,8 +129,14 @@ noted. UTF-8 paths passed to the runner are absolute. NaN/Infinity are invalid.
 ```
 
 - IDs are unique filesystem-safe strings/integers, normalized to strings.
-- Files are skill-relative (absolute paths are also accepted). They appear under
-  executor `inputs/` using basenames; collisions are rejected.
+- Legacy string files are skill-relative (canonical absolute paths also accepted)
+  and retain their basename under executor `inputs/`. For a project tree use
+  `{"source":"evals/files/root/package.json","destination":"root/package.json"}`.
+  The optional `role` is `fixture` (default), `artifact`, or `evidence`. Explicit
+  destinations survive snapshots, optimizer loops and runtime copying. Unsafe paths,
+  symlinks, duplicate/prefix destinations and case/Unicode-fold collisions are rejected.
+  `input-manifest.json` records transport_version 2, source, destination, role and hash.
+  Judges receive `inputs/artifacts/<relative>` and separate `inputs/evidence/` files.
 - `expectations` is canonical; legacy `assertions` is accepted on input.
 - A deterministic check maps to exactly one expectation by identical `text`.
 - Checks: `exists`, `contains`, `equals` (trimmed text), `json_equals` (optional
@@ -219,7 +225,43 @@ executor is their sum when every component is known. Child messages/usage live i
 children/<session-id>.json. Effective permissions, steps and delegation choices are
 saved in profile.json and run.profile; experiment manifests retain the profile hash.
 
+Profiles optionally accept `cli_tools: [{id, executable, environment}]`. IDs are
+unique safe identifiers; executable is an installed absolute executable path;
+environment contains only non-secret string settings. `{state}` and `{project}`
+expand per execution. `cli-state.json` records launcher paths and observations
+(`observed` or `unverified`); this is scoped-launcher evidence, not sandbox evidence.
+Use actual tool cache/database probes before relying on a new tool's state settings.
+
 ## Grading
+
+`json_multiset_equals` accepts the same file/path fields as `json_equals` and an
+expected JSON list. It compares elements without ordering, preserving multiplicity
+and JSON types (true differs from 1). Missing/invalid output fails the criterion;
+a non-list expected value is a rubric configuration error. Use it for exhaustive
+sets where duplicates must not silently disappear. Process/truncation claims still
+require actual execution evidence, not only deterministic self-report fields.
+
+### Evidence projection v1
+
+The Python bridge derives `evidence/` from immutable `messages.json`; legacy
+`transcript.md` remains untouched. `evidence/transcript.md` leads to bounded index
+pages and lossless full-message parts (2400 Unicode characters each, at most 9600
+UTF-8 bytes). The manifest records message IDs/order, character ranges, part hashes,
+byte counts and source hash. Reassembling parts reproduces each canonical message
+including inputs, outputs, errors, user and final assistant text. No model summary
+replaces evidence. The grader verifies source/parts before calling a judge, then
+copies all referenced pages/parts under `inputs/evidence/`; legacy runs still use
+their raw transcript. Grading records the projection version and manifest hash.
+Compatibility hashes cover the renderer and derived evidence. The size bound is a
+tested reading convenience, not a guarantee for every client or arbitrary artifact.
+
+Grader contract 2 supplies task/expected_output, all_expectations,
+grade_expectations, deterministic_results, artifacts, transcript_path and compliance.
+The judge returns only expectations and eval_feedback; the orchestrator computes
+summary and persists results. `grader_contract` records version and prompt hash.
+Judge mode uses read-oriented system instructions and denies edit tools. Listed
+artifact notes are evidence, not authoritative timing/usage. A valid response never
+overrides a non-completed judge execution status.
 
 ```json
 {
@@ -235,7 +277,60 @@ explains why; a judge failure is never a failed expectation. An empty rubric has
 unknown pass rate. The judge returns exact expectation strings, boolean verdicts
 and nonempty evidence, validated before aggregation.
 
+Additive partial-grading fields: `pending_expectations`, `coverage` (graded/total/
+pending), `partial_summary` (known passed/failed/graded), `failure_stage`, and
+`evaluation_complete`. Completed deterministic verdicts are checkpointed even when
+a later check or judge fails. Partial grading retains `summary:null`; ungraded
+criteria are not false verdicts. Complete verdicts with required critique failure
+keep their summary but `evaluation_complete:false`; aggregate quality rates exclude
+these incomplete evaluations. Executor completion and evaluation completion are
+reported separately. Legacy errors lacking partial evidence remain unknown.
+
 ## Benchmark and manifest
+
+Quality manifests include `pilot_policy` (case IDs, configurations, max_in_flight,
+stop_threshold), and persisted `queue.jobs` states. `pilot/` is a separate phase
+with its own manifest, benchmark and static review. Main `pilot_summary` records
+status, resources and failure/repair context. `scheduling` distinguishes planned,
+started, pipeline_completed, not_started_after_stop and missing_unexpected. Missing
+or stopped work keeps the source experiment incomplete; task FAIL alone is not a
+technical stop. Queue failure fingerprints normalize invocation-specific paths/IDs.
+
+### Immutable grading attempts and explicit selection
+
+The first grade retains `run/grading.json` and `run/judge/` for legacy consumers,
+with a new `grading-manifest.json` and frozen `rubric.json`. A second invocation
+cannot overwrite it. `grade.py RUN --output NEW_ATTEMPT --rubric ROW_JSON` reserves
+a new directory **outside** the source execution, records execution/task/rubric,
+model/profile/renderer identities, and seals the result hash. A changed task,
+fixtures or expected output contract requires a new execution. `required_evidence`
+can name source-relative files necessary for a revised rubric; missing files reject
+reuse. Incomplete attempts are retained, never selected automatically. Regrading
+does not refresh OpenCode runtime acceptance of an older execution.
+
+`aggregate_benchmark.py SOURCE --selection SELECTION --output NEW_REPORT` writes
+outside SOURCE. Selection version 1 contains exact `source_workspace`, a nonempty
+predeclared `rule`, and `runs: {relative_run: {selected: absolute_attempt_or_legacy,
+history: [absolute_attempt_or_legacy]}}`. Every source run must be explicit. The
+default without selection reads the first legacy grade, never the newest/best one.
+An explicit selection may set `included:false` with a nonempty `reason`. Such rows
+remain in the report and source error/resource totals, but not selected summary
+statistics. Fix the inclusion rule before inspecting scores. Empty selections are
+invalid; unmatched pairs are listed. Source-planned and selected-planned counts
+are separate. An excluded source failure is still disclosed as an incomplete source
+experiment, never silently converted to success.
+Selected pairs need matching known rubric hashes and grading conditions (judge,
+profile, prompt, projection version and runner). Missing/incompatible rubrics
+or judge environment identities (server, control status, background skills, plugins,
+configuration fingerprint; excluding incidental location diagnostics)
+block a comparable quality delta. Source evidence/result/rubric hashes are checked.
+Selected judge tokens and all listed attempt tokens are separate; executor is
+counted once. Unknown usage stays null; attempt path aliases are deduplicated.
+
+The viewer accepts `--selection`, shows selected and listed historical attempts,
+and binds feedback IDs to execution plus attempt. Use `--static` outside SOURCE
+or a separate `--feedback-output` for a live/imported review. Selection support
+uses SkillCraft's virtualenv. Old feedback cannot approve a newly selected grade.
 
 ### Additive critique contract (schema version 1)
 
@@ -259,6 +354,33 @@ eval and repetition, rather than comparing arbitrary directory order. Execution
 and grading status counts are shown alongside pass rate and completion rate.
 
 ## Trigger report and optimizer history
+
+Trigger rows may carry `category`, `capability` and `preparation`. Preparation is a
+list of `{tool, args, cwd}` steps using configured CLI launcher IDs and existing
+relative directories under inputs/. It runs at the final per-execution root before
+model observation, with a 60-second bound per command. Full stdout/stderr, exit code
+and elapsed setup time are saved in `preparation.json`; failure means
+`preparation_error`, not a false negative. Preparation must preserve input hashes.
+Do not distribute an index tied to another absolute project root.
+
+Launcher records distinguish `phase:preparation` from `phase:model` and timestamp
+actual invocation starts. `trigger-diagnostics.json` separately records successful
+skill events, model CLI use, use after load (null if timing is unavailable), terminal
+status/reason and independent task correctness. The `--judge-model` option grades
+rows with expectations; quality does not change the trigger confusion matrix.
+Non-completed executions are excluded from that matrix even when an observed load
+is retained separately. Reports count unique cases/groups, repeats, errored loads,
+practical uses and unknown quality. Preparation costs/time are outside model usage.
+
+Quality and aggregate CLIs print a bounded human summary by default. Pass `--json`
+for full machine-readable stdout; Python return values and persisted benchmark JSON
+retain the complete report. `summary.md` points to full evidence and states unique
+case/repetition counts, errors, selection and scope. `provenance` binds the source
+manifest/candidate/profiles/fixtures and rows identify execution and grading attempt.
+`resources` separates source and selected runs, executor, selected/all-listed judge
+attempts and maintenance, with known sums/counts and null totals when incomplete.
+Optional `pilot_summary` in the manifest is copied to `benchmark.pilot` separately;
+pilot runs are not counted as comparative executions. Unknown telemetry is not zero.
 
 ### Paired resource comparisons (additive version 1)
 

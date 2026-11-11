@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
 """Repeated, paired quality evaluation using native skill attachments."""
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+import subprocess
 from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.runtime import add_runtime_args, run_model
+from scripts.runtime import add_runtime_args, run_model, profile_settings
 from scripts.compliance import require_standard, assess
 from scripts.utils import copy_tree, digest, load_evals, read_json, safe_id, snapshot_fixtures, tree_hash, write_json
+from scripts.reporting import print_report
 
 
-def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previous=None, timeout=180, profile=None, judge_model=None, judge_profile=None, historical_baseline=None):
+def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previous=None, timeout=180, profile=None, judge_model=None, judge_profile=None, historical_baseline=None, pilot_ids=None, stop_threshold=2):
     skill, workspace = Path(skill).resolve(), Path(workspace).resolve()
-    if repeats < 1 or workers < 1:
-        raise ValueError('repeats and workers must be positive')
+    if repeats < 1 or workers < 1 or stop_threshold < 1:
+        raise ValueError('repeats, workers and stop_threshold must be positive')
     workspace.mkdir(parents=True, exist_ok=False)
     rows = load_evals(evals)
+    pilot_ids = list(dict.fromkeys(pilot_ids or [rows[0]['id']]))
+    if not set(pilot_ids) <= {row['id'] for row in rows}:
+        raise ValueError('Unknown pilot case ID')
+    profile_settings(profile, safe_id(skill.name))
+    profile_settings(judge_profile)
     fixtures, fixture_hashes = snapshot_fixtures(rows, skill, workspace)
     if profile:
         fixed_profile = workspace / 'snapshots' / 'profile.json'
@@ -47,39 +53,93 @@ def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previou
                 'candidate_hash': candidate_hash, 'evals': rows, 'controlled_requested': profile is None,
                 'fixture_hashes': fixture_hashes, 'profile_hash': digest(profile) if profile else None,
                 'judge_profile_hash': digest(judge_profile) if judge_profile else None,
-                'runtime': {'opencode': '2.2.6', 'client': '2.2.6', 'runner': '1.0.0'}, 'timeout_seconds': timeout}
+                'runtime': {'opencode': '2.2.7', 'client': '2.2.7', 'runner': '1.0.0'}, 'timeout_seconds': timeout,
+                'pilot_policy': {'case_ids': pilot_ids, 'selection': 'explicit' if pilot_ids != [rows[0]['id']] else 'first case or explicitly selected first',
+                                 'configurations': list(configs), 'stop_threshold': stop_threshold, 'max_in_flight': workers}}
     write_json(workspace / 'manifest.json', manifest)
-    jobs = []
-    for row in rows:
-        metadata = {'eval_id': row['id'], **row}
-        write_json(workspace / f'eval-{row["id"]}' / 'eval_metadata.json', metadata)
-        # Input paths are skill-relative, matching the upstream eval contract.
-        files = fixtures[row['id']]
-        for config, snapshot in configs.items():
-            for repeat in range(1, repeats + 1):
-                target = workspace / f'eval-{row["id"]}' / config / f'run-{repeat:03d}'
-                jobs.append((row, snapshot, files, target, config))
+    def make_jobs(root, cases, count):
+        jobs = []
+        for row in cases:
+            write_json(root / f'eval-{row["id"]}' / 'eval_metadata.json', {'eval_id': row['id'], **row})
+            for config, snapshot in configs.items():
+                for repeat in range(1, count + 1):
+                    key = f'eval-{row["id"]}/{config}/run-{repeat:03d}'
+                    jobs.append((key, (row, snapshot, fixtures[row['id']], root / key, config)))
+        return jobs
+
     def execute(job):
         row, snapshot, files, target, config = job
-        result = run_model(row['prompt'], target, model, skill=snapshot, skill_id=skill_id,
-                           attach=snapshot is not None, files=files, timeout=timeout, profile=profile)
-        write_json(target / 'eval_metadata.json', {'eval_id': row['id'], **row, 'configuration': config,
-                   'snapshot_hash': manifest['configurations'][config]['snapshot_hash']})
-        from scripts.grade import grade_run
-        grade_run(target, row, judge_model=judge_model, timeout=timeout, judge_profile=judge_profile)
-        return result
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        results = list(pool.map(execute, jobs))
-    # Detect environmental drift across successful preflights.
-    environments = [r['environment'] for r in results if r.get('environment')]
-    signatures = {(str(e['background']), str(e['plugins']), e['configuration_fingerprint']) for e in environments}
-    manifest['environment_consistent'] = len(signatures) <= 1
-    manifest['controlled'] = (len(environments) == len(results) and bool(environments)
-                               and all(e['controlled'] for e in environments) and len(signatures) == 1)
-    manifest['compliance'] = {config: [assess(snapshot, job[3]) for job in jobs if job[4] == config]
+        stage, result = 'executor', {}
+        try:
+            result = run_model(row['prompt'], target, model, skill=snapshot, skill_id=skill_id,
+                               attach=snapshot is not None, files=files, timeout=timeout, profile=profile,
+                               preparation=row.get('preparation'))
+            write_json(target / 'eval_metadata.json', {'eval_id': row['id'], **row, 'configuration': config,
+                       'snapshot_hash': manifest['configurations'][config]['snapshot_hash']})
+            stage = 'grading'
+            from scripts.grade import grade_run
+            grade = grade_run(target, row, judge_model=judge_model, timeout=timeout, judge_profile=judge_profile)
+            complete = result['status'] == 'completed' and grade['evaluation_complete']
+            return {'complete': complete, 'run': result,
+                    'stage': 'executor' if result['status'] != 'completed' else grade.get('failure_stage', 'grading'),
+                    'status': result['status'] if result['status'] != 'completed' else grade['eval_feedback']['status'] if grade['status'] == 'completed' and not complete else grade['status'],
+                    'error': result.get('error') or grade.get('error') or grade['eval_feedback'].get('reason')}
+        except Exception as error:
+            write_json(target / 'orchestration-error.json', {'stage': stage, 'error': str(error)})
+            if not (target / 'run.json').exists():
+                write_json(target / 'run.json', {'status': 'orchestration_error', 'error': str(error)})
+            return {'complete': False, 'run': result, 'stage': stage, 'status': type(error).__name__, 'error': str(error)}
+
+    from scripts.aggregate_benchmark import aggregate
+    from scripts.scheduling import bounded_dispatch
+
+    def phase(root, phase_manifest, jobs, threshold):
+        def persist(queue):
+            phase_manifest['queue'] = queue
+            write_json(root / 'manifest.json', phase_manifest)
+        outcomes, queue = bounded_dispatch(jobs, execute, workers=workers, threshold=threshold, persist=persist)
+        results = [o.get('run', {}) for o in outcomes.values()]
+        environments = [r['environment'] for r in results if r.get('environment')]
+        signatures = {(str(e['background']), str(e['plugins']), e['configuration_fingerprint']) for e in environments}
+        phase_manifest['environment_consistent'] = len(signatures) <= 1
+        phase_manifest['controlled'] = (len(environments) == len(results) and bool(environments)
+                                       and all(e['controlled'] for e in environments) and len(signatures) == 1)
+        persist(queue)
+        try:
+            report = aggregate(root)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            phase_manifest['report_error'] = {'stage': 'report', 'error': str(error)}
+            write_json(root / 'manifest.json', phase_manifest)
+            report = {'errors': 1, 'validation_errors': [str(error)], 'resources': None}
+        return report
+
+    pilot_root = workspace / 'pilot'
+    pilot_rows = [row for row in rows if row['id'] in pilot_ids]
+    pilot_manifest = {**manifest, 'phase': 'pilot', 'repeats': 1, 'evals': pilot_rows}
+    pilot_report = phase(pilot_root, pilot_manifest, make_jobs(pilot_root, pilot_rows, 1), 1)
+    pilot_ok = not pilot_report['errors'] and not pilot_report['validation_errors']
+    review_error = pilot_manifest.get('report_error')
+    if pilot_ok:
+        review = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / 'eval-viewer/generate_review.py'),
+                                 str(pilot_root), '--static', str(pilot_root / 'review.html')], capture_output=True, text=True)
+        (pilot_root / 'review.log').write_text(review.stdout + review.stderr)
+        if review.returncode or not (pilot_root / 'review.html').is_file():
+            pilot_ok = False
+            review_error = 'Pilot review generation failed; see pilot/review.log'
+    manifest['pilot_summary'] = {'status': 'completed' if pilot_ok else 'error', 'root': str(pilot_root),
+                                 'resources': pilot_report['resources'], 'error': review_error,
+                                 'queue': pilot_manifest['queue'], 'repair': None if pilot_ok else
+                                 'Repair the recorded failing stage and rerun in a new workspace; main repeats were not dispatched.'}
+    jobs = make_jobs(workspace, rows, repeats)
+    if pilot_ok:
+        phase(workspace, manifest, jobs, stop_threshold)
+    else:
+        manifest['queue'] = {'jobs': {key: {'status': 'not_started_after_stop'} for key, _ in jobs},
+                             'stop': {'stage': 'pilot', 'reason': review_error or 'Pilot pipeline incomplete'}}
+    manifest['compliance'] = {config: [assess(snapshot, job[3]) for _, job in jobs
+                                      if job[4] == config and (job[3] / 'run.json').exists()]
                               for config, snapshot in configs.items() if snapshot}
     write_json(workspace / 'manifest.json', manifest)
-    from scripts.aggregate_benchmark import aggregate
     report = aggregate(workspace)
     report['compliance'] = manifest['compliance']
     write_json(workspace / 'benchmark.json', report)
@@ -96,12 +156,16 @@ def main():
     p.add_argument('--workers', type=int, default=1)
     p.add_argument('--judge-model')
     p.add_argument('--judge-profile', type=Path)
+    p.add_argument('--json', action='store_true', help='Print full JSON; default output is a concise summary')
+    p.add_argument('--pilot-case', action='append', help='Representative case ID; repeat for distinct capabilities. Default: first case')
+    p.add_argument('--stop-threshold', type=int, default=2, help='Stop dispatch after this many matching infrastructure errors')
     add_runtime_args(p)
     args = p.parse_args()
     report = run_quality(args.skill, args.evals, args.workspace, args.model, repeats=args.repeats,
                         workers=args.workers, previous=args.previous, timeout=args.timeout,
-                        profile=args.profile, judge_model=args.judge_model, judge_profile=args.judge_profile)
-    print(__import__('json').dumps(report, ensure_ascii=False, indent=2))
+                         profile=args.profile, judge_model=args.judge_model, judge_profile=args.judge_profile,
+                         pilot_ids=args.pilot_case, stop_threshold=args.stop_threshold)
+    print_report(report, args.workspace / 'benchmark.json', as_json=args.json)
     return 1 if report['errors'] or report['validation_errors'] else 0
 
 

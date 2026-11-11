@@ -30,7 +30,7 @@ RUBRIC = {
 }
 
 PLATFORM_CONTRACT = {
-    'version': 'OpenCode 2.2.6',
+    'version': 'OpenCode 2.2.7',
     'source': 'https://opencode.ai/docs/skills/',
     'verified': '2026-11-10',
     'identity': 'Runtime only: file path determines skill ID; frontmatter name is a display label. Spaces/capitals and directory mismatch are accepted by the loader, but fail the separate Agent Skills contract.',

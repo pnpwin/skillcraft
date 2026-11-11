@@ -173,19 +173,14 @@ def parse_json_response(text):
 
 def snapshot_fixtures(rows, skill, workspace):
     """Freeze all fixture bytes before any workers or model calls are started."""
+    from scripts.inputs import copy_inputs
     files, hashes = {}, {}
     for row in rows:
         files[row['id']], hashes[row['id']] = [], {}
-        for relative in row.get('files', []):
-            source = Path(skill) / relative
-            if source.is_symlink() or not source.is_file():
-                raise ValueError(f'Invalid fixture: {source}')
-            target = Path(workspace) / 'snapshots' / 'fixtures' / row['id'] / source.name
-            if target.exists():
-                raise ValueError(f'Duplicate fixture basename: {source.name}')
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
-            target.chmod(0o444)
-            files[row['id']].append(target)
-            hashes[row['id']][source.name] = digest(target)
+        originals = row.get('files', [])
+        copied = copy_inputs(originals, Path(workspace) / 'snapshots' / 'fixtures' / row['id'], base=skill, readonly=True)
+        for original, entry in zip(originals, copied):
+            files[row['id']].append({'source': entry['copied'], 'destination': entry['destination'], 'role': entry['role']}
+                                    if isinstance(original, dict) else Path(entry['copied']))
+            hashes[row['id']][entry['destination']] = entry['sha256']
     return files, hashes

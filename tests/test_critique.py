@@ -47,14 +47,19 @@ class Critique(unittest.TestCase):
         self.assertEqual(r['eval_feedback']['status'], 'completed')
 
     def test_explicit_judge_profile_is_forwarded(self):
-        r = self.run_case({'expectations': [], 'eval_feedback': {'issues': []}}, profile=Path('/explicit/judge-profile.json'))
-        self.assertEqual(r['eval_feedback']['status'], 'completed')
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / 'judge-profile.json'
+            write_json(profile, {'inherit_bounded_files': True})
+            r = self.run_case({'expectations': [], 'eval_feedback': {'issues': []}}, profile=profile)
+            self.assertEqual(r['eval_feedback']['status'], 'completed')
 
     def test_bad_critique_preserves_verdict(self):
         r = self.run_case({'expectations': [], 'eval_feedback': {'issues': 'invalid'}})
         self.assertEqual(r['summary']['pass_rate'], 1)
         self.assertEqual(r['status'], 'completed')
         self.assertEqual(r['eval_feedback']['status'], 'error')
+        self.assertFalse(r['evaluation_complete'])
+        self.assertEqual(r['pending_expectations'], [])
 
     def test_no_judge_does_not_claim_review(self):
         r = self.run_case({}, model=None)

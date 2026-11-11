@@ -880,6 +880,13 @@
       let html = '<div style="padding: 1rem;">';
       html += '<p>Grading: ' + escapeHtml(grading.status || 'legacy') + '</p>';
       if (grading.error) html += '<p>' + escapeHtml(grading.error) + '</p>';
+      if (grading.coverage) html += '<p>Evaluated: ' + grading.coverage.graded + ' / ' + grading.coverage.total +
+        '; ungraded: ' + grading.coverage.pending + '; evaluation complete: ' + (grading.evaluation_complete ? 'yes' : 'no') + '</p>';
+      if (grading.pending_expectations?.length) html += '<p>Pending: ' + grading.pending_expectations.map(escapeHtml).join('; ') + '</p>';
+      if (grading.failure_stage) html += '<p>Failure stage: ' + escapeHtml(grading.failure_stage) + '</p>';
+      if (run.grading_attempt_id) html += '<p>Selected attempt: ' + escapeHtml(run.grading_attempt_id) + '</p>';
+      for (const attempt of (run.grading_history || [])) html += '<p>History: ' + escapeHtml(attempt.attempt_id) +
+        ' — ' + escapeHtml(attempt.status || 'unknown') + ' — ' + escapeHtml(attempt.path) + '</p>';
       const critique = grading.eval_feedback || {status: 'not_run', issues: []};
       html += '<section class="eval-critique"><h3>Evaluation critique</h3><p>Status: ' + escapeHtml(critique.status) + '</p>';
       if (critique.error || critique.reason) html += '<p>' + escapeHtml(critique.error || critique.reason) + '</p>';

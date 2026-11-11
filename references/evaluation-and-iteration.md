@@ -6,6 +6,59 @@ OpenCode API execution. Commands and JSON formats are in SKILL.md and schemas.md
 
 ## Choose evaluation for the task
 
+For natural triggering, include real actions on a supplied project alongside
+instruction-only requests and close negatives. Freeze labels and paraphrase groups
+before observation. Separate a ready environment, missing state with creation
+permitted, and read-only missing state: useful skill loading is not the same as
+ability to finish a search. A valid refusal to mutate read-only state is not a
+failed search. Test profiles simulate capabilities; they are not automatically
+equivalent to a user's Plan/Build agent. Prepare path-bound state only on the final
+execution root, record preparation separately, and pilot each new capability slice
+before repeats. Keep description/model/profile fixed within each slice. Report
+selection, post-load use and outcome separately; technical errors cannot become
+false negatives. A broader dataset is not a description-improvement experiment.
+
+### Grade outcomes and observed actions, not self-reports
+
+Map every criterion to a user requirement. Separate finding the result, choosing
+the correct data/index, explaining scope, and obeying explicitly required methods.
+A recommended recipe is diagnostic, not an outcome requirement unless the user
+made it mandatory. Test at least two genuinely valid approaches, a correct result
+with wrong reasoning, a false result, and a correct result obtained by violating
+an explicit constraint. Correct alternatives should earn equal outcome scores;
+wrong reasoning should lose its own criterion rather than erase a valid finding.
+Avoid replacing one recipe whitelist with another. Hide candidate/baseline labels
+from content review where practical. If disambiguating output fields changes the
+task contract, freeze a new dataset and execute again instead of regrading old work.
+
+For each criterion record the required outcome, independent oracle, evidence source
+and a plausible wrong answer that could pass. Prebuild discovery fixtures: asking
+the executor to create a known list of symbols reveals the answer and weakens the
+test. Send project sources, not oracle lists or grader files, into execution.
+Keep expected answers in orchestrator/judge metadata; inspect actual transported
+inputs and candidate resources for leaks. A custom shell profile is not a security
+barrier against arbitrary host access; report that boundary accurately.
+
+Compare complete names/records, not only counts. `json_multiset_equals` ignores
+irrelevant order while preserving duplicates and JSON types; `json_equals` remains
+appropriate when order is part of the task. Counts may supplement that comparison.
+Truncation flags and “tool executed” prose are claims: compare them with actual
+tool events/results and verify recovery of omitted information. A fabricated
+evidence.txt is not an execution log. Require a particular tool only when the task
+explicitly requests it; otherwise assess the result independently of the method.
+
+Before comparison, challenge the frozen rubric with a count-only answer, wrong
+names with the correct count, duplicates, invented tool-use prose and a correct
+alternative order/method. Reject bogus results for substantive reasons, preserve
+valid alternatives, then run the same rubric for every configuration. A stricter
+rubric is not itself evidence that the skill improved.
+
+Before freezing a rubric, review critical tool assumptions with the authoring
+guide's independent-probe checkpoint and `assets/assumptions.md`. A skill and test
+agreeing with each other is not evidence that either is correct. Derive the oracle
+from task requirements and a separately inspected fixture or observed behavior.
+Record conflicting versions and unresolved claims; only then proceed to the pilot.
+
 Discuss what success means, then choose a suitable combination:
 
 | Task | Useful evidence | Avoid |
@@ -95,6 +148,55 @@ that coincide with more failures or changed environments. Show variance and samp
 counts; a small toy test establishes plumbing, not general effectiveness.
 
 ## Human review
+
+### Make evaluation policies executable in a design review
+
+When the deliverable is an evaluation plan or rubric rather than an executed run,
+write down the actual aggregation and selection rules. “Keep partial results” and
+“use a predefined policy” are useful intentions but leave consequential choices
+undefined. Include these operational details in the delivered design:
+
+- **Completeness and denominators:** preserve established verdicts and pending
+  criteria, mark judge/required-critique errors incomplete, and exclude incomplete
+  evaluations from complete paired quality scores. Report excluded IDs/reasons and
+  coverage beside the scores; keep every planned run in completion denominators.
+  A task FAIL with complete grading remains a valid observation. Empty rubrics have
+  unknown quality. Do not silently average a partial score with complete scores.
+- **A concrete selection rule fixed before scores:** for example, compare every
+  planned configuration using rubric R2, grader G2 and environment E2; select the
+  first completed attempt satisfying those identities for each frozen execution,
+  preserving all earlier failures and costs. If any side lacks that evidence, mark
+  its pair incomplete rather than substituting an older rubric or a better-scoring
+  retry. Other rules are valid when explicit, symmetric and independent of scores.
+- **Reviewable output contract:** list required fields/artifacts and meaningful
+  validation, including missing or malformed output. A design must remain usable
+  without a future author inventing its most important policies.
+
+These details transfer across tools and datasets. Explain why the chosen rules fit
+the user's task; do not copy a sample rule when its prerequisites do not hold.
+
+Before repeated quality runs, the runner performs a separate end-to-end pilot:
+executor → artifact transport → grading → requested critique → report and static
+review. Select representative cases with repeated `--pilot-case ID`, covering the
+hardest input tree and each distinct capability/profile; the first case is the
+documented default. Pilot runs use their own manifest and one observation per
+configuration, including previous. They are excluded from comparative scores and
+reported as preparation cost. A valid negative quality verdict permits continuation;
+an infrastructure/critique/report failure stops main dispatch. Repair that stage
+and use a new workspace. Do not repair by removing the failed comparison runs.
+
+Main dispatch keeps at most `--workers` jobs active. `--stop-threshold` (default 2)
+matching technical failures stop new submissions while active jobs drain. Queue
+states distinguish planned, started, completed/error and not-started-after-stop;
+planned denominators remain fixed. Choose the policy before observing scores.
+
+When only grading infrastructure or the rubric changes, reuse sufficient frozen
+execution evidence through `grade.py RUN --output NEW_ATTEMPT --rubric ROW_JSON`.
+Keep task/fixtures/output contract unchanged, regrade every compared configuration
+under the same rubric, and select attempts explicitly in a new report. Changed
+tasks or missing observations need new executions. Preserve failed/unsealed attempts
+and their cost; do not choose a better-scoring retry or overwrite old grades. See
+schemas.md for selection, history and feedback binding.
 
 Generate the main viewer to show prompts, actual artifacts, grading, critique and
 benchmark. Use the available browser to open the printed loopback URL; otherwise

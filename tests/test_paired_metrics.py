@@ -59,7 +59,8 @@ class PairedMetrics(unittest.TestCase):
             write_json(run / 'timing.json', {'total_duration_seconds': 1})
             d = aggregate(root)['deltas']['without_skill']
             self.assertEqual(d['paired_time_seconds']['n'], 0)
-            self.assertEqual(len(d['excluded_pairs']), 1)
+            self.assertEqual(len(d['excluded_pairs']), 2)
+            self.assertTrue(any('baseline missing or excluded' in reason for reason in d['excluded_pairs']))
 
 
 if __name__ == '__main__':

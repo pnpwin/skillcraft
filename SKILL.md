@@ -4,7 +4,7 @@ description: Create, improve, and evaluate OpenCode skills. Use this skill whene
 metadata:
   opencode/autoinvoke: "true"
 license: Apache-2.0
-compatibility: Requires OpenCode 2.2.6, Python 3.11+ with requirements.txt installed, Node.js 22+ with runner dependencies installed, and an accessible configured model. Runner and server must share the same absolute filesystem paths.
+compatibility: Requires OpenCode 2.2.7, Python 3.11+ with requirements.txt installed, Node.js 22+ with runner dependencies installed, and an accessible configured model. Runner and server must share the same absolute filesystem paths.
 ---
 
 # SkillCraft for OpenCode V2
@@ -37,7 +37,7 @@ are relative to this SKILL.md, not the shell's current directory. Resolve this b
 directory before running scripts. Keep experiments in
 `<project>/.opencode/skillcraft-workspaces/<skill-id>/iteration-NNN/`.
 
-Requirements: Python 3.11+, Node 22+, OpenCode **2.2.6** running locally or at an
+Requirements: Python 3.11+, Node 22+, OpenCode **2.2.7** running locally or at an
 explicitly configured endpoint. Install once:
 
 ```sh
@@ -121,6 +121,13 @@ expected_output, and verifiable `expectations`. Add deterministic `checks` where
 possible; use a judge model for substantive criteria. Do not reward trivial output
 features when they do not demonstrate task success. Fix the rubric before comparison.
 
+For an evaluation-design deliverable, specify executable policies, not placeholders:
+which incomplete results are excluded from quality scores, which planned runs stay
+in completion denominators, and the concrete score-independent rule selecting the
+same rubric/grader/environment for every compared configuration. Include output
+schema checks and meaningful negative controls. See the evaluation guide's design
+review section for a worked policy and its limits.
+
 ## 4. Run paired quality evaluations
 
 Choose explicit executor and judge models available on this OpenCode server. For a
@@ -136,6 +143,11 @@ new skill compare `without_skill` against `with_skill`; for revisions also pass
 The runner creates fresh sessions and independent fixtures. `with_skill` uses a
 native API attachment; this measures quality after loading, not natural selection.
 Snapshots are fixed before workers run. Outputs, logs, grading and usage are saved.
+Quality CLI stdout is a concise summary; use `--json` when parsing its full report.
+An end-to-end pilot runs first for every configuration. Select representative cases
+with `--pilot-case ID` (repeat for distinct capabilities; default first case).
+Technical failures stop dispatch; valid negative quality verdicts do not. Pilot
+cost and evidence are separate from main scores. See evaluation-and-iteration.md.
 Do not edit an in-flight snapshot or reuse an experiment directory.
 
 The default bounded-files profile permits input reads, skill resources and output
@@ -199,6 +211,14 @@ The runner installs and advertises a real native skill, then records successful
 `skill` tool calls. Other tools do not end the observation. Technical errors and
 timeouts remain errors, not false negatives. Loading is not proof of following
 the skill: use quality evals for that.
+
+Include real action cases with prepared projects and close negatives. Separate
+ready, missing-but-creatable and read-only-missing capabilities. Path-bound indexes
+are prepared on the final root via explicit `preparation` steps (see schemas.md),
+not copied from another project. `--judge-model` can independently grade task
+outcomes; trigger diagnostics preserve observed loads through later failures and
+distinguish preparation from model CLI use. Pilot new capability slices before
+repeats; keep description and model/profile fixed within each slice.
 
 ## 8. Optimize the description
 

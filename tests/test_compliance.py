@@ -30,7 +30,7 @@ class Compliance(unittest.TestCase):
         self.request = {'model': {'providerID': 'test', 'id': 'model'}, 'run_id': 'run1', 'operation': 'run',
             'mode': 'quality', 'attach_skill': True, 'skill_id': 'demo-skill',
             'skill_path': str(self.installed / 'SKILL.md'), 'skill_sha256': digest(self.installed / 'SKILL.md')}
-        environment = {'server_version': '2.2.6', 'background': [], 'plugins': [], 'configuration_fingerprint': 'config',
+        environment = {'server_version': '2.2.7', 'background': [], 'plugins': [], 'configuration_fingerprint': 'config',
             'controlled': False, 'candidate': {'id': 'demo-skill', 'path': str(self.installed / 'SKILL.md')}}
         self.record = {'runner_hash': runner_hash(), 'status': 'completed', 'run_id': 'run1', 'prompt_id': 'prompt1',
             'model': self.request['model'], 'profile': {'controlled': False}, 'installed_hash': installed_hash,

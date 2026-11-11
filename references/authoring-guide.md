@@ -8,6 +8,20 @@ can find the right instructions; do not replace those instructions with summarie
 
 ## Communication
 
+### Verify consequential assumptions before drafting
+
+When correctness depends on a tool's scope, exit-code meaning, external state or
+capabilities, distinguish documentation, inspected source and observed installed
+behavior. Use `assets/assumptions.md` for those critical claims. Construct a minimal
+counterexample independently of the draft skill, record version/cwd/commands/raw
+output, and check the real tool in scoped state. Do not derive both instructions
+and the grading oracle from the same untested explanation. If documentation or
+source describes another version, retain that boundary rather than silently treating
+it as installed behavior. Unresolved claims stay unresolved. Preserve the old draft
+and rubric when correcting a claim, then repeat the affected probe before the pilot.
+This is a research checkpoint for consequential claims, not a requirement to test
+every background sentence or request permission for ordinary exploration.
+
 Skill authors range from experienced engineers to people who have never used a
 terminal. Notice the user's vocabulary and the examples they give. Explain JSON
 as a structured data format and assertions as checks when those terms are unfamiliar.

@@ -4,7 +4,7 @@
 
 Python owns datasets, snapshots, repetitions, fixture copies, grading and reports.
 Each `runtime.run_model()` starts the pinned TypeScript runner with a JSON request
-file. The runner uses `@opencode/client@2.2.6` against the OpenCode server. It owns
+file. The runner uses `@opencode/client@2.2.7` against the OpenCode server. It owns
 one fresh archived session. Executor, judge and optimizer sessions are independent.
 Prompt resources under `agents/` are not registered OpenCode agents.
 
@@ -87,7 +87,9 @@ Permissions deny by default and allow only:
 - the candidate's `skill` action and resource reads, when installed.
 
 The baseline has no candidate and cannot read its source or the grader's data.
-Input files are copied; symlinks and duplicate fixture basenames are rejected.
+Input files are copied; symlinks and colliding destinations are rejected. Legacy
+file paths retain basenames; explicit source/destination mappings preserve nested
+trees through snapshot and runtime stages (see schemas.md, transport version 2).
 Candidate copies omit evals/tests, caches, virtualenvs and node_modules. Scripts
 remain present but shell execution requires an explicit custom profile.
 
@@ -150,6 +152,28 @@ the user's global plugins just to obtain a controlled label.
 
 ## Lifecycle and durable recovery
 
+### Optional CLI state adapters
+
+A custom profile may include `cli_tools`, a list of objects with `id`, an absolute
+`executable`, and an `environment` string mapping of **non-secret** settings.
+`{state}` expands to a separate per-execution, per-tool directory; `{project}` to
+the execution Location. HOME/PATH replacement and credential settings are rejected.
+The runtime advertises an absolute launcher in the agent system instructions. The
+launcher applies environment settings in the actual server-side tool process. Merely
+setting variables on the Python/TypeScript client does not configure that process.
+
+Use the launcher for every relevant command. `--skillcraft-state` prints its scoped
+settings; inspect the real CLI's cache/database path as a separate end-to-end probe.
+`cli-state.json` records configured settings and observed invocations; no invocation
+means `unverified`. Observed does not mean an OS sandbox or that arbitrary commands
+cannot bypass the launcher. Custom profiles remain `controlled:false`.
+
+Declare external state before live runs: caches/config/data, GC, background workers
+and network prerequisites. Prefer the CLI's supported state variables, not a global
+HOME change. Keep tool-specific settings in the experiment profile, outside the
+generic runner. Preserve execution state for diagnosis; clean only owned paths after
+saving evidence and verifying no owned jobs remain. Do not restart the shared server.
+
 1. Preflight server/version, Location and catalog.
 2. Create session with explicit agent, model, permissions and run metadata.
 3. Archive it and submit one prompt; save session and prompt IDs immediately.
@@ -202,6 +226,10 @@ One repetition has unknown sample standard deviation, not zero variance.
 
 Every script supports `--help` and can be invoked by absolute path from any cwd.
 All experiment destinations must be new; this prevents accidental overwrite.
+Quality/aggregate commands default to a short human summary and save full JSON plus
+`summary.md`. Automation that consumes stdout must pass `--json`. API callers still
+receive the full Python report object. Explicit grading selection and report outputs
+preserve historical source workspaces; see schemas.md before composing summaries.
 
 ```sh
 npm --prefix "$SKILLCRAFT/runner" run check

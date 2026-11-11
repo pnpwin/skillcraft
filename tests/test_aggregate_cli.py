@@ -26,7 +26,7 @@ class AggregateCLI(unittest.TestCase):
                         'status': 'error' if scenario == 'grading_error' else 'completed',
                         'eval_feedback': {'required': scenario == 'critique_error', 'status': 'error' if scenario == 'critique_error' else 'not_run'},
                         'summary': {'pass_rate': 0 if scenario == 'quality_fail' else 1}})
-                proc = subprocess.run([sys.executable, str(ROOT / 'scripts/aggregate_benchmark.py'), str(root)],
+                proc = subprocess.run([sys.executable, str(ROOT / 'scripts/aggregate_benchmark.py'), str(root), '--json'],
                                       cwd=tmp, capture_output=True, text=True)
                 self.assertEqual(proc.returncode, 0 if scenario in {'success', 'quality_fail'} else 1, proc.stderr)
                 self.assertEqual(json.loads(proc.stdout), json.loads((root / 'benchmark.json').read_text()))

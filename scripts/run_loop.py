@@ -13,6 +13,7 @@ from scripts.improve_description import improve_description, training_evidence
 from scripts.compliance import require_standard, assess
 from scripts.run_eval import run_eval
 from scripts.run_quality_eval import run_quality
+from scripts.inputs import serial_inputs, input_specs
 from scripts.utils import copy_tree, load_evals, parse_skill_md, read_json, set_description, snapshot_fixtures, tree_hash, write_json
 
 
@@ -74,7 +75,7 @@ def optimize(a):
     rows = load_evals(a.evals, trigger=True)
     frozen, _ = snapshot_fixtures(rows, skill, workspace)
     for row in rows:
-        row['files'] = [str(p) for p in frozen[row['id']]]
+        row['files'] = serial_inputs(frozen[row['id']])
     if a.profile:
         profile = workspace / 'snapshots' / 'profile.json'
         write_json(profile, read_json(a.profile))
@@ -149,7 +150,7 @@ def optimize(a):
     if a.quality_evals:
         rows = load_evals(a.quality_evals)
         for row in rows:
-            row['files'] = [str((skill / f).resolve()) for f in row.get('files', [])]
+            row['files'] = input_specs(row.get('files', []), base=skill)
         resolved = workspace / 'quality-evals.json'
         write_json(resolved, {'evals': rows})
         quality = run_quality(selected, resolved, workspace / 'quality-regression', a.model,

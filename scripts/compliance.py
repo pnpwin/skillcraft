@@ -40,6 +40,8 @@ def skill_hash(skill):
 def runner_hash():
     h = hashlib.sha256()
     for name in ['scripts/runtime.py', 'scripts/utils.py', 'scripts/compliance.py',
+                 'scripts/inputs.py', 'scripts/cli_state.py', 'scripts/evidence.py',
+                 'scripts/preparation.py',
                  'runner/src/main.ts', 'runner/src/events.ts', 'runner/package-lock.json']:
         h.update(name.encode() + b'\0' + (ROOT / name).read_bytes() + b'\0')
     return h.hexdigest()
@@ -76,6 +78,12 @@ def checked_run(path, skill, *, probe=False):
     for name in required:
         if digest(path / name) != run['evidence_hashes'][name]:
             return result('ERROR', 'corrupt_evidence', 'Execution evidence hash mismatch'), run
+    for name in ['evidence/manifest.json', 'cli-state.json', 'input-manifest.json', 'preparation.json']:
+        if name in run['evidence_hashes'] and digest(path / name) != run['evidence_hashes'][name]:
+            return result('ERROR', 'corrupt_evidence', 'Derived evidence hash mismatch'), run
+    if 'evidence/manifest.json' in run['evidence_hashes']:
+        from scripts.evidence import verify_evidence
+        verify_evidence(path)
     request = read_json(path / 'request.json')
     profile = read_json(path / 'profile.json')
     environment = read_json(path / 'environment.json')
@@ -97,7 +105,7 @@ def checked_run(path, skill, *, probe=False):
     if (candidate['id'] != Path(skill).resolve().name or candidate['id'] != request['skill_id']
             or Path(candidate['path']) != installed / 'SKILL.md'):
         return result('FAIL', 'discovery_mismatch', 'Registry identity/path does not match the candidate'), run
-    if run['environment']['server_version'] != '2.2.6':
+    if run['environment']['server_version'] != '2.2.7':
         return result('ERROR', 'runtime_version', 'Unverified OpenCode version'), run
     if not probe:
         if request['mode'] != 'quality' or not request.get('attach_skill') or not run.get('attached'):
@@ -134,7 +142,7 @@ def assess(skill, run_dir=None, *, probe_dir=None, require_fresh=False):
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
         runtime = result('ERROR', 'evidence_error', 'Cannot verify artifact/evidence', error_type=type(error).__name__)
     return {'schema_version': 1, 'skill_hash': artifact_hash,
-            'contract': {'agent_skills_revision': REVISION, 'opencode_version': '2.2.6'},
+            'contract': {'agent_skills_revision': REVISION, 'opencode_version': '2.2.7'},
             'agent_skills': standard, 'opencode': runtime,
             'accepted': standard['status'] == runtime['status'] == 'PASS',
             'recommendations': standard.get('recommendations', [])}

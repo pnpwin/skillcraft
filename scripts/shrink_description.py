@@ -14,6 +14,8 @@ from scripts.improve_description import improve_description
 from scripts.run_eval import run_eval
 from scripts.run_loop import split_evals, selection_score
 from scripts.run_quality_eval import run_quality
+from scripts.inputs import serial_inputs
+from scripts.grading_store import read_grading
 from scripts.runtime import run_model
 from scripts.utils import copy_tree, digest, frontmatter, load_evals, parse_json_response, read_json, set_description, snapshot_fixtures, write_json
 
@@ -108,7 +110,7 @@ def reformulate(a):
     rows = load_evals(a.evals, trigger=True)
     fixtures, _ = snapshot_fixtures(rows, skill, workspace)
     for row in rows:
-        row['files'] = [str(p) for p in fixtures[row['id']]]
+        row['files'] = serial_inputs(fixtures[row['id']])
     splits = split_evals(rows, a.seed)
     if not splits['test']:
         raise ValueError('This workflow requires an independent final test; provide enough independent groups per class')
@@ -116,7 +118,7 @@ def reformulate(a):
     quality_fixture_dir = workspace / 'quality-inputs'
     quality_files, _ = snapshot_fixtures(quality_rows, skill, quality_fixture_dir)
     for row in quality_rows:
-        row['files'] = [str(p) for p in quality_files[row['id']]]
+        row['files'] = serial_inputs(quality_files[row['id']])
     write_json(workspace / 'quality-evals.json', {'evals': quality_rows})
     profiles = {}
     for role in ['executor', 'optimizer', 'judge']:
@@ -188,7 +190,7 @@ def reformulate(a):
             judge_model=a.judge_model, judge_profile=profiles['judge'])
         candidate_runs = sorted((workspace / 'quality').glob('eval-*/with_skill/run-*'))
         acceptance = accept_current(candidate, candidate_runs[0], workspace / 'acceptance')
-        grades = [read_json(p / 'grading.json') for p in candidate_runs]
+        grades = [read_grading(p)[0] for p in candidate_runs]
         quality_pass = bool(grades) and all(g['status'] == 'completed' and g['summary']['total'] > 0
             and g['summary']['failed'] == 0 and g['eval_feedback']['status'] != 'error' for g in grades) and not quality['errors'] and not quality['validation_errors']
         final_left, final_right = [selection_score(reports[role + '-test']) for role in ['historical', 'candidate']]
