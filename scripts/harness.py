@@ -5,13 +5,13 @@ from pathlib import Path
 from scripts.utils import parse_model
 
 
-VERSIONS = {'codex': '0.170.0', 'opencode': '2.2.7'}
+HARNESSES = ('codex', 'opencode')
 SKILL_ROOT = Path('.agents') / 'skills'
 
 
 def resolve_harness(override=None, *, environ=None):
     if override is not None:
-        if override not in VERSIONS:
+        if override not in HARNESSES:
             raise ValueError(f'Unsupported harness: {override}')
         return override
     env = os.environ if environ is None else environ
@@ -24,7 +24,7 @@ def resolve_harness(override=None, *, environ=None):
 
 
 def add_harness_arg(parser):
-    parser.add_argument('--harness', choices=tuple(VERSIONS),
+    parser.add_argument('--harness', choices=HARNESSES,
                         help='Override session autodetection (for example in CI)')
 
 

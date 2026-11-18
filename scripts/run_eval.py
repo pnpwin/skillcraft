@@ -81,7 +81,8 @@ def run_eval(skill, evals, workspace, model, *, repeats=3, workers=1, timeout=18
     with ThreadPoolExecutor(max_workers=workers) as pool:
         results = list(pool.map(execute, jobs))
     environments = [r['environment'] for r in results if r.get('environment')]
-    signatures = {(str(e['background']), str(e['plugins']), e['configuration_fingerprint']) for e in environments}
+    signatures = {(e.get('server_version'), str(e['background']), str(e['plugins']),
+                   e['configuration_fingerprint']) for e in environments}
     summary = summarize(results)
     summary.update(unique_cases=len(rows), unique_groups=len({row.get('group', row['id']) for row in rows}), repeats=repeats,
                    observed_loads=sum(r['diagnostics']['skill_loaded'] for r in results),

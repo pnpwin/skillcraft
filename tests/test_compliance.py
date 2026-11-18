@@ -31,7 +31,7 @@ class Compliance(unittest.TestCase):
         self.request = {'model': {'providerID': 'test', 'id': 'model'}, 'run_id': 'run1', 'operation': 'run',
             'mode': 'quality', 'attach_skill': True, 'skill_id': 'demo-skill',
             'skill_path': str(self.installed / 'SKILL.md'), 'skill_sha256': digest(self.installed / 'SKILL.md')}
-        environment = {'server_version': '2.2.7', 'background': [], 'plugins': [], 'configuration_fingerprint': 'config',
+        environment = {'server_version': '2.3.0', 'background': [], 'plugins': [], 'configuration_fingerprint': 'config',
             'controlled': False, 'candidate': {'id': 'demo-skill', 'path': str(self.installed / 'SKILL.md')}}
         self.record = {'runner_hash': runner_hash(), 'status': 'completed', 'run_id': 'run1', 'prompt_id': 'prompt1',
             'model': self.request['model'], 'profile': {'controlled': False}, 'installed_hash': installed_hash,
@@ -102,6 +102,13 @@ class Compliance(unittest.TestCase):
         run = json.loads((probe / 'run.json').read_text());run['evidence_hashes']['request.json'] = digest(probe / 'request.json')
         write_json(probe / 'run.json', run)
         self.assertTrue(assess(self.skill, self.run, require_fresh=True, probe_dir=probe)['accepted'])
+        run['environment']['server_version'] = '2.4.0'
+        write_json(probe / 'environment.json', run['environment'])
+        run['evidence_hashes']['environment.json'] = digest(probe / 'environment.json')
+        write_json(probe / 'run.json', run)
+        check = assess(self.skill, self.run, require_fresh=True, probe_dir=probe)
+        self.assertEqual(check['opencode']['issues'][0]['code'], 'environment_changed')
+        run['environment']['server_version'] = self.record['environment']['server_version']
         run['environment']['configuration_fingerprint'] = 'new-global-config'
         write_json(probe / 'environment.json', run['environment'])
         run['evidence_hashes']['environment.json'] = digest(probe / 'environment.json')
@@ -124,7 +131,7 @@ class Compliance(unittest.TestCase):
         self.request['harness'] = 'codex'
         self.request['model'] = {'id': 'model', 'effort': 'high'}
         self.record['model'] = self.request['model']
-        self.record['environment']['server_version'] = '0.170.0'
+        self.record['environment']['server_version'] = '0.171.0'
         write_json(self.run / 'environment.json', self.record['environment'])
         write_json(self.run / 'request.json', self.request)
         proof = {'schema_version': 1, 'confirmed': True,

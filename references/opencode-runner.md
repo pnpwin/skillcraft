@@ -41,8 +41,8 @@ serialized. This filesystem runner currently requires the server and runner to
 see the **same absolute paths**; an arbitrary remote host is unsupported without
 shared storage. Server-local file paths are not file uploads.
 
-Version mismatch fails before prompting. To support another OpenCode version,
-update the dependency and adapter, then rerun contract and live integration tests.
+Live checks used OpenCode server 2.2.7. The runner records the connected server's
+version and verifies the required V2 endpoints in `/openapi.json` before prompting.
 
 ## Isolation profiles
 

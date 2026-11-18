@@ -2,7 +2,7 @@
 name: skillcraft
 description: Create and improve Agent Skills for Codex and OpenCode. Use when the user wants to turn a recurring workflow into a skill, revise skill instructions, compare versions with A/B tests, review a skill benchmark, or improve when a skill is picked.
 license: Apache-2.0
-compatibility: Evaluations require Python 3.11+ and a configured model in Codex CLI 0.170.0 or OpenCode 2.2.7. The OpenCode runner also requires Node.js 22+ and shared absolute filesystem paths.
+compatibility: Evaluations require Python 3.11+, a configured model, and the Codex App Server or OpenCode V2 APIs used by SkillCraft. The OpenCode runner also requires Node.js 22+ and shared absolute filesystem paths.
 ---
 
 # SkillCraft

@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.runtime import add_runtime_args, run_model, profile_settings
-from scripts.harness import VERSIONS, model_ref, parse_harness_args
+from scripts.harness import model_ref, parse_harness_args
 from scripts.compliance import require_standard, assess
 from scripts.utils import copy_tree, digest, load_evals, read_json, safe_id, snapshot_fixtures, tree_hash, write_json
 from scripts.reporting import print_report
@@ -57,8 +57,7 @@ def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previou
                 'candidate_hash': candidate_hash, 'evals': rows, 'controlled_requested': profile is None,
                 'fixture_hashes': fixture_hashes, 'profile_hash': digest(profile) if profile else None,
                 'judge_profile_hash': digest(judge_profile) if judge_profile else None,
-                'runtime': {harness: VERSIONS[harness], **({'client': '2.2.7', 'runner': '1.0.0'} if harness == 'opencode' else {})},
-                'timeout_seconds': timeout,
+                'runtime': {harness: None}, 'timeout_seconds': timeout,
                 'pilot_policy': {'case_ids': pilot_ids, 'selection': 'explicit' if pilot_ids != [rows[0]['id']] else 'first case or explicitly selected first',
                                  'configurations': list(configs), 'stop_threshold': stop_threshold, 'max_in_flight': workers}}
     write_json(workspace / 'manifest.json', manifest)
@@ -105,7 +104,11 @@ def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previou
         outcomes, queue = bounded_dispatch(jobs, execute, workers=workers, threshold=threshold, persist=persist)
         results = [o.get('run', {}) for o in outcomes.values()]
         environments = [r['environment'] for r in results if r.get('environment')]
-        signatures = {(str(e['background']), str(e['plugins']), e['configuration_fingerprint']) for e in environments}
+        signatures = {(e.get('server_version'), str(e['background']), str(e['plugins']),
+                       e['configuration_fingerprint']) for e in environments}
+        versions = sorted({e['server_version'] for e in environments if e.get('server_version')})
+        phase_manifest['runtime'] = {harness: versions[0] if len(versions) == 1 else None}
+        phase_manifest['runtime_versions'] = versions
         phase_manifest['environment_consistent'] = len(signatures) <= 1
         phase_manifest['controlled'] = (len(environments) == len(results) and bool(environments)
                                        and all(e['controlled'] for e in environments) and len(signatures) == 1)

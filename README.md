@@ -13,11 +13,14 @@ installation.
 ## Requirements
 
 - Python **3.11+** and the dependencies in `requirements.txt`.
-- For Codex, CLI **0.170.0**, Git and an authorized model connection. See the
+- For Codex, a CLI with the required App Server APIs, Git and an authorized model connection. See the
   [Codex runner guide](references/codex-runner.md).
-- For OpenCode, server **2.2.7** with a configured model, Node.js **22+** and the
+- For OpenCode, a server with the required V2 APIs, a configured model, Node.js **22+** and the
   locked dependencies under `runner/`. The server and runner share absolute paths.
   See the [OpenCode runner guide](references/opencode-runner.md).
+
+Live checks have been run with Codex 0.170.0 and OpenCode 2.2.7. SkillCraft records
+the versions it observes and checks the runtime interfaces it uses.
 
 ## Install
 
@@ -90,7 +93,7 @@ For installations migrating from `.opencode/skills/` or the former `skill-creato
 
 - `SKILL.md`, `references/`: authoring and evaluation methodology.
 - `scripts/`: validation, evaluation, optimization, reporting, packaging and the Codex adapter.
-- `runner/`: OpenCode 2.2.7 client integration.
+- `runner/`: OpenCode V2 client integration.
 - `agents/`: independent judge prompt resources.
 - `eval-viewer/`, `assets/`: review interfaces and templates.
 - `tests/`: regression tests and representative fixtures.

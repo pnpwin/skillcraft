@@ -9,10 +9,9 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.quick_validate import REVISION, EXIT_CODES, validate_standard
 from scripts.utils import ROOT, EXCLUDED, digest, read_json, write_json
-from scripts.harness import VERSIONS
+from scripts.harness import HARNESSES
 
 STATUSES = {'PASS', 'FAIL', 'NOT_RUN', 'ERROR'}
-HARNESSES = {'opencode', 'codex'}
 SHARED_RUNNER_FILES = [
     'scripts/runtime.py', 'scripts/utils.py', 'scripts/compliance.py',
     'scripts/inputs.py', 'scripts/cli_state.py', 'scripts/evidence.py',
@@ -135,8 +134,9 @@ def checked_run(path, skill, *, probe=False, harness=None):
     if (candidate['id'] != Path(skill).resolve().name or candidate['id'] != request['skill_id']
             or Path(candidate['path']) != installed / 'SKILL.md'):
         return result('FAIL', 'discovery_mismatch', 'Registry identity/path does not match the candidate'), run
-    if run['environment']['server_version'] != VERSIONS[selected]:
-        return result('ERROR', 'runtime_version', f'Unverified {selected} version'), run
+    version = environment.get('server_version')
+    if not isinstance(version, str) or not version.strip():
+        return result('ERROR', 'runtime_version', f'Missing observed {selected} version'), run
     if not probe:
         if request['mode'] != 'quality' or not request.get('attach_skill'):
             return result('NOT_RUN', 'execution_required', 'Natural-trigger/preflight evidence alone does not prove representative execution'), run
@@ -200,8 +200,7 @@ def assess(skill, run_dir=None, *, probe_dir=None, require_fresh=False, harness=
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
         runtime = result('ERROR', 'evidence_error', 'Cannot verify artifact/evidence', error_type=type(error).__name__)
     return {'schema_version': 1, 'skill_hash': artifact_hash,
-            'contract': {'agent_skills_revision': REVISION, 'opencode_version': VERSIONS['opencode'],
-                         'codex_version': VERSIONS['codex']},
+            'contract': {'agent_skills_revision': REVISION},
             'agent_skills': standard,
             'opencode': runtime if selected == 'opencode' else result('NOT_RUN', 'not_selected', 'OpenCode was not selected'),
             'codex': runtime if selected == 'codex' else result('NOT_RUN', 'not_selected', 'Codex was not selected'),

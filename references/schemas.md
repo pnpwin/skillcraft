@@ -17,9 +17,7 @@ its own schema_version 1 and is independent of task grading and critique:
   "schema_version": 1,
   "skill_hash": "hash-of-the-checked-artifact",
   "contract": {
-    "agent_skills_revision": "83021e2be457a9b6679148719c1f6074f0ad975e",
-    "opencode_version": "2.2.7",
-    "codex_version": "0.170.0"
+    "agent_skills_revision": "83021e2be457a9b6679148719c1f6074f0ad975e"
   },
   "agent_skills": {
     "status": "FAIL",
@@ -49,6 +47,11 @@ evidence: report NOT_RUN, not PASS. Recommendations do not change normative stat
 Validation emits field/code/message and actual type/length where useful; do not copy
 secrets from arbitrary metadata into diagnostics. Implementation is in quick_validate.py and
 compliance.py; lifecycle callers preserve these checks independently of quality.
+
+The observed version is recorded as `environment.server_version`. Quality
+manifests list all observed versions in `runtime_versions` and record the version
+under `runtime.<harness>` when it is consistent. Changes in version count as
+environment drift when comparing runs or refreshing compatibility evidence.
 
 Standalone check CLI: zero only for that check's PASS. Final acceptance CLI: zero
 only for two PASS values; document nonzero status codes with implementation tests.

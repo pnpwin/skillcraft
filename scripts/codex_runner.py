@@ -24,7 +24,6 @@ import time
 import uuid
 
 
-VERSION = "0.170.0"
 SERVER_TIMEOUT = 30
 
 
@@ -234,7 +233,16 @@ def _find_skill_events(value):
     return found
 
 
-def _environment(candidate, skills, controlled, config_dir, mode="quality"):
+def _read_cli_version(binary, cwd, env):
+    result = subprocess.run([str(binary), "--version"], cwd=cwd, env=env,
+                            text=True, capture_output=True, timeout=15)
+    fields = result.stdout.strip().split(maxsplit=2)
+    if result.returncode != 0 or len(fields) < 2 or fields[0] != "codex-cli":
+        raise RuntimeError("Could not read the Codex CLI version from codex --version")
+    return fields[1]
+
+
+def _environment(candidate, skills, controlled, version, mode="quality"):
     background = []
     for skill in skills:
         if skill.get("name") == (candidate or {}).get("id"):
@@ -250,12 +258,12 @@ def _environment(candidate, skills, controlled, config_dir, mode="quality"):
         background.append({"id": skill.get("name"), "hash": hashlib.sha256(body).hexdigest(),
                            "autoinvoke": skill.get("enabled")})
     background.sort(key=lambda item: str(item["id"]))
-    profile = {"codex": VERSION, "permissions": "skillcraft", "minimal": "read",
+    profile = {"permissions": "skillcraft", "minimal": "read",
                "workspace_roots": "read", "outputs": "read" if mode in {"judge", "optimizer"} else "write",
                "isolated_codex_home": "deny", "network": False,
                "shell_environment_inherit": "none", "otel": "otlp-http-json-loopback"}
     fingerprint = hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
-    return {"kind": "codex-app-server", "harness": "codex", "server_version": VERSION,
+    return {"kind": "codex-app-server", "harness": "codex", "server_version": version,
             "controlled": bool(controlled), "candidate": candidate,
             "background": background, "plugins": [], "configuration_fingerprint": fingerprint}
 
@@ -431,6 +439,7 @@ def run_request(r):
     isolated_root = isolated_home = None
     rpc = None
     env_result = None
+    version = None
     items = []
     try:
         isolated_root, isolated_home = _isolated_home()
@@ -447,10 +456,7 @@ def run_request(r):
                "CODEX_HOME": str(isolated_home), "TMPDIR": str(isolated_root)}
         if os.environ.get("CODEX_API_KEY"):
             env["CODEX_API_KEY"] = os.environ["CODEX_API_KEY"]
-        version = subprocess.run([str(codex_binary), "--version"], cwd=r["directory"], env=env,
-                                 text=True, capture_output=True, timeout=15)
-        if version.returncode != 0 or version.stdout.strip() != f"codex-cli {VERSION}":
-            raise RuntimeError(f"Unsupported Codex CLI version; expected codex-cli {VERSION}")
+        version = _read_cli_version(codex_binary, r["directory"], env)
         command = [str(codex_binary), "app-server", "--listen", "stdio://"]
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True, bufsize=1, env=env,
@@ -461,12 +467,17 @@ def run_request(r):
         process.stdin.write(json.dumps({"method": "initialized", "params": {}}) + "\n")
         process.stdin.flush()
         skills_reply = rpc.request("skills/list", {"cwds": [r["directory"]], "forceReload": True})
-        skill_list = []
-        if isinstance(skills_reply, dict):
-            skill_list = skills_reply.get("skills", [])
-            if not skill_list:
-                skill_list = [skill for group in skills_reply.get("data", []) if isinstance(group, dict)
-                              for skill in group.get("skills", [])]
+        if not isinstance(skills_reply, dict):
+            raise RuntimeError("Codex skills/list returned an unsupported catalog format")
+        skill_list = skills_reply.get("skills")
+        if not isinstance(skill_list, list):
+            groups = skills_reply.get("data")
+            if not isinstance(groups, list) or not groups or any(
+                    not isinstance(group, dict) or not isinstance(group.get("skills"), list) for group in groups):
+                raise RuntimeError("Codex skills/list returned an unsupported catalog format")
+            skill_list = [skill for group in groups for skill in group["skills"]]
+        if any(not isinstance(skill, dict) for skill in skill_list):
+            raise RuntimeError("Codex skills/list returned an unsupported catalog format")
         candidate = None
         staged_path = Path(r["skill_path"]).resolve() if r.get("skill_path") else None
         if staged_path:
@@ -489,8 +500,7 @@ def run_request(r):
                          "description": candidate.get("description"), "autoinvoke": candidate.get("enabled")}
         elif any(s.get("name") == r.get("skill_id") for s in skill_list):
             raise RuntimeError("Baseline candidate leaked through Codex skills/list")
-        config_path = isolated_home / "config.toml"
-        env_result = _environment(candidate, skill_list, r.get("controlled", False), config_path, r["mode"])
+        env_result = _environment(candidate, skill_list, r.get("controlled", False), version, r["mode"])
         _json(output / "environment.json", env_result)
         if operation == "probe":
             status = "completed"
@@ -626,7 +636,7 @@ def run_request(r):
         if status == "running":
             status = "transport_error"
         if not (output / "environment.json").exists():
-            _json(output / "environment.json", {"kind": "codex-app-server", "harness": "codex", "server_version": VERSION,
+            _json(output / "environment.json", {"kind": "codex-app-server", "harness": "codex", "server_version": version,
                   "controlled": False, "candidate": None, "background": [], "plugins": [], "configuration_fingerprint": None})
         if not (output / "messages.json").exists():
             _json(output / "messages.json", messages)

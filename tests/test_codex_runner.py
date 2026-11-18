@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from scripts import codex_runner
 
@@ -113,26 +114,24 @@ class CodexRunnerTests(unittest.TestCase):
     def test_background_identity_and_configuration_fingerprint_ignore_temp_paths(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
-            config_a, config_b = root / "a.toml", root / "b.toml"
-            config_a.write_text('exporter = "127.0.0.1:1234"')
-            config_b.write_text('exporter = "127.0.0.1:9876"')
             skill_a, skill_b = root / "a/SKILL.md", root / "b/SKILL.md"
             skill_a.parent.mkdir(); skill_b.parent.mkdir()
             skill_a.write_text("---\nname: bg\ndescription: Same\n---\n")
             skill_b.write_text(skill_a.read_text())
             one = codex_runner._environment(None, [{"name": "bg", "description": "Same", "enabled": True,
-                                                   "path": str(skill_a)}], True, config_a)
+                                                   "path": str(skill_a)}], True, "0.171.0")
             two = codex_runner._environment(None, [{"name": "bg", "description": "Same", "enabled": True,
-                                                   "path": str(skill_b)}], True, config_b)
+                                                   "path": str(skill_b)}], True, "0.171.0")
         self.assertEqual(one["background"], two["background"])
         self.assertEqual(one["configuration_fingerprint"], two["configuration_fingerprint"])
 
     def test_probe_environment_contract_is_codex_scoped(self):
-        with tempfile.TemporaryDirectory() as root:
-            config = Path(root) / "config.toml"
-            config.write_text("[analytics]\nenabled = false\n")
-            env = codex_runner._environment(None, [{"name": "background", "enabled": True}], True, config)
-        self.assertEqual(env["server_version"], "0.170.0")
+        with patch.object(codex_runner.subprocess, "run") as command:
+            command.return_value.returncode = 0
+            command.return_value.stdout = "codex-cli 0.171.0-beta.1\n"
+            version = codex_runner._read_cli_version("/tmp/codex", "/tmp", {})
+        env = codex_runner._environment(None, [{"name": "background", "enabled": True}], True, version)
+        self.assertEqual(env["server_version"], "0.171.0-beta.1")
         self.assertTrue(env["controlled"])
         self.assertIsNone(env["candidate"])
         self.assertEqual(env["background"][0]["id"], "background")

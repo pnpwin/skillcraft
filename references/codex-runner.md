@@ -4,6 +4,9 @@ SkillCraft uses Codex CLI and its local App Server over stdio. Install the
 shared skill in `.agents/skills/skillcraft/` and keep experiment workspaces outside
 the skill directory.
 
+Live checks used Codex 0.170.0. The runner records the installed CLI version and
+checks the applicable App Server operations during execution.
+
 ## Models and authentication
 
 Pass a Codex model ID and optional reasoning effort as `--model 'MODEL#EFFORT'`.
