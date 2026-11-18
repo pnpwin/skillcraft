@@ -25,7 +25,7 @@ before unblinding. This reduces identity bias; length differences remain visible
 ## Execute a fixed-budget comparison
 
 ```sh
-"$SKILLCRAFT/.venv/bin/python" "$SKILLCRAFT/scripts/shrink_description.py" \
+"$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/shrink_description.py" \
   --skill "$CANDIDATE" --workspace "$NEW_WORKSPACE" \
   --evals "$TRIGGER_EVALS" --quality-evals "$QUALITY_EVALS" \
   --model "$EXECUTOR_MODEL" --optimizer-model "$OPTIMIZER_MODEL" \

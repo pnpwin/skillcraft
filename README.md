@@ -53,10 +53,14 @@ the same standalone directory.
 For a standalone installation, run `export SKILLCRAFT="$PWD/.agents/skills/skillcraft"`
 from the project root. For a Git plugin installation, set `SKILLCRAFT` to the
 absolute directory containing `SKILL.md` in the runtime's skill registry.
+Keep `SKILLCRAFT_VENV` at an absolute, writable path outside the skill directory
+so plugin updates can replace the package without removing Python dependencies.
+The setup below can also recreate a previous package-local virtualenv at the new path.
 
 ```sh
-python3 -m venv "$SKILLCRAFT/.venv"
-"$SKILLCRAFT/.venv/bin/python" -m pip install -r "$SKILLCRAFT/requirements.txt"
+export SKILLCRAFT_VENV="${SKILLCRAFT_VENV:-${XDG_DATA_HOME:-$HOME/.local/share}/skillcraft/venv}"
+python3 -m venv "$SKILLCRAFT_VENV"
+"$SKILLCRAFT_VENV/bin/python" -m pip install -r "$SKILLCRAFT/requirements.txt"
 npm --prefix "$SKILLCRAFT/scripts/opencode-runner" ci  # required for OpenCode
 ```
 
@@ -75,10 +79,11 @@ revision, or triggering requests. Instructions and full required guides start at
 
 ```sh
 # Validate the Agent Skills format.
-"$SKILLCRAFT/.venv/bin/python" "$SKILLCRAFT/scripts/quick_validate.py" "$SKILLCRAFT" --json
+"$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/quick_validate.py" "$SKILLCRAFT" --json
 
 # Development checks from the repository root, with SKILLCRAFT set to the checkout's skill directory.
-"$SKILLCRAFT/.venv/bin/python" -B -m unittest discover -s tests -t .
+"$SKILLCRAFT_VENV/bin/python" -B -m unittest discover -s tests -t .
+node --test tests/viewer.test.mjs
 npm --prefix "$SKILLCRAFT/scripts/opencode-runner" run check
 "$SKILLCRAFT/scripts/opencode-runner/node_modules/.bin/tsx" --test tests/opencode/*.test.mts
 ```

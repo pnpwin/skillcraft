@@ -545,7 +545,7 @@
     <div class="header">
       <div>
         <h1>Eval Review: <span id="skill-name"></span></h1>
-        <div class="instructions">Review each output and leave feedback below. Navigate with arrow keys or buttons. Submit your reviews, then return to OpenCode.</div>
+        <div class="instructions">Review each output and leave feedback below. Navigate with arrow keys or buttons.</div>
       </div>
       <div class="progress" id="progress"></div>
     </div>
@@ -634,7 +634,7 @@
   <div class="done-overlay" id="done-overlay">
     <div class="done-card">
       <h2>Review Complete</h2>
-      <p>Your feedback has been saved or downloaded. Return to OpenCode and share your review.</p>
+      <p>Your feedback is ready to share with your agent.</p>
       <div class="btn-row">
         <button onclick="closeDoneDialog()">OK</button>
       </div>
@@ -649,51 +649,70 @@
     /*__EMBEDDED_DATA__*/
 
     // ---- State ----
-    let feedbackMap = {};  // run_id -> feedback text
+    const runs = EMBEDDED_DATA.runs;
+    const feedbackMap = new Map();
+    const visitedRuns = new Set();
+    const draftKey = `skillcraft-review:${location.pathname}`;
     let currentIndex = 0;
-    let visitedRuns = new Set();
+    let saveTimeout = null;
+    let pendingWrite = Promise.resolve();
+    let revision = 0;
+    let submitting = false;
 
     // ---- Init ----
     async function init() {
-      // Current feedback uses unique run IDs; previous-iteration context is separate.
-      if (EMBEDDED_DATA.server_available) {
-        try {
-          const resp = await fetch("/api/feedback");
-          const data = await resp.json();
-          if (data.reviews) {
-            for (const r of data.reviews) {
-              if (EMBEDDED_DATA.runs.some(run => run.id === r.run_id && run.snapshot_hash === r.snapshot_hash)) feedbackMap[r.run_id] = r.feedback;
+      try {
+        const data = EMBEDDED_DATA.server_available
+          ? await (await fetch("/api/feedback", { cache: "no-store" })).json()
+          : JSON.parse(sessionStorage.getItem(draftKey));
+        if (Array.isArray(data?.reviews)) {
+          const saved = new Map(data.reviews.map(review => [review.run_id, review]));
+          runs.forEach((run, index) => {
+            const review = saved.get(run.id);
+            if (review && review.snapshot_hash === run.snapshot_hash) {
+              feedbackMap.set(run.id, review.feedback);
+              if (review.reviewed === true) visitedRuns.add(index);
             }
-          }
-        } catch { /* first run, no feedback yet */ }
-      }
+          });
+        }
+      } catch { /* start without a saved draft */ }
 
       document.getElementById("skill-name").textContent = EMBEDDED_DATA.skill_name;
       showRun(0);
 
-      // Wire up feedback auto-save
       const textarea = document.getElementById("feedback");
-      let saveTimeout = null;
       textarea.addEventListener("input", () => {
+        const id = runs[currentIndex].id;
+        const text = textarea.value.trim() ? textarea.value : "";
+        if (text === (feedbackMap.get(id) || "")) return;
+        feedbackMap.set(id, text);
+        revision++;
         clearTimeout(saveTimeout);
         document.getElementById("feedback-status").textContent = "";
-        saveTimeout = setTimeout(() => saveCurrentFeedback(), 800);
+        if (EMBEDDED_DATA.server_available) {
+          saveTimeout = setTimeout(saveDraft, 800);
+        } else {
+          saveDraft();
+        }
       });
     }
 
     // ---- Navigation ----
     function navigate(delta) {
+      if (submitting) return;
       const newIndex = currentIndex + delta;
-      if (newIndex >= 0 && newIndex < EMBEDDED_DATA.runs.length) {
-        saveCurrentFeedback();
+      if (newIndex >= 0 && newIndex < runs.length) {
+        const needsSave = saveTimeout !== null || !visitedRuns.has(newIndex);
+        revision++;
         showRun(newIndex);
+        if (needsSave) saveDraft();
       }
     }
 
     function updateNavButtons() {
-      document.getElementById("prev-btn").disabled = currentIndex === 0;
-      document.getElementById("next-btn").disabled =
-        currentIndex === EMBEDDED_DATA.runs.length - 1;
+      document.getElementById("prev-btn").disabled = submitting || currentIndex === 0;
+      document.getElementById("next-btn").disabled = submitting || currentIndex === runs.length - 1;
+      document.getElementById("done-btn").disabled = submitting;
     }
 
     // ---- Show a run ----
@@ -741,7 +760,7 @@
       }
 
       // Feedback
-      document.getElementById("feedback").value = feedbackMap[run.id] || "";
+      document.getElementById("feedback").value = feedbackMap.get(run.id) || "";
       document.getElementById("feedback-status").textContent = "";
 
       updateNavButtons();
@@ -749,9 +768,7 @@
       // Track visited runs and promote done button when all visited
       visitedRuns.add(index);
       const doneBtn = document.getElementById("done-btn");
-      if (visitedRuns.size >= EMBEDDED_DATA.runs.length) {
-        doneBtn.classList.add("ready");
-      }
+      doneBtn.classList.toggle("ready", visitedRuns.size === runs.length);
 
       // Scroll main content to top
       document.querySelector(".main").scrollTop = 0;
@@ -1013,77 +1030,87 @@
       arrow.classList.toggle("open");
     }
 
-    // ---- Feedback (saved to server -> feedback.json) ----
-    function saveCurrentFeedback() {
-      const run = EMBEDDED_DATA.runs[currentIndex];
-      const text = document.getElementById("feedback").value;
+    // ---- Feedback ----
+    function feedbackPayload(status) {
+      const timestamp = new Date().toISOString();
+      const reviews = runs.map((run, index) => ({
+        run_id: run.id,
+        snapshot_hash: run.snapshot_hash,
+        reviewed: visitedRuns.has(index),
+        feedback: feedbackMap.get(run.id) || "",
+        timestamp,
+      }));
+      return JSON.stringify({ schema_version: 1, reviews, status });
+    }
 
-      if (text.trim() === "") {
-        delete feedbackMap[run.id];
-      } else {
-        feedbackMap[run.id] = text;
-      }
+    function storeStaticFeedback(payload) {
+      try {
+        sessionStorage.setItem(draftKey, payload);
+      } catch { /* download still works when browser storage is unavailable */ }
+    }
 
-      // Build reviews array from map
-      const reviews = [];
-      for (const [run_id, feedback] of Object.entries(feedbackMap)) {
-        if (feedback.trim()) {
-          const r = EMBEDDED_DATA.runs.find(r => r.id === run_id);
-          if (r) reviews.push({ run_id, snapshot_hash: r.snapshot_hash, reviewed: true, feedback, timestamp: new Date().toISOString() });
-        }
-      }
+    function postFeedback(payload) {
+      // Wait for previous writes so a draft cannot finish after final submission.
+      const write = pendingWrite.then(async () => {
+        const response = await fetch("/api/feedback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: payload,
+        });
+        if (!response.ok) throw new Error("Feedback save failed");
+      });
+      pendingWrite = write.catch(() => {});
+      return write;
+    }
 
+    function cancelDraftTimer() {
+      clearTimeout(saveTimeout);
+      saveTimeout = null;
+    }
+
+    async function saveDraft() {
+      cancelDraftTimer();
+      const payload = feedbackPayload("in_progress");
+      const status = document.getElementById("feedback-status");
       if (!EMBEDDED_DATA.server_available) {
-        document.getElementById("feedback-status").textContent = "Will download on submit";
+        storeStaticFeedback(payload);
+        status.textContent = "Will download on submit";
         return;
       }
-      fetch("/api/feedback", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ schema_version: 1, reviews, status: "in_progress" }),
-      }).then(response => {
-        if (!response.ok) throw new Error('Feedback save failed');
-        document.getElementById("feedback-status").textContent = "Saved";
-      }).catch(() => {
-        // Static mode or server unavailable — no-op on auto-save,
-        // feedback will be downloaded on final submit
-        document.getElementById("feedback-status").textContent = "Will download on submit";
-      });
+
+      const savedRevision = revision;
+      try {
+        await postFeedback(payload);
+        if (savedRevision === revision) status.textContent = "Saved";
+      } catch {
+        if (savedRevision === revision) status.textContent = "Will download on submit";
+      }
     }
 
     // ---- Done ----
-    function showDoneDialog() {
-      // Save current textarea to feedbackMap (but don't POST yet)
-      const run = EMBEDDED_DATA.runs[currentIndex];
-      const text = document.getElementById("feedback").value;
-      if (text.trim() === "") {
-        delete feedbackMap[run.id];
-      } else {
-        feedbackMap[run.id] = text;
-      }
-
-      // POST once with status: complete — include ALL runs so the model
-      // can distinguish "no feedback" (looks good) from "not reviewed"
-      const reviews = [];
-      const ts = new Date().toISOString();
-      for (const r of EMBEDDED_DATA.runs) {
-        reviews.push({ run_id: r.id, snapshot_hash: r.snapshot_hash, reviewed: visitedRuns.has(EMBEDDED_DATA.runs.indexOf(r)), feedback: feedbackMap[r.id] || "", timestamp: ts });
-      }
-      const payload = JSON.stringify({ schema_version: 1, reviews, status: visitedRuns.size === EMBEDDED_DATA.runs.length ? "complete" : "in_progress" }, null, 2);
+    async function showDoneDialog() {
+      if (submitting) return;
+      cancelDraftTimer();
+      revision++;
+      const payload = feedbackPayload(visitedRuns.size === runs.length ? "complete" : "in_progress");
       if (!EMBEDDED_DATA.server_available) {
+        storeStaticFeedback(payload);
         downloadFeedback(payload);
         return;
       }
-      fetch("/api/feedback", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: payload,
-      }).then(response => {
-        if (!response.ok) throw new Error('Feedback save failed');
+
+      const textarea = document.getElementById("feedback");
+      textarea.disabled = submitting = true;
+      updateNavButtons();
+      try {
+        await postFeedback(payload);
         document.getElementById("done-overlay").classList.add("visible");
-      }).catch(() => {
+      } catch {
         downloadFeedback(payload);
-      });
+      } finally {
+        textarea.disabled = submitting = false;
+        updateNavButtons();
+      }
     }
 
     function downloadFeedback(payload) {

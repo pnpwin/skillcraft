@@ -35,19 +35,22 @@ Install the plugin from Git, or place this skill directory in
 `SKILL.md` as the base for resource paths and script commands. Keep experiments in
 `<project>/.agents/skillcraft-workspaces/<skill-id>/iteration-NNN/`.
 
-Install the Python dependencies once. Install the Node dependencies when using OpenCode.
+Use `SKILLCRAFT` for the absolute directory containing this `SKILL.md`. Keep
+`SKILLCRAFT_VENV` at an absolute, writable path outside that directory so it
+survives plugin updates. Install Python dependencies there and install Node
+dependencies when using OpenCode.
 
 ```sh
-python3 -m venv "$SKILLCRAFT/.venv"
-"$SKILLCRAFT/.venv/bin/pip" install -r "$SKILLCRAFT/requirements.txt"
+export SKILLCRAFT_VENV="${SKILLCRAFT_VENV:-${XDG_DATA_HOME:-$HOME/.local/share}/skillcraft/venv}"
+python3 -m venv "$SKILLCRAFT_VENV"
+"$SKILLCRAFT_VENV/bin/python" -m pip install -r "$SKILLCRAFT/requirements.txt"
 npm --prefix "$SKILLCRAFT/scripts/opencode-runner" ci  # OpenCode
 ```
 
-Here `SKILLCRAFT` is the absolute directory containing this SKILL.md. Use its
-virtualenv Python for all commands. Scripts detect the harness from the calling
-session, including local Codex chats in the ChatGPT desktop app. In a terminal
-or CI, pass `--harness codex` or `--harness opencode`. `--harness chatgpt` is an
-alias for the Codex runner. Read `references/codex-runner.md` or
+Use the `SKILLCRAFT_VENV` interpreter for all Python commands. Scripts detect the
+harness from the calling session, including local Codex chats in the ChatGPT
+desktop app. In a terminal or CI, pass `--harness codex` or `--harness opencode`.
+`--harness chatgpt` is an alias for the Codex runner. Read `references/codex-runner.md` or
 `references/opencode-runner.md` before configuring models, authentication or
 permissions.
 Read `references/schemas.md` before generating eval inputs or consuming results.
@@ -102,7 +105,7 @@ verified recurring work benefits from a stable implementation.
 Validate with:
 
 ```sh
-"$SKILLCRAFT/.venv/bin/python" "$SKILLCRAFT/scripts/quick_validate.py" "$CANDIDATE" --lint
+"$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/quick_validate.py" "$CANDIDATE" --lint
 ```
 
 Agent Skills requires a description of at most 1024 characters. Check format
@@ -132,7 +135,7 @@ new skill compare `without_skill` against `with_skill`; for revisions also pass
 `--previous` pointing to the saved prior skill directory.
 
 ```sh
-"$SKILLCRAFT/.venv/bin/python" "$SKILLCRAFT/scripts/run_quality_eval.py" \
+"$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/run_quality_eval.py" \
   --skill "$CANDIDATE" --evals "$QUALITY_EVALS" --workspace "$ITERATION" \
   --model "$EXECUTOR_MODEL" --judge-model "$JUDGE_MODEL" --repeats 3 --workers 2
 ```
@@ -169,7 +172,7 @@ Inspect actual artifacts, evidence, errors, repetitions, token usage and latency
 Show the human reviewer the viewer:
 
 ```sh
-"$SKILLCRAFT/.venv/bin/python" "$SKILLCRAFT/scripts/generate_review.py" \
+"$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/generate_review.py" \
   "$ITERATION" --benchmark "$ITERATION/benchmark.json" --no-browser
 ```
 
@@ -196,7 +199,7 @@ keywords with the skill. Each row has a stable ID, prompt, boolean `should_trigg
 and a `group` shared by paraphrases/near-duplicates.
 
 ```sh
-"$SKILLCRAFT/.venv/bin/python" "$SKILLCRAFT/scripts/run_eval.py" \
+"$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/run_eval.py" \
   --skill "$CANDIDATE" --evals "$TRIGGER_EVALS" --workspace "$TRIGGER_RUN" \
   --model "$EXECUTOR_MODEL" --repeats 3 --workers 2
 ```
@@ -227,7 +230,7 @@ generated diff and results before changing the installed skill; readiness is not
 human approval. The normal optimizer below accepts only standard-valid candidates.
 
 ```sh
-"$SKILLCRAFT/.venv/bin/python" "$SKILLCRAFT/scripts/run_loop.py" \
+"$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/run_loop.py" \
   --skill "$CANDIDATE" --evals "$TRIGGER_EVALS" --workspace "$OPTIMIZATION" \
   --model "$EXECUTOR_MODEL" --optimizer-model "$OPTIMIZER_MODEL" \
   --quality-evals "$QUALITY_EVALS" --judge-model "$JUDGE_MODEL" --iterations 3
@@ -256,9 +259,9 @@ quality run using native attachment. Release this shared SkillCraft package with
 evidence from both harnesses.
 
 ```sh
-"$SKILLCRAFT/.venv/bin/python" "$SKILLCRAFT/scripts/compliance.py" "$CANDIDATE" \
+"$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/compliance.py" "$CANDIDATE" \
   --run "$QUALITY_RUN" --workspace "$NEW_ACCEPTANCE_DIR"
-"$SKILLCRAFT/.venv/bin/python" "$SKILLCRAFT/scripts/package_skill.py" "$CANDIDATE" "$DIST" \
+"$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/package_skill.py" "$CANDIDATE" "$DIST" \
   --run "$CODEX_QUALITY_RUN" --run "$OPENCODE_QUALITY_RUN" --verification-dir "$NEW_PACKAGE_CHECK_DIR"
 ```
 
