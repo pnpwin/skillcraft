@@ -6,11 +6,47 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.codex_runner import _messages
+from scripts.evidence import project_evidence
 from scripts.grade import grade_run, validate_grading
 from scripts.utils import write_json
 
 
 class GraderContract(unittest.TestCase):
+    def test_codex_judge_receives_result_printed_only_by_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = 'Verified subtotal: 42'
+            row = {'prompt': 'Check the subtotal', 'expectations': ['The command confirms 42']}
+            items = [
+                {'id': 'cmd', 'type': 'commandExecution', 'command': 'python3 inputs/check.py',
+                 'status': 'completed', 'exitCode': 0, 'aggregatedOutput': marker + '\npassword=fake-password'},
+                {'id': 'final', 'type': 'agentMessage', 'phase': 'final_answer', 'text': 'Checked.'},
+            ]
+            write_json(root / 'messages.json', _messages({'directory': tmp, 'prompt': row['prompt']}, items, 'thread', 'turn'))
+            write_json(root / 'run.json', {'status': 'completed'})
+            (root / 'outputs').mkdir()
+            (root / 'outputs' / '_response.txt').write_text('Checked.', encoding='utf-8')
+            project_evidence(root)
+
+            def judge(prompt, target, model, *, files, **kwargs):
+                evidence = '\n'.join(Path(entry['source']).read_text() for entry in files if entry['role'] == 'evidence')
+                self.assertIn(marker, evidence)
+                self.assertNotIn('fake-password', evidence)
+                self.assertNotIn(marker, prompt)
+                target.mkdir()
+                write_json(target / 'response.txt', {
+                    'expectations': [{'text': row['expectations'][0], 'passed': True, 'evidence': marker}],
+                    'eval_feedback': {'issues': []},
+                })
+                return {'status': 'completed'}
+
+            with patch('scripts.grade.run_model', side_effect=judge) as run:
+                grade = grade_run(root, row, judge_model='test-model', harness='codex')
+            run.assert_called_once()
+            self.assertEqual(grade['status'], 'completed')
+            self.assertEqual(grade['summary']['passed'], 1)
+
     def test_mixed_payload_and_permission_status_cannot_be_masked_by_valid_json(self):
         for status in ['completed', 'permission_blocked']:
             with self.subTest(status=status), tempfile.TemporaryDirectory() as tmp:

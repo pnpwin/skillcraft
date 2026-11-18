@@ -25,6 +25,12 @@ import uuid
 
 
 SERVER_TIMEOUT = 30
+MAX_COMMAND_OUTPUT_CHARS = 16_000
+_OUTPUT_TRUNCATION = "\n[... command output truncated ...]\n"
+_TERMINAL_CONTROLS = re.compile(
+    r"\x1b\][^\x1b\x07]*(?:\x07|\x1b\\)|"
+    r"\x1b\[[0-?]*[ -/]*[@-~]|[\x00-\x08\x0b-\x1f\x7f-\x9f]"
+)
 
 
 def _json(path: Path, obj):
@@ -356,6 +362,10 @@ def _messages(r, items, thread_id, turn_id):
             state = {"status": item.get("status"), "input": {"command": command, "cwd": cwd}}
             if isinstance(item.get("exitCode"), int):
                 state["exitCode"] = item["exitCode"]
+            if isinstance(output := item.get("aggregatedOutput"), str):
+                output, truncated = _sanitize_command_output(output)
+                state["content"] = [{"type": "text", "text": output}]
+                state["output_truncated"] = truncated
             messages.append({"type": "assistant", "id": item.get("id"),
                              "content": [{"type": "tool", "id": item.get("id"),
                                           "name": "commandExecution", "state": state}]})
@@ -399,10 +409,36 @@ def _relative_workspace_path(value, workspace):
 def _sanitize_command(command):
     if not isinstance(command, str):
         return ""
-    command = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[redacted]", command)
-    command = re.sub(r"(?i)((?:api[_-]?key|access[_-]?token|password|secret|credential)(?:=|\s+)\s*)([^\s]+)",
-                     r"\1[redacted]", command)
-    return command[:4000]
+    return _redact_credentials(command, positional=True)[:4000]
+
+
+def _redact_credentials(text, *, positional=False):
+    text = re.sub(r"(?i)(\bbearer[ \t]+)[A-Za-z0-9._~+/=-]+", r"\1[redacted]", text)
+    text = re.sub(r"""(?i)(\bauthorization["']?[ \t]*[:=][ \t]*["']?basic[ \t]+)[A-Za-z0-9+/=]+""",
+                  r"\1[redacted]", text)
+    label = r"(?:api[_-]?key|(?:access|refresh)[_-]?token|password|secret|credential)"
+    assignment = rf"""(?<![A-Za-z0-9]){label}["']?[ \t]*[:=][ \t]*"""
+    flag_prefix = "" if positional else "--"
+    argument = rf"{flag_prefix}{label}[ \t]+"
+    value = r"""("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|[^\s,;}]+)"""
+
+    def redact_value(match):
+        credential = match[2]
+        quote = credential[0] if credential[0] in {"'", '"'} and credential[-1] == credential[0] else ""
+        return f"{match[1]}{quote}[redacted]{quote}"
+
+    return re.sub(rf"(?i)({assignment}|{argument}){value}", redact_value, text)
+
+
+def _sanitize_command_output(output):
+    output = _TERMINAL_CONTROLS.sub("", output.replace("\r\n", "\n").replace("\r", "\n"))
+    output = _redact_credentials(output)
+    if len(output) <= MAX_COMMAND_OUTPUT_CHARS:
+        return output, False
+    available = MAX_COMMAND_OUTPUT_CHARS - len(_OUTPUT_TRUNCATION)
+    head = available // 2
+    tail = available - head
+    return output[:head] + _OUTPUT_TRUNCATION + output[-tail:], True
 
 
 def _final_response(items):

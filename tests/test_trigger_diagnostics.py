@@ -14,6 +14,19 @@ from scripts.runtime import run_model
 
 
 class TriggerDiagnostics(unittest.TestCase):
+    def test_shell_calls_counts_completed_commands_in_both_harnesses(self):
+        for harness, tool_name in [('opencode', 'shell'), ('codex', 'commandExecution')]:
+            with self.subTest(harness=harness), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                tools = [
+                    {'type': 'tool', 'name': name, 'state': {'status': status}}
+                    for name, status in [(tool_name, 'completed'), (tool_name, 'failed'),
+                                         (tool_name, 'inProgress'), ('read', 'completed')]
+                ]
+                write_json(root / 'messages.json', [{'type': 'assistant', 'content': tools}])
+                result = {'harness': harness, 'status': 'completed', 'triggered': False}
+                self.assertEqual(diagnose(root, result, 'candidate')['shell_calls'], 1)
+
     def test_load_survives_error_and_preparation_is_not_model_use(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

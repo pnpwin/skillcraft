@@ -13,7 +13,7 @@ def diagnose(run_dir, result, skill_id):
         state = part.get('state', {})
         if part.get('name') == 'skill' and state.get('status') == 'completed' and (state.get('input') or {}).get('id') == skill_id:
             loaded = True
-        if part.get('name') == 'shell' and state.get('status') == 'completed':
+        if part.get('name') in ('shell', 'commandExecution') and state.get('status') == 'completed':
             shell_calls.append(part)
             if loaded:
                 after_load += 1

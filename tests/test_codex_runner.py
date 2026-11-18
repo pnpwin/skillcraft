@@ -70,11 +70,13 @@ class CodexRunnerTests(unittest.TestCase):
         messages = codex_runner._messages({"prompt": "Review", "directory": "/tmp/work"}, items, "thread", "turn")
         self.assertEqual([m["content"][0]["text"] for m in messages[1:]], ["Thinking", '{"score":1}'])
 
-    def test_tool_evidence_is_minimal_and_workspace_relative(self):
+    def test_tool_evidence_keeps_sanitized_output_and_workspace_relative_paths(self):
+        output = ('\x1b[32mSubtotal: 42\x1b[0m\r\nAuthorization: Bearer fake-access-token\r\n'
+                  '{"refresh_token": "dummy refresh value"}\r\nOPENAI_API_KEY=fake-api-key\x00')
         messages = codex_runner._messages({"prompt": "Run it", "directory": "/tmp/work"}, [
             {"id": "cmd-1", "type": "commandExecution", "command": "curl --api-key=secret123 https://example.test",
              "cwd": "/tmp/work/inputs", "status": "completed", "exitCode": 0,
-             "aggregatedOutput": "do not keep"},
+             "aggregatedOutput": output},
             {"id": "change-1", "type": "fileChange", "status": "completed",
              "changes": [{"path": "/tmp/work/outputs/report.json", "kind": "add", "diff": "secret diff"}]},
         ], "thread", "turn")
@@ -82,9 +84,31 @@ class CodexRunnerTests(unittest.TestCase):
         self.assertEqual(command["state"]["input"]["cwd"], "inputs")
         self.assertEqual(command["state"]["exitCode"], 0)
         self.assertNotIn("secret123", json.dumps(messages))
-        self.assertNotIn("do not keep", json.dumps(messages))
+        saved = command["state"]["content"][0]["text"]
+        self.assertIn("Subtotal: 42\n", saved)
+        self.assertEqual(json.loads(saved.splitlines()[2]), {"refresh_token": "[redacted]"})
+        self.assertNotIn("\x1b", saved)
+        self.assertNotIn("\x00", saved)
+        for secret in ("fake-access-token", "dummy refresh value", "fake-api-key"):
+            self.assertNotIn(secret, saved)
+        self.assertFalse(command["state"]["output_truncated"])
         self.assertEqual(messages[2]["content"][0]["state"]["input"]["changes"],
                          [{"path": "outputs/report.json", "kind": "add"}])
+
+    def test_large_command_output_keeps_head_and_tail_and_marks_truncation(self):
+        output = "First line\n" + "a" * 100_000 + "\nFinal result: 42"
+        messages = codex_runner._messages({"directory": "/tmp/work"}, [
+            {"id": "cmd-1", "type": "commandExecution", "status": "failed", "exitCode": 2,
+             "aggregatedOutput": output},
+        ], "thread", "turn")
+        state = messages[1]["content"][0]["state"]
+        saved = state["content"][0]["text"]
+        self.assertTrue(state["output_truncated"])
+        self.assertLessEqual(len(saved), codex_runner.MAX_COMMAND_OUTPUT_CHARS)
+        self.assertTrue(saved.startswith("First line\n"))
+        self.assertIn("output truncated", saved)
+        self.assertTrue(saved.endswith("Final result: 42"))
+        self.assertEqual(state["exitCode"], 2)
 
     def test_trigger_outcome_distinguishes_healthy_negative_from_missing_telemetry(self):
         self.assertTrue(codex_runner._trigger_result({
