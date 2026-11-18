@@ -24,7 +24,7 @@ installation.
 From the project where you use Codex or OpenCode:
 
 ```sh
-git clone https://github.com/pnpwin/opencode-skillcraft.git .agents/skills/skillcraft
+git clone https://github.com/pnpwin/skillcraft.git .agents/skills/skillcraft
 export SKILLCRAFT="$PWD/.agents/skills/skillcraft"
 python3 -m venv "$SKILLCRAFT/.venv"
 "$SKILLCRAFT/.venv/bin/python" -m pip install -r "$SKILLCRAFT/requirements.txt"
