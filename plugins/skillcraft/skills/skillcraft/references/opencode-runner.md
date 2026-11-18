@@ -23,11 +23,13 @@ export SKILLCRAFT="$PWD/.agents/skills/skillcraft"
 For a Git plugin installation, set `SKILLCRAFT` to the absolute directory
 containing the `SKILL.md` reported by the OpenCode skill registry.
 
-Install the evaluation dependencies with Python 3.11+ and Node 22+:
+Install the evaluation dependencies with Python 3.11+ and Node 22+.
+Use an absolute, writable `SKILLCRAFT_VENV` outside the skill directory.
 
 ```sh
-python3 -m venv "$SKILLCRAFT/.venv"
-"$SKILLCRAFT/.venv/bin/pip" install -r "$SKILLCRAFT/requirements.txt"
+export SKILLCRAFT_VENV="${SKILLCRAFT_VENV:-${XDG_DATA_HOME:-$HOME/.local/share}/skillcraft/venv}"
+python3 -m venv "$SKILLCRAFT_VENV"
+"$SKILLCRAFT_VENV/bin/python" -m pip install -r "$SKILLCRAFT/requirements.txt"
 npm --prefix "$SKILLCRAFT/scripts/opencode-runner" ci
 ```
 
@@ -242,8 +244,8 @@ preserve historical source workspaces; see schemas.md before composing summaries
 ```sh
 npm --prefix "$SKILLCRAFT/scripts/opencode-runner" run check
 "$SKILLCRAFT/scripts/opencode-runner/node_modules/.bin/tsx" --test tests/opencode/*.test.mts
-"$SKILLCRAFT/.venv/bin/python" -m unittest discover -s tests -t . -v
-"$SKILLCRAFT/.venv/bin/python" tests/smoke_test.py \
+"$SKILLCRAFT_VENV/bin/python" -m unittest discover -s tests -t . -v
+"$SKILLCRAFT_VENV/bin/python" tests/smoke_test.py \
   --model 'provider/model#variant' --workspace "$PWD/.agents/skillcraft-workspaces/smoke-001"
 ```
 
@@ -255,7 +257,7 @@ Human review remains human: automation verifies feedback plumbing, not user appr
 The restored skill's full live acceptance is reproducible with:
 
 ```sh
-"$SKILLCRAFT/.venv/bin/python" tests/verify_restoration.py \
+"$SKILLCRAFT_VENV/bin/python" tests/verify_restoration.py \
   --workspace "$PWD/.agents/skillcraft-workspaces/restoration/new-acceptance" \
   --model 'openai/gpt-6-astra#low' \
   --judges 'openai/gpt-6.1-terra#low' 'openai/gpt-6.1-sol#low'

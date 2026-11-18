@@ -10,7 +10,9 @@ import assert from 'node:assert/strict';
 
 const output = process.argv[2];
 const model = process.argv[3];
-if (!output || !model) throw Error('Usage: tsx tests/live-reconnect.ts OUTPUT MODEL');
+const venv = process.env.SKILLCRAFT_VENV;
+if (!output || !model) throw Error('Usage: tsx tests/opencode/live-reconnect.mts OUTPUT MODEL');
+if (!venv || !path.isAbsolute(venv)) throw Error('Set SKILLCRAFT_VENV to the absolute virtualenv path');
 const root = fileURLToPath(new URL('../../plugins/skillcraft/skills/skillcraft/', import.meta.url));
 const { url: upstreamUrl, headers: upstreamHeaders } = await discoverEndpoint();
 let dropped = false;
@@ -45,7 +47,7 @@ const address = server.address();
 if (!address || typeof address === 'string') throw Error('No proxy address');
 try {
   const code = `import json; from scripts.runtime import run_model; r=run_model('Reply with exactly OK.',${JSON.stringify(path.resolve(output))},${JSON.stringify(model)},timeout=60); print(json.dumps(r))`;
-  const proc = spawn(path.join(root, '.venv/bin/python'), ['-c', code], {
+  const proc = spawn(path.join(venv, 'bin/python'), ['-c', code], {
     cwd: root, env: { ...process.env, SKILLCRAFT_SERVER: `http://127.0.0.1:${address.port}`,
       SKILLCRAFT_HEADERS: JSON.stringify({ 'x-eval-auth': 'transport-test' }) },
   });
