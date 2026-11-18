@@ -1,4 +1,5 @@
 import type { SessionLogItem, TokenUsageInfo, SessionMessageInfo } from '@opencode/client';
+export type { SessionLogItem, SessionMessageInfo } from '@opencode/client';
 
 type Usage = { tokens: TokenUsageInfo; total_tokens: number; cost: number | null; records: number };
 export function isBusy(time: { busy?: number; idle?: number }): boolean {

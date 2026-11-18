@@ -1,13 +1,11 @@
 import importlib.util
 import json
 from pathlib import Path
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+from tests import SKILL
 from scripts.grade import grade_run
 from scripts.aggregate_benchmark import aggregate
 from scripts.utils import write_json
@@ -62,7 +60,7 @@ class PartialGrading(unittest.TestCase):
             report=aggregate(root)
             self.assertEqual(report['deltas']['without_skill']['paired_pass_rate']['n'],0)
             self.assertEqual(report['run_summary']['with_skill']['evaluation_completion_rate'],0)
-            spec=importlib.util.spec_from_file_location('partial_viewer',ROOT/'eval-viewer/generate_review.py')
+            spec=importlib.util.spec_from_file_location('partial_viewer',SKILL / 'scripts/generate_review.py')
             viewer=importlib.util.module_from_spec(spec);spec.loader.exec_module(viewer)
             data=viewer.build_run(root,root/'eval-x/with_skill/run-001')
             self.assertEqual(data['grading']['coverage']['graded'],2)

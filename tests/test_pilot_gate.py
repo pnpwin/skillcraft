@@ -1,13 +1,10 @@
 import json
 from pathlib import Path
-import sys
 import tempfile
 import threading
 import unittest
 from unittest.mock import patch
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 from scripts.run_quality_eval import run_quality
 from scripts.scheduling import bounded_dispatch
 from scripts.utils import write_json, read_json

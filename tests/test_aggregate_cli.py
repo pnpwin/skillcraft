@@ -6,8 +6,7 @@ import sys
 import tempfile
 import unittest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+from tests import SKILL
 from scripts.utils import write_json
 
 
@@ -26,7 +25,7 @@ class AggregateCLI(unittest.TestCase):
                         'status': 'error' if scenario == 'grading_error' else 'completed',
                         'eval_feedback': {'required': scenario == 'critique_error', 'status': 'error' if scenario == 'critique_error' else 'not_run'},
                         'summary': {'pass_rate': 0 if scenario == 'quality_fail' else 1}})
-                proc = subprocess.run([sys.executable, str(ROOT / 'scripts/aggregate_benchmark.py'), str(root), '--json'],
+                proc = subprocess.run([sys.executable, str(SKILL / 'scripts/aggregate_benchmark.py'), str(root), '--json'],
                                       cwd=tmp, capture_output=True, text=True)
                 self.assertEqual(proc.returncode, 0 if scenario in {'success', 'quality_fail'} else 1, proc.stderr)
                 self.assertEqual(json.loads(proc.stdout), json.loads((root / 'benchmark.json').read_text()))
@@ -35,7 +34,7 @@ class AggregateCLI(unittest.TestCase):
 
     def test_invalid_input_is_diagnostic(self):
         with tempfile.TemporaryDirectory() as tmp:
-            proc = subprocess.run([sys.executable, str(ROOT / 'scripts/aggregate_benchmark.py'), tmp], capture_output=True, text=True)
+            proc = subprocess.run([sys.executable, str(SKILL / 'scripts/aggregate_benchmark.py'), tmp], capture_output=True, text=True)
             self.assertNotEqual(proc.returncode, 0)
             self.assertIn('Aggregation failed:', proc.stderr)
 

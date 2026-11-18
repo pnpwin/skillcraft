@@ -1,13 +1,11 @@
 import json
 from pathlib import Path
-import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 from scripts.historical_baseline import freeze, verify
 from scripts.shrink_description import reformulate, preserved_content, semantic_review, verify_variant_runs, resource_metrics
 from scripts.utils import copy_tree, set_description, write_json

@@ -5,8 +5,7 @@ import sys
 import tempfile
 import unittest
 
-ROOT=Path(__file__).resolve().parents[1]
-sys.path.insert(0,str(ROOT))
+from tests import SKILL
 from scripts.reporting import concise,resource_totals
 from scripts.aggregate_benchmark import aggregate
 from scripts.utils import write_json
@@ -32,12 +31,12 @@ class Reporting(unittest.TestCase):
                 write_json(run/'grading.json',{'status':'completed','summary':{'pass_rate':float(n==1)}})
                 write_json(run/'usage.json',{'executor':{'total_tokens':n*10,'cost':0.5 if n==1 else None},'maintenance':None})
                 specs[key]={'selected':'legacy','included':n==1,'reason':'fixed first-repeat interface sample, not performance selection'}
-            proc=subprocess.run([sys.executable,str(ROOT/'scripts/aggregate_benchmark.py'),str(source)],capture_output=True,text=True)
+            proc=subprocess.run([sys.executable,str(SKILL / 'scripts/aggregate_benchmark.py'),str(source)],capture_output=True,text=True)
             self.assertEqual(proc.returncode,0,proc.stderr)
             self.assertIn('COMPLETE',proc.stdout);self.assertLessEqual(len(proc.stdout.splitlines()),40)
             self.assertLess(len(proc.stdout),8000)
             self.assertIn(str(source/'benchmark.json'),proc.stdout)
-            proc=subprocess.run([sys.executable,str(ROOT/'scripts/aggregate_benchmark.py'),str(source),'--json'],capture_output=True,text=True)
+            proc=subprocess.run([sys.executable,str(SKILL / 'scripts/aggregate_benchmark.py'),str(source),'--json'],capture_output=True,text=True)
             self.assertEqual(json.loads(proc.stdout),json.loads((source/'benchmark.json').read_text()))
             selection={'schema_version':1,'source_workspace':str(source),'rule':'first repeat fixed by test design','runs':specs}
             report=aggregate(source,selection=selection,output=root/'subset')

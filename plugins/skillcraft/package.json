@@ -1,0 +1,24 @@
+{
+  "name": "opencode-skillcraft",
+  "version": "0.1.0",
+  "description": "SkillCraft for OpenCode",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./opencode.js"
+  },
+  "files": [
+    "opencode.js",
+    "skills/",
+    "!skills/**/node_modules/**",
+    "!skills/**/.venv/**",
+    "!skills/**/__pycache__/**",
+    "!skills/**/*.pyc",
+    "!skills/**/*.pyo",
+    "!skills/**/.DS_Store"
+  ],
+  "dependencies": {
+    "@opencode/plugin": "2.2.7",
+    "yaml": "^2.8.2"
+  }
+}

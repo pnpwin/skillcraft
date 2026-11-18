@@ -6,7 +6,6 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.cli_state import prepare_tools, validate_tools, collect_state
 
 

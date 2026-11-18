@@ -1,0 +1,20 @@
+{
+  "name": "pnpwin",
+  "interface": {
+    "displayName": "pnpwin Plugins"
+  },
+  "plugins": [
+    {
+      "name": "skillcraft",
+      "source": {
+        "source": "local",
+        "path": "./plugins/skillcraft"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -1,10 +1,8 @@
 import json
 from pathlib import Path
-import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.evidence import project_evidence, verify_evidence, judge_evidence
 from scripts.inputs import copy_inputs
 from scripts.utils import write_json, digest

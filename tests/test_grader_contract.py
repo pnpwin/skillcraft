@@ -1,11 +1,9 @@
 import json
 from pathlib import Path
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.codex_runner import _messages
 from scripts.evidence import project_evidence
 from scripts.grade import grade_run, validate_grading

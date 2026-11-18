@@ -6,21 +6,29 @@ Python owns datasets, snapshots, repetitions, fixture copies, grading and report
 Each `runtime.run_model()` starts the pinned TypeScript runner with a JSON request
 file. The runner uses `@opencode/client@2.2.7` against the OpenCode server. It owns
 one fresh archived session. Executor, judge and optimizer sessions are independent.
-Prompt resources under `agents/` are not registered OpenCode agents.
+The judge and comparison prompts live under `references/prompts/`.
 
 `opencode run --format json` is useful for diagnostics but has a different projected
 event format. The embedded `@opencode/sdk` is not needed for this integration.
 
 ## Dependencies and installation
 
-Install the complete directory under `<project>/.agents/skills/skillcraft/`.
-Use Python 3.11+ and Node 22+. Set an absolute base path:
+For a standalone installation under `.agents/skills/skillcraft/`, run this from
+the project root:
 
 ```sh
 export SKILLCRAFT="$PWD/.agents/skills/skillcraft"
+```
+
+For a Git plugin installation, set `SKILLCRAFT` to the absolute directory
+containing the `SKILL.md` reported by the OpenCode skill registry.
+
+Install the evaluation dependencies with Python 3.11+ and Node 22+:
+
+```sh
 python3 -m venv "$SKILLCRAFT/.venv"
 "$SKILLCRAFT/.venv/bin/pip" install -r "$SKILLCRAFT/requirements.txt"
-npm --prefix "$SKILLCRAFT/runner" ci
+npm --prefix "$SKILLCRAFT/scripts/opencode-runner" ci
 ```
 
 Python pins PyYAML 6.0.3. Node dependencies are pinned and have a committed lockfile.
@@ -224,7 +232,7 @@ One repetition has unknown sample standard deviation, not zero variance.
 
 ## Commands and checks
 
-Every script supports `--help` and can be invoked by absolute path from any cwd.
+Run the development checks below from the repository root. Skill commands can be invoked by absolute path from any cwd.
 All experiment destinations must be new; this prevents accidental overwrite.
 Quality/aggregate commands default to a short human summary and save full JSON plus
 `summary.md`. Automation that consumes stdout must pass `--json`. API callers still
@@ -232,10 +240,10 @@ receive the full Python report object. Explicit grading selection and report out
 preserve historical source workspaces; see schemas.md before composing summaries.
 
 ```sh
-npm --prefix "$SKILLCRAFT/runner" run check
-npm --prefix "$SKILLCRAFT/runner" test
-"$SKILLCRAFT/.venv/bin/python" -m unittest discover -s "$SKILLCRAFT/tests" -v
-"$SKILLCRAFT/.venv/bin/python" "$SKILLCRAFT/scripts/smoke_test.py" \
+npm --prefix "$SKILLCRAFT/scripts/opencode-runner" run check
+"$SKILLCRAFT/scripts/opencode-runner/node_modules/.bin/tsx" --test tests/opencode/*.test.mts
+"$SKILLCRAFT/.venv/bin/python" -m unittest discover -s tests -t . -v
+"$SKILLCRAFT/.venv/bin/python" tests/smoke_test.py \
   --model 'provider/model#variant' --workspace "$PWD/.agents/skillcraft-workspaces/smoke-001"
 ```
 
@@ -247,7 +255,7 @@ Human review remains human: automation verifies feedback plumbing, not user appr
 The restored skill's full live acceptance is reproducible with:
 
 ```sh
-"$SKILLCRAFT/.venv/bin/python" "$SKILLCRAFT/scripts/verify_restoration.py" \
+"$SKILLCRAFT/.venv/bin/python" tests/verify_restoration.py \
   --workspace "$PWD/.agents/skillcraft-workspaces/restoration/new-acceptance" \
   --model 'openai/gpt-6-astra#low' \
   --judges 'openai/gpt-6.1-terra#low' 'openai/gpt-6.1-sol#low'
@@ -263,6 +271,6 @@ global-extension effects. Model scores on these fixtures are not a guarantee of
 general quality or a substitute for the user's subjective review.
 
 For a live connection-recovery/auth-context check (also makes a model request), run
-`runner/node_modules/.bin/tsx runner/tests/live-reconnect.ts /absolute/new-result-dir provider/model#variant`.
+`"$SKILLCRAFT/scripts/opencode-runner/node_modules/.bin/tsx" tests/opencode/live-reconnect.mts /absolute/new-result-dir provider/model#variant`.
 The test starts an owned loopback proxy, interrupts one log connection, checks every
 request's explicit auth context, verifies successful recovery, and stops its proxy.

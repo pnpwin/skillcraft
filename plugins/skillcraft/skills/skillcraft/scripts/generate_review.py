@@ -284,7 +284,7 @@ def generate_html(
     server_available: bool = False,
 ) -> str:
     """Generate the complete standalone HTML page with embedded data."""
-    template_path = Path(__file__).parent / "viewer.html"
+    template_path = Path(__file__).resolve().parents[1] / "assets" / "viewer.html"
     template = template_path.read_text()
 
     # Build previous_feedback and previous_outputs maps for the template

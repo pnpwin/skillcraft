@@ -1,0 +1,6 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "skillcraft",
+  "version": "0.1.0",
+  "description": "Create, evaluate, and refine Agent Skills with paired tests and reports."
+}

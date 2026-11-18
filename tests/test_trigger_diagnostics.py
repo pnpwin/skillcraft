@@ -4,7 +4,6 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.trigger_diagnostics import diagnose
 from scripts.run_eval import summarize
 from scripts.utils import write_json

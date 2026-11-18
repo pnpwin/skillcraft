@@ -111,7 +111,7 @@ def grade_run(run_dir, row, *, judge_model=None, timeout=180, judge_profile=None
     from scripts.grading_store import reserve_attempt, seal_attempt, execution_identity
     destination, attempt = reserve_attempt(run_dir, row, grading_dir, judge_model, judge_profile)
     result = {'schema_version': 1, 'status': 'error', 'expectations': [], 'summary': None,
-              'grader_contract': {'version': 2, 'prompt_sha256': digest(ROOT / 'agents/grader.md')},
+              'grader_contract': {'version': 2, 'prompt_sha256': digest(ROOT / 'references/prompts/grader.md')},
               'eval_feedback': {'status': 'not_run', 'required': bool(judge_model), 'issues': [],
                                 'reason': 'No judge model supplied' if not judge_model else 'Executor not yet graded'}}
     grades, expectations = [], []
@@ -162,7 +162,7 @@ def grade_run(run_dir, row, *, judge_model=None, timeout=180, judge_profile=None
                     from scripts.evidence import judge_evidence
                     evidence, projection = judge_evidence(run_dir)
                     result['evidence_projection'] = projection
-                    resource = (ROOT / 'agents' / 'grader.md').read_text(encoding='utf-8')
+                    resource = (ROOT / 'references/prompts/grader.md').read_text(encoding='utf-8')
                     prompt = resource + '\n\n' + __import__('json').dumps({
                         'task': row['prompt'], 'expected_output': row.get('expected_output'),
                         'all_expectations': expectations, 'grade_expectations': pending,

@@ -156,9 +156,9 @@ def run_model(prompt, output, model, *, mode='quality', skill=None, skill_id=Non
     if harness == 'codex':
         command = [sys.executable, '-B', '-m', 'scripts.codex_runner', str(output / 'request.json')]
     else:
-        command = [str(ROOT / 'runner' / 'node_modules' / '.bin' / 'tsx'), str(ROOT / 'runner' / 'src' / 'main.ts'), str(output / 'request.json')]
+        command = [str(ROOT / 'scripts/opencode-runner' / 'node_modules' / '.bin' / 'tsx'), str(ROOT / 'scripts/opencode-runner' / 'src' / 'main.ts'), str(output / 'request.json')]
         if not Path(command[0]).exists():
-            raise RuntimeError('OpenCode runner dependencies missing; run npm ci in runner/')
+            raise RuntimeError('OpenCode runner dependencies missing; run npm ci in scripts/opencode-runner/')
     proc = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:
         stdout, stderr = proc.communicate(timeout=timeout + 90)

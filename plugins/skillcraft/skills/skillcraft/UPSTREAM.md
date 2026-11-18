@@ -8,7 +8,7 @@ Anthropic source and the original OpenCode adaptation.
 - Original license: Apache-2.0; see the preserved `LICENSE.txt`.
 - Adaptation: OpenCode V2 API runner, Python orchestration, corrected measurement
   contracts, isolated file-task profile, and version-bound review feedback.
-- `agents/`, `eval-viewer/`, `assets/eval_review.html`, and packaging code are
+- `references/prompts/`, `scripts/generate_review.py`, the HTML under `assets/`, and packaging code are
   derived from upstream and modified for OpenCode. Other runtime scripts and the
   TypeScript bridge implement the OpenCode-specific adaptation.
 - OpenCode compatibility target: tag `v2.2.6`, commit

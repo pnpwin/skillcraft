@@ -9,36 +9,58 @@ supports paired quality evaluations, natural-trigger testing, training-only
 description optimization, blind comparisons, and hash-bound packaging.
 
 The standalone skill ID is `skillcraft`. See the
-[Codex runner guide](references/codex-runner.md#local-codex-in-the-chatgpt-desktop-app)
+[Codex runner guide](plugins/skillcraft/skills/skillcraft/references/codex-runner.md#local-codex-in-the-chatgpt-desktop-app)
 for setup and verification in a local ChatGPT desktop chat.
 
 ## Requirements
 
-- Python **3.11+** and the dependencies in `requirements.txt`.
+- Python **3.11+** and the dependencies in the skill's `requirements.txt`.
 - For Codex, a CLI with the required App Server APIs, Git and an authorized model connection. See the
-  [Codex runner guide](references/codex-runner.md).
+  [Codex runner guide](plugins/skillcraft/skills/skillcraft/references/codex-runner.md).
 - For OpenCode, a server with the required V2 APIs, a configured model, Node.js **22+** and the
-  locked dependencies under `runner/`. The server and runner share absolute paths.
-  See the [OpenCode runner guide](references/opencode-runner.md).
+  locked dependencies under `scripts/opencode-runner/`. The server and runner share absolute paths.
+  See the [OpenCode runner guide](plugins/skillcraft/skills/skillcraft/references/opencode-runner.md).
 
 Live checks have been run with Codex 0.170.0 and OpenCode 2.2.7. SkillCraft records
 the versions it observes and checks the runtime interfaces it uses.
 
 ## Install
 
-From the project where you use Codex or OpenCode:
+**Codex CLI or local Codex in ChatGPT desktop**
 
 ```sh
-git clone https://github.com/pnpwin/skillcraft.git .agents/skills/skillcraft
-export SKILLCRAFT="$PWD/.agents/skills/skillcraft"
-python3 -m venv "$SKILLCRAFT/.venv"
-"$SKILLCRAFT/.venv/bin/python" -m pip install -r "$SKILLCRAFT/requirements.txt"
-npm --prefix "$SKILLCRAFT/runner" ci  # required for OpenCode
+codex plugin marketplace add pnpwin/skillcraft --ref main
+codex plugin add skillcraft@pnpwin
 ```
 
-The installation directory must be named **`skillcraft`**, matching `name` in
-`SKILL.md`. To install from the optional `.skill` ZIP, extract its
-`skillcraft/` directory into `<project>/.agents/skills/` and install the dependencies.
+**OpenCode V2**
+
+```sh
+opencode plugin add 'github:pnpwin/skillcraft#main::path:plugins/skillcraft'
+```
+
+Use a release tag or commit for a reproducible installation. The OpenCode
+package registers the same skill directory used by the Codex plugin.
+
+**Standalone installation**
+
+Copy the `plugins/skillcraft/skills/skillcraft/` directory from a checkout into
+`<project>/.agents/skills/skillcraft/`. An exported `.skill` archive contains
+the same standalone directory.
+
+**Evaluation dependencies**
+
+For a standalone installation, run `export SKILLCRAFT="$PWD/.agents/skills/skillcraft"`
+from the project root. For a Git plugin installation, set `SKILLCRAFT` to the
+absolute directory containing `SKILL.md` in the runtime's skill registry.
+
+```sh
+python3 -m venv "$SKILLCRAFT/.venv"
+"$SKILLCRAFT/.venv/bin/python" -m pip install -r "$SKILLCRAFT/requirements.txt"
+npm --prefix "$SKILLCRAFT/scripts/opencode-runner" ci  # required for OpenCode
+```
+
+The skill directory is named `skillcraft`, matching its frontmatter name.
 
 Ask the agent to use **SkillCraft** for a recurring workflow:
 
@@ -47,7 +69,7 @@ Ask the agent to use **SkillCraft** for a recurring workflow:
 
 The agent can also select SkillCraft naturally for relevant authoring, evaluation,
 revision, or triggering requests. Instructions and full required guides start at
-[SKILL.md](SKILL.md).
+[SKILL.md](plugins/skillcraft/skills/skillcraft/SKILL.md).
 
 ## Validate and evaluate
 
@@ -55,10 +77,10 @@ revision, or triggering requests. Instructions and full required guides start at
 # Validate the Agent Skills format.
 "$SKILLCRAFT/.venv/bin/python" "$SKILLCRAFT/scripts/quick_validate.py" "$SKILLCRAFT" --json
 
-# Development checks.
-"$SKILLCRAFT/.venv/bin/python" -B -m unittest discover -s "$SKILLCRAFT/tests"
-npm --prefix "$SKILLCRAFT/runner" run check
-npm --prefix "$SKILLCRAFT/runner" test
+# Development checks from the repository root, with SKILLCRAFT set to the checkout's skill directory.
+"$SKILLCRAFT/.venv/bin/python" -B -m unittest discover -s tests -t .
+npm --prefix "$SKILLCRAFT/scripts/opencode-runner" run check
+"$SKILLCRAFT/scripts/opencode-runner/node_modules/.bin/tsx" --test tests/opencode/*.test.mts
 ```
 
 Each experiment needs a new workspace outside the skill, for example
@@ -67,6 +89,11 @@ shell session, including local Codex chats in ChatGPT desktop. Use `--harness co
 or `--harness opencode` in a plain terminal, in CI, or when both session signals
 are present. `--harness chatgpt` explicitly selects the same Codex runner. Each
 experiment uses the selected harness for execution, grading and optimization.
+
+For controlled OpenCode evaluations, point `SKILLCRAFT_SERVER` at a separate
+server with a clean config and a configured model. The interactive Git plugin
+registers SkillCraft in its locations, including locations that would otherwise
+be a clean baseline. Codex evaluations start their own isolated App Server.
 
 Run `compliance.py` on representative native-attachment evidence for each target.
 To package SkillCraft, pass the Codex and OpenCode run directories with two
@@ -96,11 +123,10 @@ For installations migrating from `.opencode/skills/` or the former `skill-creato
 
 ## Layout
 
-- `SKILL.md`, `references/`: authoring and evaluation methodology.
-- `scripts/`: validation, evaluation, optimization, reporting, packaging and the Codex adapter.
-- `runner/`: OpenCode V2 client integration.
-- `agents/`: independent judge prompt resources.
-- `eval-viewer/`, `assets/`: review interfaces and templates.
+- `.agents/plugins/marketplace.json` registers the Codex marketplace.
+- `plugins/skillcraft/` contains the Codex manifest and the OpenCode plugin entry point.
+- `plugins/skillcraft/skills/skillcraft/` contains the shared skill, A/B scripts,
+  runners, judge prompts and review templates.
 - `tests/`: regression tests and representative fixtures.
 
 Custom OpenCode permissions profiles are recorded as **controlled:false**.
@@ -109,6 +135,6 @@ recorded separately from automated grades.
 
 ## License and provenance
 
-See [LICENSE.txt](LICENSE.txt) for Apache-2.0. The authoring method incorporates
+See [LICENSE.txt](plugins/skillcraft/skills/skillcraft/LICENSE.txt) for Apache-2.0. The authoring method incorporates
 Anthropic's upstream skill-creator; its original identity, pinned source and
-attribution are preserved in [UPSTREAM.md](UPSTREAM.md).
+attribution are preserved in [UPSTREAM.md](plugins/skillcraft/skills/skillcraft/UPSTREAM.md).

@@ -1,10 +1,10 @@
 import { OpenCode, type ModelRef, type SessionMessageInfo } from '@opencode/client';
-import { Service } from '@opencode/client/service';
 import { appendFile, mkdir, readFile, writeFile, realpath, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Events, isBusy } from './events.ts';
+import { connect } from './connection.ts';
 
 type Request = {
   schema_version: 1; operation?: 'run' | 'probe'; directory: string; output: string;
@@ -23,21 +23,6 @@ async function exists(file: string) {
   try { await realpath(file); return true; } catch { return false; }
 }
 
-async function connect() {
-  const boundedFetch: typeof fetch = (input, init) => fetch(input, { ...init,
-    signal: AbortSignal.any([...(init?.signal ? [init.signal] : []), AbortSignal.timeout(15000)]) });
-  const explicit = process.env.SKILLCRAFT_SERVER;
-  if (explicit) {
-    // Headers are an environment-only input, never serialized into run artifacts.
-    const headers = JSON.parse(process.env.SKILLCRAFT_HEADERS ?? '{}');
-    if (typeof headers !== 'object' || headers === null || Array.isArray(headers)) throw Error('Invalid SKILLCRAFT_HEADERS');
-    return { client: OpenCode.make({ baseUrl: explicit, headers, fetch: boundedFetch }), url: explicit, headers };
-  }
-  const endpoint = await Service.discover();
-    if (!endpoint) throw Error('No running OpenCode service. Start OpenCode or configure SKILLCRAFT_SERVER.');
-  const headers = Service.headers(endpoint);
-  return { client: OpenCode.make({ baseUrl: endpoint.url, headers, fetch: boundedFetch }), url: endpoint.url, headers };
-}
 type Client = ReturnType<typeof OpenCode.make>;
 async function descendants(client: Client, sessionID: string) {
   const result: Awaited<ReturnType<Client['session']['list']>>['data'] = [];
