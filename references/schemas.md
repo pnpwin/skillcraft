@@ -1,6 +1,17 @@
 # Version 1 contracts
 
-## Agent Skills and OpenCode compliance result (additive contract)
+## Agent Skills and harness compliance result
+
+New executor and request records carry `harness` (`codex` or `opencode`). Codex
+requests encode the model as `{"id":"MODEL","effort":"EFFORT"}`, with optional
+`effort`. OpenCode requests retain their existing model reference. Individual
+compliance reports check one target harness. Shared SkillCraft packaging binds
+one representative execution and a fresh probe per harness to the same skill
+hash. Codex explicit attachment evidence is kept in `codex_attachment.json`.
+
+When selected with `--harness chatgpt`, run and experiment metadata add
+`requested_harness: chatgpt` alongside `harness: codex`. The alias selects the
+same App Server adapter used by Codex CLI and local Codex chats in ChatGPT desktop.
 
 Existing artifact schema_version 1 stays readable. The new compliance object has
 its own schema_version 1 and is independent of task grading and critique:
@@ -10,8 +21,7 @@ its own schema_version 1 and is independent of task grading and critique:
   "schema_version": 1,
   "skill_hash": "hash-of-the-checked-artifact",
   "contract": {
-    "agent_skills_revision": "83021e2be457a9b6679148719c1f6074f0ad975e",
-    "opencode_version": "2.2.6"
+    "agent_skills_revision": "83021e2be457a9b6679148719c1f6074f0ad975e"
   },
   "agent_skills": {
     "status": "FAIL",
@@ -41,6 +51,11 @@ evidence: report NOT_RUN, not PASS. Recommendations do not change normative stat
 Validation emits field/code/message and actual type/length where useful; do not copy
 secrets from arbitrary metadata into diagnostics. Implementation is in quick_validate.py and
 compliance.py; lifecycle callers preserve these checks independently of quality.
+
+The observed version is recorded as `environment.server_version`. Quality
+manifests list all observed versions in `runtime_versions` and record the version
+under `runtime.<harness>` when it is consistent. Changes in version count as
+environment drift when comparing runs or refreshing compatibility evidence.
 
 Standalone check CLI: zero only for that check's PASS. Final acceptance CLI: zero
 only for two PASS values; document nonzero status codes with implementation tests.
@@ -172,7 +187,7 @@ per class are needed for train/validation, three for a two-class final test.
   "timeout_seconds": 180,
   "mode": "quality",
   "skill_id": "candidate",
-  "skill_path": "/absolute/execution-location/.opencode/skills/candidate/SKILL.md",
+  "skill_path": "/absolute/execution-location/.agents/skills/candidate/SKILL.md",
   "skill_sha256": "sha256-of-SKILL.md",
   "attach_skill": true,
   "permissions": [{"action":"*","resource":"*","effect":"deny"}],

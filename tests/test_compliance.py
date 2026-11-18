@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +15,7 @@ from scripts.utils import copy_tree, digest, write_json
 from scripts.improve_description import improve_description
 from scripts.run_eval import run_eval
 from scripts.run_quality_eval import run_quality
+from scripts.package_skill import _normalize_runs, package_openai_plugin
 
 
 class Compliance(unittest.TestCase):
@@ -30,7 +32,7 @@ class Compliance(unittest.TestCase):
         self.request = {'model': {'providerID': 'test', 'id': 'model'}, 'run_id': 'run1', 'operation': 'run',
             'mode': 'quality', 'attach_skill': True, 'skill_id': 'demo-skill',
             'skill_path': str(self.installed / 'SKILL.md'), 'skill_sha256': digest(self.installed / 'SKILL.md')}
-        environment = {'server_version': '2.2.7', 'background': [], 'plugins': [], 'configuration_fingerprint': 'config',
+        environment = {'server_version': '2.3.0', 'background': [], 'plugins': [], 'configuration_fingerprint': 'config',
             'controlled': False, 'candidate': {'id': 'demo-skill', 'path': str(self.installed / 'SKILL.md')}}
         self.record = {'runner_hash': runner_hash(), 'status': 'completed', 'run_id': 'run1', 'prompt_id': 'prompt1',
             'model': self.request['model'], 'profile': {'controlled': False}, 'installed_hash': installed_hash,
@@ -56,12 +58,31 @@ class Compliance(unittest.TestCase):
             check = {'agent_skills': {'status': a}, 'opencode': {'status': b}, 'accepted': True}
             self.assertEqual(acceptance_exit(check) == 0, a == b == 'PASS')
 
+    def test_packager_accepts_dual_runs_and_preserves_single_run_api(self):
+        self.assertEqual(_normalize_runs(run_dir=Path('legacy-run')), {'opencode': Path('legacy-run')})
+        self.assertEqual(_normalize_runs(run_dirs={'opencode': Path('open'), 'codex': Path('codex')}),
+                         {'opencode': Path('open'), 'codex': Path('codex')})
+        with self.assertRaises(ValueError):
+            _normalize_runs(run_dirs={'opencode': Path('same'), 'codex': Path('same')})
+
     def test_matching_evidence_and_legacy_absence(self):
         self.assertTrue(assess(self.skill, self.run)['accepted'])
         self.assertEqual(assess(self.skill)['opencode']['status'], 'NOT_RUN')
         del self.record['runner_hash']
         self.persist()
         self.assertEqual(assess(self.skill, self.run)['opencode']['status'], 'NOT_RUN')
+
+    def test_openai_plugin_wraps_the_same_skill_bytes(self):
+        plain = self.root / 'demo-skill.skill'
+        content = (self.skill / 'SKILL.md').read_bytes()
+        with zipfile.ZipFile(plain, 'w') as archive:
+            archive.writestr('demo-skill/SKILL.md', content)
+        path = package_openai_plugin(plain, '0.1.0')
+        with zipfile.ZipFile(path) as plugin:
+            manifest = json.loads(plugin.read('plugin.json'))
+            self.assertEqual(manifest['name'], 'demo-skill')
+            self.assertEqual(manifest['version'], '0.1.0')
+            self.assertEqual(plugin.read('skills/demo-skill/SKILL.md'), content)
 
     def test_corruption_is_error_and_changed_body_is_fail(self):
         (self.run / 'response.txt').write_text('Corrupted')
@@ -94,6 +115,13 @@ class Compliance(unittest.TestCase):
         run = json.loads((probe / 'run.json').read_text());run['evidence_hashes']['request.json'] = digest(probe / 'request.json')
         write_json(probe / 'run.json', run)
         self.assertTrue(assess(self.skill, self.run, require_fresh=True, probe_dir=probe)['accepted'])
+        run['environment']['server_version'] = '2.4.0'
+        write_json(probe / 'environment.json', run['environment'])
+        run['evidence_hashes']['environment.json'] = digest(probe / 'environment.json')
+        write_json(probe / 'run.json', run)
+        check = assess(self.skill, self.run, require_fresh=True, probe_dir=probe)
+        self.assertEqual(check['opencode']['issues'][0]['code'], 'environment_changed')
+        run['environment']['server_version'] = self.record['environment']['server_version']
         run['environment']['configuration_fingerprint'] = 'new-global-config'
         write_json(probe / 'environment.json', run['environment'])
         run['evidence_hashes']['environment.json'] = digest(probe / 'environment.json')
@@ -109,6 +137,52 @@ class Compliance(unittest.TestCase):
         self.request['mode'] = 'quality';write_json(self.run / 'request.json', self.request)
         write_json(self.run / 'messages.json', [{'type': 'user', 'id': 'wrong', 'skills': [{'id': 'other'}]}]);self.persist()
         self.assertEqual(assess(self.skill, self.run)['opencode']['status'], 'ERROR')
+
+    def test_codex_requires_explicit_hash_bound_attachment_and_harness_match(self):
+        self.record['harness'] = 'codex'
+        self.record.update(thread_id='thread', turn_id='turn')
+        self.request['harness'] = 'codex'
+        self.request['model'] = {'id': 'model', 'effort': 'high'}
+        self.record['model'] = self.request['model']
+        self.record['environment']['server_version'] = '0.171.0'
+        write_json(self.run / 'environment.json', self.record['environment'])
+        write_json(self.run / 'request.json', self.request)
+        proof = {'schema_version': 1, 'confirmed': True,
+            'evidence_kind': 'explicit_input_and_durable_user_item', 'thread_id': 'thread',
+            'turn_id': 'turn', 'user_message_id': 'message',
+            'skill': {'name': 'demo-skill', 'path': str(self.installed / 'SKILL.md'),
+                      'sha256': digest(self.installed / 'SKILL.md')},
+            'source_item': {'type': 'skill', 'id': 'item'}}
+        write_json(self.run / 'codex_attachment.json', proof)
+        self.record['runner_hash'] = runner_hash('codex')
+        self.persist()
+        self.record['evidence_hashes']['codex_attachment.json'] = digest(self.run / 'codex_attachment.json')
+        write_json(self.run / 'run.json', self.record)
+        check = assess(self.skill, self.run)
+        self.assertTrue(check['accepted'])
+        self.assertEqual(check['selected_runtime'], 'codex')
+        self.assertEqual(check['codex']['status'], 'PASS')
+        self.assertEqual(check['opencode']['status'], 'NOT_RUN')
+        probe = self.root / 'codex-probe'
+        copy_tree(self.run, probe)
+        (probe / 'codex_attachment.json').unlink()
+        probe_request = json.loads((probe / 'request.json').read_text())
+        probe_request['operation'] = 'probe'
+        write_json(probe / 'request.json', probe_request)
+        probe_record = json.loads((probe / 'run.json').read_text())
+        probe_record['evidence_hashes'].pop('codex_attachment.json')
+        probe_record['evidence_hashes']['request.json'] = digest(probe / 'request.json')
+        write_json(probe / 'run.json', probe_record)
+        self.assertTrue(assess(self.skill, self.run, probe_dir=probe, require_fresh=True)['accepted'])
+        mismatched = assess(self.skill, self.run, harness='opencode')
+        self.assertEqual(mismatched['selected_runtime'], 'opencode')
+        self.assertEqual(mismatched['opencode']['status'], 'FAIL')
+
+        proof['confirmed'] = None
+        write_json(self.run / 'codex_attachment.json', proof)
+        self.record['evidence_hashes']['codex_attachment.json'] = digest(self.run / 'codex_attachment.json')
+        write_json(self.run / 'run.json', self.record)
+        self.assertEqual(assess(self.skill, self.run)['codex']['status'], 'ERROR')
 
     def test_real_cli_missing_runtime_and_package_block(self):
         p = subprocess.run([sys.executable, str(ROOT / 'scripts/compliance.py'), str(self.skill),

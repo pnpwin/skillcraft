@@ -3,17 +3,19 @@
 Skill Packager - Creates a distributable .skill file of a skill folder
 
 Usage:
-    python scripts/package_skill.py <path/to/skill-folder> [output-directory] --run <quality-run-directory>
+    python scripts/package_skill.py <path/to/skill-folder> [output-directory] --run opencode=<run-dir> --run codex=<run-dir>
 
 Example:
     python scripts/package_skill.py .opencode/skills/my-skill ./dist --run ./experiment/eval-task/with_skill/run-001
 
-Install by extracting the skill directory into <project>/.opencode/skills/.
-The ZIP is a distribution format, not a native OpenCode installer.
+Install by extracting the skill directory into <project>/.agents/skills/.
+The ZIP is a distribution format, not a native harness installer.
 """
 
 import fnmatch
 import argparse
+import json
+from copy import copy
 import sys
 import zipfile
 import tempfile
@@ -22,13 +24,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.quick_validate import validate_skill
 from scripts.compliance import accept_current, assess, skill_hash
+from scripts.utils import parse_frontmatter
 
 # Patterns to exclude when packaging skills.
 EXCLUDE_DIRS = {"__pycache__", "node_modules", ".venv", ".git", "skillcraft-workspaces"}
 EXCLUDE_GLOBS = {"*.pyc"}
 EXCLUDE_FILES = {".DS_Store"}
 # Directories excluded only at the skill root (not when nested deeper).
-ROOT_EXCLUDE_DIRS = {"evals"}
+ROOT_EXCLUDE_DIRS = {"evals", "tests"}
 
 
 def should_exclude(rel_path: Path) -> bool:
@@ -46,7 +49,24 @@ def should_exclude(rel_path: Path) -> bool:
     return any(fnmatch.fnmatch(name, pat) for pat in EXCLUDE_GLOBS)
 
 
-def package_skill(skill_path, output_dir=None, *, run_dir=None, verification_dir=None):
+def _normalize_runs(run_dir=None, run_dirs=None):
+    if run_dir is not None and run_dirs is not None:
+        raise ValueError('Use run_dir or run_dirs, not both')
+    if run_dirs is not None:
+        runs = dict(run_dirs)
+    elif run_dir is not None:
+        # Historical API used one OpenCode run directory.
+        runs = {'opencode': run_dir}
+    else:
+        runs = {}
+    if set(runs) - {'opencode', 'codex'}:
+        raise ValueError('Run mapping keys must be opencode or codex')
+    if len(set(map(str, runs.values()))) != len(runs):
+        raise ValueError('Each harness must have a distinct run directory')
+    return runs
+
+
+def package_skill(skill_path, output_dir=None, *, run_dir=None, run_dirs=None, verification_dir=None):
     """
     Package a skill folder into a .skill file.
 
@@ -83,10 +103,25 @@ def package_skill(skill_path, output_dir=None, *, run_dir=None, verification_dir
         return None
     print(f"✅ {message}\n")
 
-    preliminary = assess(skill_path, run_dir)
-    if not preliminary['accepted']:
-        print('OpenCode compatibility:', preliminary['opencode']['status'])
+    runs = _normalize_runs(run_dir, run_dirs)
+    is_skillcraft = skill_path.name.casefold() == 'skillcraft'
+    if is_skillcraft and set(runs) != {'opencode', 'codex'}:
+        print('SkillCraft release requires one hash-bound run from each harness.')
+        return None
+    if not runs:
         print('Packaging requires hash-bound representative execution evidence (--run).')
+        return None
+    run_hashes = set()
+    for selected, path in runs.items():
+        preliminary = assess(skill_path, path, harness=selected)
+        run_hashes.add(preliminary['skill_hash'])
+        status = preliminary[selected]['status']
+        if not preliminary['accepted']:
+            print(f'{selected} compatibility: {status}')
+            print('Packaging requires hash-bound representative execution evidence (--run).')
+            return None
+    if len(run_hashes) != 1 or None in run_hashes:
+        print('Harness evidence does not bind the same skill hash.')
         return None
 
     # Determine output location
@@ -101,27 +136,35 @@ def package_skill(skill_path, output_dir=None, *, run_dir=None, verification_dir
     if output_path == skill_path or skill_path in output_path.parents:
         raise ValueError('Archive output must be outside the skill directory')
 
-    verification_dir = Path(verification_dir) if verification_dir else output_path / ('acceptance-' + uuid.uuid4().hex)
-    check = accept_current(skill_path, run_dir, verification_dir)
-    if not check['accepted']:
-        print('OpenCode compatibility:', check['opencode']['status'])
-        return None
+    if not isinstance(verification_dir, dict):
+        verification_dir = Path(verification_dir) if verification_dir else output_path / ('acceptance-' + uuid.uuid4().hex)
+    for selected, path in runs.items():
+        if isinstance(verification_dir, dict):
+            verify_dir = verification_dir.get(selected)
+        elif verification_dir and len(runs) == 1:
+            verify_dir = verification_dir
+        else:
+            base = Path(verification_dir) if verification_dir else output_path
+            verify_dir = base / ('acceptance-' + selected + '-' + uuid.uuid4().hex)
+        if not verify_dir:
+            raise ValueError(f'No verification directory for {selected}')
+        check = accept_current(skill_path, path, verify_dir, harness=selected)
+        if not check['accepted']:
+            print(f'{selected} compatibility:', check[selected]['status'])
+            return None
 
     # Create the .skill file (zip format)
     try:
-        temporary_archive = skill_filename.with_suffix('.skill.tmp')
+        temporary_archive = skill_filename.with_suffix(f'.{uuid.uuid4().hex}.tmp')
         with zipfile.ZipFile(temporary_archive, 'w', zipfile.ZIP_DEFLATED) as zipf:
             # Walk through the skill directory, excluding build artifacts
-            for file_path in skill_path.rglob('*'):
-                if should_exclude(file_path.relative_to(skill_path.parent)):
+            for file_path in sorted(skill_path.rglob('*')):
+                arcname = file_path.relative_to(skill_path.parent)
+                if should_exclude(arcname):
                     continue
                 if file_path.is_symlink():
                     raise ValueError(f'Symlinks are not distributable: {file_path}')
                 if not file_path.is_file():
-                    continue
-                arcname = file_path.relative_to(skill_path.parent)
-                if should_exclude(arcname):
-                    print(f"  Skipped: {arcname}")
                     continue
                 zipf.write(file_path, arcname)
                 print(f"  Added: {arcname}")
@@ -144,12 +187,39 @@ def package_skill(skill_path, output_dir=None, *, run_dir=None, verification_dir
         return None
 
 
+def package_openai_plugin(skill_archive, version):
+    """Wrap a verified standalone archive in the portable Agent Plugins layout."""
+    skill_archive = Path(skill_archive)
+    skill_name = skill_archive.stem
+    output = skill_archive.with_name(f'{skill_name}-openai.zip')
+    temporary = output.with_suffix(f'.{uuid.uuid4().hex}.tmp')
+    try:
+        with zipfile.ZipFile(skill_archive) as source:
+            metadata, _ = parse_frontmatter(source.read(f'{skill_name}/SKILL.md').decode('utf-8'), required=True)
+            manifest = {
+                '$schema': 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json',
+                'name': skill_name, 'version': version, 'description': metadata['description'],
+            }
+            with zipfile.ZipFile(temporary, 'w', zipfile.ZIP_DEFLATED) as bundle:
+                bundle.writestr('plugin.json', json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
+                for asset in source.infolist():
+                    member = copy(asset)
+                    member.filename = f'skills/{asset.filename}'
+                    bundle.writestr(member, source.read(asset))
+        temporary.replace(output)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return output
+
+
 def main():
-    parser = argparse.ArgumentParser(description='Package an OpenCode skill directory for distribution. Extract into <project>/.opencode/skills/.')
+    parser = argparse.ArgumentParser(description='Package an Agent Skill for distribution. Extract into <project>/.agents/skills/.')
     parser.add_argument('skill', type=Path)
     parser.add_argument('output', type=Path, nargs='?')
-    parser.add_argument('--run', type=Path, help='Completed representative native-attachment run with hash-bound evidence')
+    parser.add_argument('--run', action='append', default=[], metavar='[HARNESS=]PATH',
+                        help='Completed hash-bound run; repeat once per harness (Codex and OpenCode for SkillCraft)')
     parser.add_argument('--verification-dir', type=Path, help='New directory for current environment verification')
+    parser.add_argument('--openai-plugin-version', help='Also package the verified skill as a Codex plugin ZIP')
     args = parser.parse_args()
     skill_path = args.skill
     output_dir = args.output
@@ -159,9 +229,29 @@ def main():
         print(f"   Output directory: {output_dir}")
     print()
 
-    result = package_skill(skill_path, output_dir, run_dir=args.run, verification_dir=args.verification_dir)
+    runs = {}
+    for value in args.run:
+        if '=' in value:
+            selected, path = value.split('=', 1)
+        else:
+            path = value
+            try:
+                from scripts.utils import read_json
+                persisted = read_json(Path(path) / 'run.json').get('harness', 'opencode')
+                selected = persisted
+            except (OSError, ValueError, TypeError):
+                selected = 'opencode' if len(args.run) == 1 else ''
+        if selected in runs:
+            parser.error(f'Duplicate --run harness: {selected}')
+        if selected not in {'opencode', 'codex'}:
+            parser.error(f'Cannot determine harness for --run {value!r}; use harness=path')
+        runs[selected] = Path(path)
+
+    result = package_skill(skill_path, output_dir, run_dirs=runs or None, verification_dir=args.verification_dir)
 
     if result:
+        if args.openai_plugin_version:
+            print(f'Packaged OpenAI plugin to: {package_openai_plugin(result, args.openai_plugin_version)}')
         sys.exit(0)
     else:
         sys.exit(1)

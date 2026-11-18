@@ -72,14 +72,21 @@ def cell(rows, repeats, prefix=None):
 
 def generate_html(data, auto_refresh=False, skill_name=''):
     data = copy.deepcopy(data)
-    title = esc(skill_name or 'OpenCode skill optimization')
+    title = esc(skill_name or 'SkillCraft trigger evaluation')
     iterations = data.get('iterations', [])
     standalone = not iterations and isinstance(data.get('results'), list)
     if standalone:
         iterations = [{'candidate': 'Natural-trigger run', 'natural': data.get('summary', {}), 'natural_results': data['results']}]
     best = data.get('best')
     sections = ['natural'] if standalone else ['train', 'validation', 'final_test']
-    body = [f'<h1>{title}</h1><p>Selection: validation {esc(data.get("selection_metric", "not recorded"))}. Final test never selects the candidate.</p>',
+    body = [f'<h1>{title}</h1>']
+    if data.get('harness'):
+        body.append(f'<p>Harness: {esc(data["harness"])}</p>')
+    if data.get('requested_harness') == 'chatgpt':
+        body.append('<p>Local Codex evaluation selected with --harness chatgpt.</p>')
+    if not standalone:
+        body.append(f'<p>Selection: validation {esc(data.get("selection_metric", "not recorded"))}.</p>')
+    body += [
             '<p>Green = correct classification; red = FP/FN; amber = technical error; gray = missing/unknown. An untested candidate has no final-test score.</p>',
             '<label>Find candidate/query <input id="search" type="search"></label> ',
             '<label>Dataset <select id="split"><option value="all">All</option>' + ''.join(f'<option value="{s}">{s.replace("_", " ")}</option>' for s in sections) + '</select></label> ',
@@ -87,12 +94,20 @@ def generate_html(data, auto_refresh=False, skill_name=''):
             '<p id="visible-count" aria-live="polite"></p>']
     for split in sections:
         key = f'{split}_results'
+        items = iterations
+        if split == 'final_test' and data.get('final_test_original_results'):
+            items = [*iterations, {'candidate': 'Original description (baseline)', 'original_test': True}]
         datasets = []
-        for item in iterations:
+        for item in items:
             rows = data.get('final_test_results', []) if split == 'final_test' and item.get('candidate') == best else item.get(key, []) if split != 'final_test' else []
+            if item.get('original_test'):
+                rows = data['final_test_original_results']
             datasets.append(rows or [])
         ids = sorted({str(r.get('eval_id', 'unknown')) for rows in datasets for r in rows})
         body.append(f'<section data-split="{split}"><h2>{split.replace("_", " ").title()}</h2>')
+        if split == 'final_test' and data.get('final_test_balanced_accuracy_delta') is not None:
+            delta = data['final_test_balanced_accuracy_delta']
+            body.append(f'<p>Balanced accuracy change against the original: {delta:+.1%}</p>')
         if not ids:
             body.append('<p>No per-query records. This dataset was not run, is incomplete, or the legacy report contains summaries only.</p>')
         body.append('<div class="scroll"><table><thead><tr><th>Candidate / description / summary</th>')
@@ -100,9 +115,11 @@ def generate_html(data, auto_refresh=False, skill_name=''):
             prompts = list(dict.fromkeys(r.get('prompt', '') for rows in datasets for r in rows if str(r.get('eval_id', 'unknown')) == id_))
             body.append(f'<th>{esc(id_)}<details><summary>Query</summary>{esc(" / ".join(prompts))}</details></th>')
         body.append('</tr></thead><tbody>')
-        for item, rows in zip(iterations, datasets):
+        for item, rows in zip(items, datasets):
             selected = item.get('candidate') == best and best is not None
             summary = data.get('final_test') if split == 'final_test' and selected else item.get(split) if split != 'final_test' else None
+            if item.get('original_test'):
+                summary = data['final_test_original']
             name = str(item.get('candidate', f'iteration-{item.get("iteration", "unknown")}'))
             search_text = name + ' ' + str(item.get('description', '')) + ' ' + ' '.join(str(r.get('prompt', '')) for r in rows)
             body.append(f'<tr data-selected="{str(selected).lower()}" data-search="{esc(search_text.casefold())}"><th scope="row">{esc(name)}')
@@ -118,13 +135,15 @@ def generate_html(data, auto_refresh=False, skill_name=''):
             body.append('</th>')
             index = item.get('iteration')
             prefix = '' if standalone else 'final-test/' if split == 'final_test' and selected else f'iteration-{index:03d}/{split}/' if type(index) is int and index >= 0 and split != 'final_test' else None
+            if item.get('original_test'):
+                prefix = 'final-test-original/'
             for id_ in ids:
                 body.append(cell([r for r in rows if str(r.get('eval_id', 'unknown')) == id_], data.get('repeats'), prefix))
             body.append('</tr>')
         body.append('</tbody></table></div></section>')
     if data.get('quality_regression') is not None:
         body.append('<details><summary>Quality regression and paired resource deltas</summary><pre>' + esc(json.dumps(data['quality_regression'], ensure_ascii=False, indent=2)) + '</pre></details>')
-    body.append('<h2>Evidence</h2><p>Per-run logs and outputs live in iteration-NNN/train or validation/eval-ID/natural/run-NNN; final-test/ contains only the selected candidate.</p>')
+    body.append('<h2>Evidence</h2><p>Use the report links to inspect each run’s transcript and metadata.</p>')
     body.append('<button id="download">Download source JSON</button><details><summary>Source JSON</summary><pre id="source">' + esc(json.dumps(data, ensure_ascii=False, indent=2)) + '</pre></details>')
     script = '''
 function applyFilters() {

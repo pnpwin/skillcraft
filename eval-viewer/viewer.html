@@ -1156,7 +1156,13 @@
       const container = document.getElementById("benchmark-content");
       if (data.schema_version === 1) {
         const fmt = s => !s || s.mean == null ? 'unknown' : s.mean.toFixed(3) + (s.stddev == null ? '' : ' ± ' + s.stddev.toFixed(3)) + ' (n=' + s.n + ')';
-        let html = '<h2>OpenCode benchmark</h2><p>Controlled: ' + String(data.metadata.controlled) + ' · Errors: ' + data.errors + '</p>';
+        const metadata = data.metadata || {};
+        const harness = metadata.harness === 'codex' ? 'Codex' : 'OpenCode';
+        const version = metadata.runtime?.[metadata.harness];
+        let html = '<h2>' + harness + (version ? ' ' + escapeHtml(version) : '') + ' benchmark</h2>';
+        if (metadata.requested_harness === 'chatgpt') html += '<p>Local Codex evaluation selected with --harness chatgpt.</p>';
+        if (metadata.model) html += '<p>Model <code>' + escapeHtml(metadata.model) + '</code></p>';
+        html += '<p>Controlled: ' + String(metadata.controlled) + ' · Errors: ' + data.errors + '</p>';
         if (data.validation_errors?.length) html += '<pre>' + escapeHtml(data.validation_errors.join('\n')) + '</pre>';
         html += '<p>Completion(found) uses observed runs; completion(planned) includes missing runs. Seconds are wall time including preflight/collection. Tokens are executor-only.</p>';
         html += '<table class="benchmark-table"><tr><th>Configuration</th><th>Runs / planned</th><th>Completion(found / planned)</th><th>Pass rate</th><th>Wall seconds</th><th>Executor tokens</th></tr>';

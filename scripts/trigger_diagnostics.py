@@ -13,7 +13,7 @@ def diagnose(run_dir, result, skill_id):
         state = part.get('state', {})
         if part.get('name') == 'skill' and state.get('status') == 'completed' and (state.get('input') or {}).get('id') == skill_id:
             loaded = True
-        if part.get('name') == 'shell' and state.get('status') == 'completed':
+        if part.get('name') in ('shell', 'commandExecution') and state.get('status') == 'completed':
             shell_calls.append(part)
             if loaded:
                 after_load += 1
@@ -29,7 +29,15 @@ def diagnose(run_dir, result, skill_id):
     if load_times and cli and all(isinstance(call.get('started_ms'), (int, float)) for call in cli):
         scoped_after_load = any(call['started_ms'] >= min(load_times) for call in cli)
     status = result.get('status')
-    return {'skill_loaded': loaded, 'skill_load_evidence': 'successful skill tool event' if loaded else 'no successful load observed',
+    skill_load_evidence = 'successful skill tool event' if loaded else 'no successful load observed'
+    if result.get('harness') == 'codex':
+        loaded = result.get('triggered') is True
+        skill_load_evidence = {True: 'native Codex implicit invocation event',
+                               False: 'no native invocation observed',
+                               None: 'Codex observation unavailable'}.get(result.get('triggered'))
+        after_load = None
+        scoped_after_load = None
+    return {'skill_loaded': loaded, 'skill_load_evidence': skill_load_evidence,
             'shell_calls': len(shell_calls), 'shell_calls_after_load': after_load,
             'scoped_cli_calls': len(cli), 'scoped_cli_after_load': scoped_after_load,
             'cli_observation_scope': 'configured launcher invocation attempts, not command success; bare commands are not inferred',

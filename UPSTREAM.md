@@ -1,8 +1,7 @@
 # Provenance
 
-This OpenCode adaptation is named **SkillCraft** and is published as
-`pnpwin/opencode-skillcraft`. The upstream project below retains its original
-name and source paths; attribution and the bundled license are unchanged.
+**SkillCraft** is published as `pnpwin/skillcraft`. This file records the
+Anthropic source and the original OpenCode adaptation.
 
 - Source: https://github.com/anthropics/skills/tree/b9e19e6f44773509fbdd7001d77ff41a49a486c1/skills/skill-creator
 - Upstream revision: `b9e19e6f44773509fbdd7001d77ff41a49a486c1`.

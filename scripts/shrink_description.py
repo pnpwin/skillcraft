@@ -17,6 +17,7 @@ from scripts.run_quality_eval import run_quality
 from scripts.inputs import serial_inputs
 from scripts.grading_store import read_grading
 from scripts.runtime import run_model
+from scripts.harness import add_harness_arg, harness_metadata, parse_harness_args
 from scripts.utils import copy_tree, digest, frontmatter, load_evals, parse_json_response, read_json, set_description, snapshot_fixtures, write_json
 
 
@@ -32,7 +33,7 @@ def preserved_content(before, after):
         raise ValueError('Reformulation changed supporting resources')
 
 
-def semantic_review(baseline, candidate, output, model, *, seed, timeout, profile):
+def semantic_review(baseline, candidate, output, model, *, seed, timeout, profile, harness='opencode'):
     """Only randomized descriptions and unchanged task instructions reach the judge."""
     output.mkdir(parents=True, exist_ok=False)
     roles = ['historical', 'candidate'];random.Random(seed).shuffle(roles)
@@ -50,7 +51,7 @@ def semantic_review(baseline, candidate, output, model, *, seed, timeout, profil
     prompt += json.dumps({'descriptions': descriptions, 'instructions': body}, ensure_ascii=False)
     # Stored outside the judge's Location and never supplied as an input.
     write_json(output / 'blind-map-private.json', mapping)
-    run = run_model(prompt, output / 'judge', model, mode='judge', timeout=timeout, profile=profile)
+    run = run_model(prompt, output / 'judge', model, mode='judge', timeout=timeout, profile=profile, harness=harness)
     if run['status'] != 'completed':
         raise ValueError('Blind semantic judge did not complete')
     verdict = parse_json_response((output / 'judge/response.txt').read_text())
@@ -90,6 +91,7 @@ def resource_metrics(directory):
 
 
 def reformulate(a):
+    harness = getattr(a, 'harness', 'opencode')
     skill, workspace = a.skill.resolve(), a.workspace.resolve()
     workspace.mkdir(parents=True, exist_ok=False)
     data, _ = frontmatter(skill / 'SKILL.md', required=True)
@@ -127,7 +129,7 @@ def reformulate(a):
         if source:
             profiles[role] = workspace / (role + '-profile.json')
             write_json(profiles[role], read_json(source))
-    plan = {'schema_version': 1, 'splits': splits, 'quality_evals': quality_rows,
+    plan = {'schema_version': 1, **harness_metadata(harness), 'splits': splits, 'quality_evals': quality_rows,
         'implementation_hashes': {name: digest(Path(__file__).parent / name) for name in
             ['shrink_description.py', 'historical_baseline.py', 'run_eval.py', 'run_quality_eval.py', 'improve_description.py']},
         'executor': a.model, 'optimizer': a.optimizer_model, 'judge': a.judge_model,
@@ -150,7 +152,7 @@ def reformulate(a):
             raise ValueError('A/B source changed between datasets')
         report = run_eval(candidate_path, splits[split], workspace / (role + '-' + split), a.model,
             repeats=a.repeats, workers=a.workers, timeout=a.timeout, profile=profiles['executor'],
-            historical_baseline=baseline_manifest if role == 'historical' else None)
+            historical_baseline=baseline_manifest if role == 'historical' else None, harness=harness)
         verify_variant_runs(variant_hashes[role], report)
         reports[role + '-' + split] = report
         return report
@@ -158,7 +160,7 @@ def reformulate(a):
     if train['summary']['errors'] or not train['summary']['environment_consistent']:
         raise ValueError('Baseline training infrastructure errors must be resolved before optimization')
     proposal = improve_description(baseline, train, workspace / 'optimizer', a.optimizer_model,
-        a.timeout, profile=profiles['optimizer'])
+        a.timeout, profile=profiles['optimizer'], harness=harness)
     candidate = workspace / 'candidate' / skill.name
     copy_tree(baseline, candidate, skill=True)
     (candidate / 'SKILL.md').chmod(0o644)
@@ -173,7 +175,7 @@ def reformulate(a):
     evaluate('candidate', 'train')
     left = evaluate('historical', 'validation');right = evaluate('candidate', 'validation')
     semantics = semantic_review(baseline, candidate, workspace / 'semantic-review', a.judge_model,
-        seed=a.seed, timeout=a.timeout, profile=profiles['judge'])
+        seed=a.seed, timeout=a.timeout, profile=profiles['judge'], harness=harness)
     ls, rs = selection_score(left), selection_score(right)
     selected = ls is not None and rs is not None and rs >= ls and semantics['preserved']
     write_json(workspace / 'selection.json', {'selected': selected, 'baseline_score': ls,
@@ -187,9 +189,9 @@ def reformulate(a):
         quality = run_quality(candidate, workspace / 'quality-evals.json', workspace / 'quality', a.model,
             repeats=a.repeats, workers=a.workers, previous=baseline, timeout=a.timeout,
             profile=profiles['executor'], historical_baseline=baseline_manifest,
-            judge_model=a.judge_model, judge_profile=profiles['judge'])
+            judge_model=a.judge_model, judge_profile=profiles['judge'], harness=harness)
         candidate_runs = sorted((workspace / 'quality').glob('eval-*/with_skill/run-*'))
-        acceptance = accept_current(candidate, candidate_runs[0], workspace / 'acceptance')
+        acceptance = accept_current(candidate, candidate_runs[0], workspace / 'acceptance', harness=harness)
         grades = [read_grading(p)[0] for p in candidate_runs]
         quality_pass = bool(grades) and all(g['status'] == 'completed' and g['summary']['total'] > 0
             and g['summary']['failed'] == 0 and g['eval_feedback']['status'] != 'error' for g in grades) and not quality['errors'] and not quality['validation_errors']
@@ -231,7 +233,8 @@ def main():
     p.add_argument('--workers', type=int, default=2)
     p.add_argument('--timeout', type=float, default=180)
     p.add_argument('--seed', type=int, default=42)
-    a = p.parse_args()
+    add_harness_arg(p)
+    a = parse_harness_args(p)
     if a.workspace.exists():
         p.error('--workspace must be new; existing evidence is never overwritten')
     try:

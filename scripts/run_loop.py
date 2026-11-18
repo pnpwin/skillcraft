@@ -10,6 +10,8 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.improve_description import improve_description, training_evidence
+from scripts.harness import add_harness_arg, harness_metadata, model_ref, parse_harness_args
+from scripts.runtime import profile_settings
 from scripts.compliance import require_standard, assess
 from scripts.run_eval import run_eval
 from scripts.run_quality_eval import run_quality
@@ -68,6 +70,12 @@ def selection_score(report):
 
 
 def optimize(a):
+    harness = getattr(a, 'harness', 'opencode')
+    for model in [a.model, a.optimizer_model, getattr(a, 'judge_model', None)]:
+        if model:
+            model_ref(model, harness)
+    for name in ['profile', 'judge_profile', 'optimizer_profile']:
+        profile_settings(getattr(a, name, None), harness=harness)
     workspace, skill = a.workspace.resolve(), a.skill.resolve()
     workspace.mkdir(parents=True, exist_ok=False)
     if a.iterations < 1:
@@ -88,13 +96,13 @@ def optimize(a):
             setattr(a, f'{role}_profile', frozen_profile)
     splits = split_evals(rows, a.seed)
     write_json(workspace / 'split.json', {'seed': a.seed, 'sets': splits, 'independent_test': bool(splits['test'])})
-    history = {'schema_version': 1, 'executor_model': a.model, 'optimizer_model': a.optimizer_model,
+    history = {'schema_version': 1, **harness_metadata(harness), 'executor_model': a.model, 'optimizer_model': a.optimizer_model,
                'selection_metric': 'balanced_accuracy', 'iterations': [], 'best': None,
                'repeats': a.repeats,
                'independent_test': bool(splits['test'])}
     current = workspace / 'candidates' / 'v000' / skill.name
     copy_tree(skill, current, skill=True)
-    write_json(workspace / 'compliance.json', assess(current))
+    write_json(workspace / 'compliance.json', assess(current, harness=harness))
     require_standard(current)
     best, best_score = None, -1
     training_history = []
@@ -102,8 +110,10 @@ def optimize(a):
     for iteration in range(a.iterations):
         standard = require_standard(current)
         iteration_dir = workspace / f'iteration-{iteration:03d}'
-        train = run_eval(current, splits['train'], iteration_dir / 'train', a.model, repeats=a.repeats, workers=a.workers, timeout=a.timeout, profile=a.profile)
-        validation = run_eval(current, splits['validation'], iteration_dir / 'validation', a.model, repeats=a.repeats, workers=a.workers, timeout=a.timeout, profile=a.profile)
+        train = run_eval(current, splits['train'], iteration_dir / 'train', a.model, repeats=a.repeats,
+                         workers=a.workers, timeout=a.timeout, profile=a.profile, harness=harness)
+        validation = run_eval(current, splits['validation'], iteration_dir / 'validation', a.model, repeats=a.repeats,
+                              workers=a.workers, timeout=a.timeout, profile=a.profile, harness=harness)
         score = selection_score(validation)
         if score is not None and score > best_score:
             best, best_score = current, score
@@ -123,11 +133,11 @@ def optimize(a):
         write_json(workspace / 'history.json', history)
         from scripts.generate_report import generate_html
         (workspace / 'report.html').write_text(generate_html(history), encoding='utf-8')
+        if selection_score(train) is None or score is None:
+            raise ValueError('Resolve incomplete trigger observations in train or validation before optimizing')
         if iteration + 1 < a.iterations:
-            if train['summary']['errors']:
-                raise ValueError('Training errors must be resolved before description optimization')
             proposal = improve_description(current, train, iteration_dir / 'optimizer', a.optimizer_model, a.timeout,
-                                           history=training_history, profile=getattr(a, 'optimizer_profile', None))
+                                           history=training_history, profile=getattr(a, 'optimizer_profile', None), harness=harness)
             following = workspace / 'candidates' / f'v{iteration + 1:03d}' / skill.name
             copy_tree(current, following, skill=True)
             set_description(following, proposal['description'])
@@ -140,9 +150,24 @@ def optimize(a):
     copy_tree(best, selected, skill=True, readonly=True)
     require_standard(selected)
     if splits['test']:
-        final = run_eval(selected, splits['test'], workspace / 'final-test', a.model, repeats=a.repeats, workers=a.workers, timeout=a.timeout, profile=a.profile)
+        options = dict(repeats=a.repeats, workers=a.workers, timeout=a.timeout, profile=a.profile, harness=harness)
+        original = run_eval(workspace / 'candidates' / 'v000' / skill.name, splits['test'],
+                            workspace / 'final-test-original', a.model, **options)
+        final = run_eval(selected, splits['test'], workspace / 'final-test', a.model, **options)
+        original_score, final_score = selection_score(original), selection_score(final)
+        history['final_test_original'] = original['summary']
+        history['final_test_original_results'] = original['results']
         history['final_test'] = final['summary']
         history['final_test_results'] = final['results']
+        history['final_test_balanced_accuracy_delta'] = (final_score - original_score
+            if final_score is not None and original_score is not None else None)
+        write_json(workspace / 'history.json', history)
+        (workspace / 'report.html').write_text(generate_html(history), encoding='utf-8')
+        if final_score is None or original_score is None:
+            history['promotion_ready'] = False
+            history['promotion_note'] = 'Final test has incomplete trigger observations.'
+            write_json(workspace / 'history.json', history)
+            return history
     else:
         history['final_test'] = None
         history['test_limitation'] = 'Insufficient independent groups; no final test'
@@ -155,13 +180,14 @@ def optimize(a):
         write_json(resolved, {'evals': rows})
         quality = run_quality(selected, resolved, workspace / 'quality-regression', a.model,
                               repeats=a.repeats, workers=a.workers, previous=skill, timeout=a.timeout,
-                              profile=a.profile, judge_model=a.judge_model, judge_profile=getattr(a, 'judge_profile', None))
+                              profile=a.profile, judge_model=a.judge_model, judge_profile=getattr(a, 'judge_profile', None),
+                              harness=harness)
         history['quality_regression'] = {'errors': quality['errors'], 'validation_errors': quality['validation_errors'], 'deltas': quality['deltas'], 'run_summary': quality['run_summary']}
     else:
         history['quality_regression'] = None
     history['promotion_ready'] = False
     runs = sorted((workspace / 'quality-regression').glob('eval-*/with_skill/run-*'))
-    history['compliance'] = [assess(selected, p) for p in runs] if runs else [assess(selected)]
+    history['compliance'] = [assess(selected, p, harness=harness) for p in runs] if runs else [assess(selected, harness=harness)]
     history['promotion_note'] = 'Review final test, quality regression and human feedback before installing selected/.'
     write_json(workspace / 'history.json', history)
     from scripts.generate_report import generate_html
@@ -186,7 +212,9 @@ if __name__ == '__main__':
     p.add_argument('--workers', type=int, default=1)
     p.add_argument('--timeout', type=float, default=180)
     p.add_argument('--seed', type=int, default=42)
-    a = p.parse_args()
+    add_harness_arg(p)
+    a = parse_harness_args(p)
     history = optimize(a)
     print(json.dumps(history, ensure_ascii=False, indent=2))
-    sys.exit(1 if (history.get('final_test') or {}).get('errors') or (history.get('quality_regression') or {}).get('errors') or (history.get('quality_regression') or {}).get('validation_errors') else 0)
+    checks = [history.get(key) or {} for key in ['final_test', 'final_test_original', 'quality_regression']]
+    sys.exit(1 if any(check.get('errors') or check.get('validation_errors') for check in checks) else 0)

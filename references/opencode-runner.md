@@ -13,11 +13,11 @@ event format. The embedded `@opencode/sdk` is not needed for this integration.
 
 ## Dependencies and installation
 
-Install the complete directory under `<project>/.opencode/skills/skillcraft/`.
+Install the complete directory under `<project>/.agents/skills/skillcraft/`.
 Use Python 3.11+ and Node 22+. Set an absolute base path:
 
 ```sh
-export SKILLCRAFT="$PWD/.opencode/skills/skillcraft"
+export SKILLCRAFT="$PWD/.agents/skills/skillcraft"
 python3 -m venv "$SKILLCRAFT/.venv"
 "$SKILLCRAFT/.venv/bin/pip" install -r "$SKILLCRAFT/requirements.txt"
 npm --prefix "$SKILLCRAFT/runner" ci
@@ -41,8 +41,8 @@ serialized. This filesystem runner currently requires the server and runner to
 see the **same absolute paths**; an arbitrary remote host is unsupported without
 shared storage. Server-local file paths are not file uploads.
 
-Version mismatch fails before prompting. To support another OpenCode version,
-update the dependency and adapter, then rerun contract and live integration tests.
+Live checks used OpenCode server 2.2.7. The runner records the connected server's
+version and verifies the required V2 endpoints in `/openapi.json` before prompting.
 
 ## Isolation profiles
 
@@ -236,7 +236,7 @@ npm --prefix "$SKILLCRAFT/runner" run check
 npm --prefix "$SKILLCRAFT/runner" test
 "$SKILLCRAFT/.venv/bin/python" -m unittest discover -s "$SKILLCRAFT/tests" -v
 "$SKILLCRAFT/.venv/bin/python" "$SKILLCRAFT/scripts/smoke_test.py" \
-  --model 'provider/model#variant' --workspace "$PWD/.opencode/skillcraft-workspaces/smoke-001"
+  --model 'provider/model#variant' --workspace "$PWD/.agents/skillcraft-workspaces/smoke-001"
 ```
 
 Live checks make model requests and exercise paired repetitions, trigger detection,
@@ -248,7 +248,7 @@ The restored skill's full live acceptance is reproducible with:
 
 ```sh
 "$SKILLCRAFT/.venv/bin/python" "$SKILLCRAFT/scripts/verify_restoration.py" \
-  --workspace "$PWD/.opencode/skillcraft-workspaces/restoration/new-acceptance" \
+  --workspace "$PWD/.agents/skillcraft-workspaces/restoration/new-acceptance" \
   --model 'openai/gpt-6-astra#low' \
   --judges 'openai/gpt-6.1-terra#low' 'openai/gpt-6.1-sol#low'
 ```

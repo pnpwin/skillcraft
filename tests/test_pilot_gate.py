@@ -32,7 +32,10 @@ class PilotGate(unittest.TestCase):
             status = 'permission_blocked' if fault == 'permission' else 'completed'
             if fault == 'main_timeout' and 'pilot' not in target.parts:
                 status = 'timeout'
-            result = {'status': status, 'error': None if status == 'completed' else status, 'environment': None}
+            version = '2.4.0' if fault == 'version_drift' and 'pilot' not in target.parts and 'with_skill' in target.parts else '2.3.0'
+            environment = {'server_version': version, 'background': [], 'plugins': [],
+                           'configuration_fingerprint': 'config', 'controlled': True}
+            result = {'status': status, 'error': None if status == 'completed' else status, 'environment': environment}
             write_json(target / 'run.json', result)
             write_json(target / 'messages.json', [])
             (target / 'transcript.md').write_text('Unit fixture, not real execution')
@@ -62,10 +65,20 @@ class PilotGate(unittest.TestCase):
             self.assertEqual(len(report['runs']), 6)
             self.assertEqual(report['run_summary']['with_skill']['pass_rate']['mean'], 0)
             self.assertFalse(report['errors'] or report['validation_errors'])
+            self.assertEqual(report['metadata']['runtime'], {'opencode': '2.3.0'})
             pilot = read_json(root / 'workspace/pilot/benchmark.json')
             self.assertEqual(len(pilot['runs']), 3)
             self.assertEqual(pilot['missing_runs'], [])
             self.assertTrue((root / 'workspace/pilot/review.html').exists())
+
+    def test_reports_observed_version_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report, _ = self.run_case(Path(tmp).resolve(), 'version_drift')
+        self.assertEqual(report['pilot']['status'], 'completed')
+        self.assertEqual(report['metadata']['runtime_versions'], ['2.3.0', '2.4.0'])
+        self.assertIsNone(report['metadata']['runtime']['opencode'])
+        self.assertFalse(report['metadata']['environment_consistent'])
+        self.assertTrue(report['validation_errors'])
 
     def test_pilot_failure_stages_do_not_dispatch_main(self):
         for fault, stage in [('permission', 'executor'), ('transport', 'executor'), ('json', 'judge'), ('critique', 'critique')]:
