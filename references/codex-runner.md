@@ -7,6 +7,18 @@ the skill directory.
 Live checks used Codex 0.170.0. The runner records the installed CLI version and
 checks the applicable App Server operations during execution.
 
+## Local Codex in the ChatGPT desktop app
+
+Put the shared package in `.agents/skills/skillcraft/` in the workspace and open
+a fresh local Codex chat for that workspace. Invoke `$skillcraft` and check that
+the chat reads the workspace copy of `SKILL.md`. For ZIP distribution, pass
+`--openai-plugin-version VERSION` to the packager and install the resulting
+plugin through a local marketplace. [OpenAI plugin guide](https://developers.openai.com/plugins/build/plugins)
+
+Use the same evaluation scripts and settings as Codex CLI. They detect the local
+Codex session through `CODEX_THREAD_ID`. On an explicit `--harness chatgpt` run,
+the report records `requested_harness: chatgpt` and `harness: codex`.
+
 ## Models and authentication
 
 Pass a Codex model ID and optional reasoning effort as `--model 'MODEL#EFFORT'`.

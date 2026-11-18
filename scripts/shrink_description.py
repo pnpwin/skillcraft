@@ -17,7 +17,7 @@ from scripts.run_quality_eval import run_quality
 from scripts.inputs import serial_inputs
 from scripts.grading_store import read_grading
 from scripts.runtime import run_model
-from scripts.harness import add_harness_arg, parse_harness_args
+from scripts.harness import add_harness_arg, harness_metadata, parse_harness_args
 from scripts.utils import copy_tree, digest, frontmatter, load_evals, parse_json_response, read_json, set_description, snapshot_fixtures, write_json
 
 
@@ -129,7 +129,7 @@ def reformulate(a):
         if source:
             profiles[role] = workspace / (role + '-profile.json')
             write_json(profiles[role], read_json(source))
-    plan = {'schema_version': 1, 'harness': harness, 'splits': splits, 'quality_evals': quality_rows,
+    plan = {'schema_version': 1, **harness_metadata(harness), 'splits': splits, 'quality_evals': quality_rows,
         'implementation_hashes': {name: digest(Path(__file__).parent / name) for name in
             ['shrink_description.py', 'historical_baseline.py', 'run_eval.py', 'run_quality_eval.py', 'improve_description.py']},
         'executor': a.model, 'optimizer': a.optimizer_model, 'judge': a.judge_model,

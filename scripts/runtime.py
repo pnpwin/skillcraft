@@ -8,7 +8,7 @@ import sys
 import tempfile
 import uuid
 
-from scripts.harness import SKILL_ROOT, add_harness_arg, model_ref
+from scripts.harness import SKILL_ROOT, add_harness_arg, harness_metadata, model_ref, runtime_harness
 from scripts.utils import ROOT, copy_tree, digest, read_json, safe_id, tree_hash, write_json
 
 SYSTEM = '''Complete the user's task using the available tools and skills when relevant.
@@ -38,9 +38,9 @@ def add_runtime_args(parser):
 
 
 def profile_settings(profile, skill_id=None, *, harness='opencode'):
-    if harness == 'codex':
+    if runtime_harness(harness) == 'codex':
         if profile:
-            raise ValueError('OpenCode permission profiles are unavailable in Codex. Use the default Codex profile.')
+            raise ValueError('Codex uses the bounded profile. Custom profiles are available in OpenCode.')
         return {'name': 'codex-bounded-files', 'controlled': True, 'permissions': [],
                 'allow_delegation': False, 'cli_tools': []}
     custom = read_json(profile) if profile else {}
@@ -76,6 +76,8 @@ def run_model(prompt, output, model, *, mode='quality', skill=None, skill_id=Non
               attach=False, files=(), timeout=180, profile=None, operation='run', preparation=None,
               harness='opencode', output_schema=None):
     model_config = model_ref(model, harness)
+    selection = harness_metadata(harness)
+    harness = selection['harness']
     settings = profile_settings(profile, safe_id(skill_id or Path(skill).name) if skill else None, harness=harness)
     if timeout <= 0:
         raise ValueError('timeout must be positive')
@@ -114,7 +116,7 @@ def run_model(prompt, output, model, *, mode='quality', skill=None, skill_id=Non
         if any(digest(directory / 'inputs' / name) != expected for name, expected in fixture_hashes.items()):
             raise ValueError('Preparation changed an input fixture')
     except (OSError, ValueError, TypeError, KeyError) as error:
-        result = {'schema_version': 1, 'status': 'preparation_error', 'error': str(error), 'triggered': None,
+        result = {'schema_version': 1, **selection, 'status': 'preparation_error', 'error': str(error), 'triggered': None,
                   'execution_directory': str(directory), 'fixtures': fixture_hashes, 'profile': settings}
         result['cli_state'] = collect_state(cli_state, output)
         write_json(output / 'run.json', result)
@@ -136,7 +138,7 @@ def run_model(prompt, output, model, *, mode='quality', skill=None, skill_id=Non
                 'permissions': permissions + [{'action': 'subagent', 'resource': '*', 'effect': 'deny'}]}
         write_json(directory / '.opencode' / 'opencode.json', config)
     request = {
-        'schema_version': 1, 'operation': operation, 'harness': harness, 'directory': str(directory), 'output': str(output),
+        'schema_version': 1, 'operation': operation, **selection, 'directory': str(directory), 'output': str(output),
         'prompt': prompt, 'model': model_config, 'agent': agent, 'timeout_seconds': timeout,
         'mode': mode, 'skill_id': skill_id, 'attach_skill': attach, 'permissions': permissions,
         'controlled': controlled, 'run_id': uuid.uuid4().hex,
@@ -190,7 +192,7 @@ def run_model(prompt, output, model, *, mode='quality', skill=None, skill_id=Non
     result['installed_hash'] = installed_hash
     result['profile'] = settings
     result['runner_hash'] = adapter_hash
-    result['harness'] = harness
+    result.update(selection)
     result['preparation'] = preparation_evidence
     if (output / 'messages.json').is_file():
         try:

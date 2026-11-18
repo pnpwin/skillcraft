@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.runtime import add_runtime_args, run_model, profile_settings
-from scripts.harness import model_ref, parse_harness_args
+from scripts.harness import harness_metadata, model_ref, parse_harness_args
 from scripts.compliance import require_standard, assess
 from scripts.utils import copy_tree, digest, load_evals, read_json, safe_id, snapshot_fixtures, tree_hash, write_json
 from scripts.reporting import print_report
@@ -51,13 +51,15 @@ def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previou
             from scripts.historical_baseline import verify
             write_json(workspace / 'historical-baseline.json', verify(old, historical_baseline))
         configs['previous_skill'] = old
-    manifest = {'schema_version': 1, 'kind': 'quality', 'skill_id': skill_id, 'harness': harness, 'model': model,
+    selection = harness_metadata(harness)
+    runtime = selection['harness']
+    manifest = {'schema_version': 1, 'kind': 'quality', 'skill_id': skill_id, **selection, 'model': model,
                 'judge_model': judge_model, 'repeats': repeats, 'workers': workers,
                 'configurations': {k: {'role': k, 'snapshot_hash': tree_hash(v) if v else None} for k, v in configs.items()},
                 'candidate_hash': candidate_hash, 'evals': rows, 'controlled_requested': profile is None,
                 'fixture_hashes': fixture_hashes, 'profile_hash': digest(profile) if profile else None,
                 'judge_profile_hash': digest(judge_profile) if judge_profile else None,
-                'runtime': {harness: None}, 'timeout_seconds': timeout,
+                'runtime': {runtime: None}, 'timeout_seconds': timeout,
                 'pilot_policy': {'case_ids': pilot_ids, 'selection': 'explicit' if pilot_ids != [rows[0]['id']] else 'first case or explicitly selected first',
                                  'configurations': list(configs), 'stop_threshold': stop_threshold, 'max_in_flight': workers}}
     write_json(workspace / 'manifest.json', manifest)
@@ -107,7 +109,7 @@ def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previou
         signatures = {(e.get('server_version'), str(e['background']), str(e['plugins']),
                        e['configuration_fingerprint']) for e in environments}
         versions = sorted({e['server_version'] for e in environments if e.get('server_version')})
-        phase_manifest['runtime'] = {harness: versions[0] if len(versions) == 1 else None}
+        phase_manifest['runtime'] = {runtime: versions[0] if len(versions) == 1 else None}
         phase_manifest['runtime_versions'] = versions
         phase_manifest['environment_consistent'] = len(signatures) <= 1
         phase_manifest['controlled'] = (len(environments) == len(results) and bool(environments)

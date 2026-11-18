@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.runtime import add_runtime_args, profile_settings, run_model
-from scripts.harness import model_ref, parse_harness_args
+from scripts.harness import harness_metadata, model_ref, parse_harness_args
 from scripts.compliance import require_standard, assess
 from scripts.utils import copy_tree, digest, load_evals, read_json, safe_id, snapshot_fixtures, write_json
 
@@ -54,7 +54,8 @@ def run_eval(skill, evals, workspace, model, *, repeats=3, workers=1, timeout=18
     else:
         from scripts.historical_baseline import verify
         write_json(workspace / 'historical-baseline.json', verify(snapshot, historical_baseline))
-    write_json(workspace / 'manifest.json', {'schema_version': 1, 'kind': 'trigger', 'skill_id': skill_id, 'harness': harness,
+    selection = harness_metadata(harness)
+    write_json(workspace / 'manifest.json', {'schema_version': 1, 'kind': 'trigger', 'skill_id': skill_id, **selection,
                'snapshot_hash': snapshot_hash, 'model': model, 'evals': rows, 'repeats': repeats, 'timeout_seconds': timeout,
                'fixture_hashes': fixture_hashes, 'profile_hash': digest(profile) if profile else None,
                'judge_model': judge_model, 'judge_profile_hash': digest(judge_profile) if judge_profile else None})
@@ -97,7 +98,7 @@ def run_eval(skill, evals, workspace, model, *, repeats=3, workers=1, timeout=18
     summary['environment_consistent'] = len(signatures) <= 1
     summary['controlled'] = (len(environments) == len(results) and bool(environments)
                              and all(e['controlled'] for e in environments) and len(signatures) == 1)
-    report = {'schema_version': 1, 'harness': harness, 'summary': summary, 'results': results,
+    report = {'schema_version': 1, **selection, 'summary': summary, 'results': results,
               'compliance': assess(snapshot, harness=harness)}
     if historical_baseline is not None:
         report['role'] = 'immutable_oversized_historical_baseline'

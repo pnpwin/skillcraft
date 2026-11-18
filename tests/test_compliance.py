@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,7 +15,7 @@ from scripts.utils import copy_tree, digest, write_json
 from scripts.improve_description import improve_description
 from scripts.run_eval import run_eval
 from scripts.run_quality_eval import run_quality
-from scripts.package_skill import _normalize_runs
+from scripts.package_skill import _normalize_runs, package_openai_plugin
 
 
 class Compliance(unittest.TestCase):
@@ -70,6 +71,18 @@ class Compliance(unittest.TestCase):
         del self.record['runner_hash']
         self.persist()
         self.assertEqual(assess(self.skill, self.run)['opencode']['status'], 'NOT_RUN')
+
+    def test_openai_plugin_wraps_the_same_skill_bytes(self):
+        plain = self.root / 'demo-skill.skill'
+        content = (self.skill / 'SKILL.md').read_bytes()
+        with zipfile.ZipFile(plain, 'w') as archive:
+            archive.writestr('demo-skill/SKILL.md', content)
+        path = package_openai_plugin(plain, '0.1.0')
+        with zipfile.ZipFile(path) as plugin:
+            manifest = json.loads(plugin.read('plugin.json'))
+            self.assertEqual(manifest['name'], 'demo-skill')
+            self.assertEqual(manifest['version'], '0.1.0')
+            self.assertEqual(plugin.read('skills/demo-skill/SKILL.md'), content)
 
     def test_corruption_is_error_and_changed_body_is_fail(self):
         (self.run / 'response.txt').write_text('Corrupted')

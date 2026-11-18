@@ -5,7 +5,7 @@ import sys
 import tempfile
 import unittest
 
-from scripts.harness import model_ref, resolve_harness
+from scripts.harness import harness_metadata, model_ref, resolve_harness
 
 
 class HarnessTests(unittest.TestCase):
@@ -21,6 +21,7 @@ class HarnessTests(unittest.TestCase):
                 resolve_harness(environ=env)
         self.assertEqual(resolve_harness('opencode', environ=both), 'opencode')
         self.assertEqual(resolve_harness('codex', environ={}), 'codex')
+        self.assertEqual(resolve_harness('chatgpt', environ=both), 'chatgpt')
 
     def test_cli_stops_before_creating_workspace(self):
         root = Path(__file__).resolve().parents[1]
@@ -37,6 +38,8 @@ class HarnessTests(unittest.TestCase):
 
     def test_model_refs_are_harness_specific(self):
         self.assertEqual(model_ref('model#high', 'codex'), {'id': 'model', 'effort': 'high'})
+        self.assertEqual(model_ref('model#high', 'chatgpt'), {'id': 'model', 'effort': 'high'})
+        self.assertEqual(harness_metadata('chatgpt'), {'harness': 'codex', 'requested_harness': 'chatgpt'})
         self.assertEqual(model_ref('provider/model#high', 'opencode'),
                          {'providerID': 'provider', 'id': 'model', 'variant': 'high'})
         for value in ['provider/model', 'model#', '#high']:

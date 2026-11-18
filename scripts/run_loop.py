@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.improve_description import improve_description, training_evidence
-from scripts.harness import add_harness_arg, model_ref, parse_harness_args
+from scripts.harness import add_harness_arg, harness_metadata, model_ref, parse_harness_args
 from scripts.runtime import profile_settings
 from scripts.compliance import require_standard, assess
 from scripts.run_eval import run_eval
@@ -96,7 +96,7 @@ def optimize(a):
             setattr(a, f'{role}_profile', frozen_profile)
     splits = split_evals(rows, a.seed)
     write_json(workspace / 'split.json', {'seed': a.seed, 'sets': splits, 'independent_test': bool(splits['test'])})
-    history = {'schema_version': 1, 'harness': harness, 'executor_model': a.model, 'optimizer_model': a.optimizer_model,
+    history = {'schema_version': 1, **harness_metadata(harness), 'executor_model': a.model, 'optimizer_model': a.optimizer_model,
                'selection_metric': 'balanced_accuracy', 'iterations': [], 'best': None,
                'repeats': a.repeats,
                'independent_test': bool(splits['test'])}

@@ -82,6 +82,8 @@ def generate_html(data, auto_refresh=False, skill_name=''):
     body = [f'<h1>{title}</h1>']
     if data.get('harness'):
         body.append(f'<p>Harness: {esc(data["harness"])}</p>')
+    if data.get('requested_harness') == 'chatgpt':
+        body.append('<p>Local Codex evaluation selected with --harness chatgpt.</p>')
     if not standalone:
         body.append(f'<p>Selection: validation {esc(data.get("selection_metric", "not recorded"))}.</p>')
     body += [

@@ -6,12 +6,13 @@ from scripts.utils import parse_model
 
 
 HARNESSES = ('codex', 'opencode')
+HARNESS_CHOICES = ('codex', 'chatgpt', 'opencode')
 SKILL_ROOT = Path('.agents') / 'skills'
 
 
 def resolve_harness(override=None, *, environ=None):
     if override is not None:
-        if override not in HARNESSES:
+        if override not in HARNESS_CHOICES:
             raise ValueError(f'Unsupported harness: {override}')
         return override
     env = os.environ if environ is None else environ
@@ -19,13 +20,13 @@ def resolve_harness(override=None, *, environ=None):
     opencode = env.get('OPENCODE') == '1' and bool(env.get('OPENCODE_SESSION_ID'))
     if codex == opencode:
         reason = 'Both Codex and OpenCode session signals are present' if codex else 'No harness session signal was found'
-        raise ValueError(f'{reason}. Specify --harness codex or --harness opencode.')
+        raise ValueError(f'{reason}. Specify --harness codex, chatgpt, or opencode.')
     return 'codex' if codex else 'opencode'
 
 
 def add_harness_arg(parser):
-    parser.add_argument('--harness', choices=HARNESSES,
-                        help='Override session autodetection (for example in CI)')
+    parser.add_argument('--harness', choices=HARNESS_CHOICES,
+                        help='Override autodetection. chatgpt is an alias for the local Codex runner.')
 
 
 def parse_harness_args(parser):
@@ -38,6 +39,7 @@ def parse_harness_args(parser):
 
 
 def model_ref(value, harness):
+    harness = runtime_harness(harness)
     if harness == 'opencode':
         return parse_model(value)
     if harness != 'codex':
@@ -47,3 +49,15 @@ def model_ref(value, harness):
             separator and (not effort or '#' in effort)):
         raise ValueError('Codex model must be model[#effort]')
     return {'id': name, **({'effort': effort} if effort else {})}
+
+
+def runtime_harness(harness):
+    return 'codex' if harness == 'chatgpt' else harness
+
+
+def harness_metadata(harness):
+    runtime = runtime_harness(harness)
+    metadata = {'harness': runtime}
+    if runtime != harness:
+        metadata['requested_harness'] = harness
+    return metadata

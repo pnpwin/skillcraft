@@ -9,6 +9,10 @@ compliance reports check one target harness. Shared SkillCraft packaging binds
 one representative execution and a fresh probe per harness to the same skill
 hash. Codex explicit attachment evidence is kept in `codex_attachment.json`.
 
+When selected with `--harness chatgpt`, run and experiment metadata add
+`requested_harness: chatgpt` alongside `harness: codex`. The alias selects the
+same App Server adapter used by Codex CLI and local Codex chats in ChatGPT desktop.
+
 Existing artifact schema_version 1 stays readable. The new compliance object has
 its own schema_version 1 and is independent of task grading and critique:
 

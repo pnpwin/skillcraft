@@ -3,12 +3,14 @@
 Create, evaluate, and refine agent skills through measured iterations.
 
 SkillCraft combines an Agent Skills-compatible authoring workflow with a Python
-evaluation toolkit with native Codex and OpenCode runners. It supports paired quality
-evaluations, natural-trigger testing, training-only description optimization,
-blind comparisons, and hash-bound acceptance and packaging.
+evaluation toolkit for Codex and OpenCode. Local Codex chats in the ChatGPT
+desktop app use the same skill and evaluation scripts as Codex CLI. The toolkit
+supports paired quality evaluations, natural-trigger testing, training-only
+description optimization, blind comparisons, and hash-bound packaging.
 
-The standalone skill ID is `skillcraft`. Both harnesses discover the same project
-installation.
+The standalone skill ID is `skillcraft`. See the
+[Codex runner guide](references/codex-runner.md#local-codex-in-the-chatgpt-desktop-app)
+for setup and verification in a local ChatGPT desktop chat.
 
 ## Requirements
 
@@ -61,14 +63,17 @@ npm --prefix "$SKILLCRAFT/runner" test
 
 Each experiment needs a new workspace outside the skill, for example
 `.agents/skillcraft-workspaces/`. Commands detect the calling harness from the
-shell session. Use `--harness codex` or `--harness opencode` in a plain terminal,
-in CI, or when both session signals are present. Each experiment uses the selected
-harness for execution, grading and optimization.
+shell session, including local Codex chats in ChatGPT desktop. Use `--harness codex`
+or `--harness opencode` in a plain terminal, in CI, or when both session signals
+are present. `--harness chatgpt` explicitly selects the same Codex runner. Each
+experiment uses the selected harness for execution, grading and optimization.
 
 Run `compliance.py` on representative native-attachment evidence for each target.
 To package SkillCraft, pass the Codex and OpenCode run directories with two
 `--run` arguments to `package_skill.py`. Both runs must certify the same hashes.
 The packager refreshes both environments before it writes the archive.
+Use `--openai-plugin-version VERSION` to also wrap the same skill in an OpenAI
+plugin ZIP for Codex.
 
 ## Connection and migration
 

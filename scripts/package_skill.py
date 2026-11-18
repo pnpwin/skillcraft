@@ -14,6 +14,8 @@ The ZIP is a distribution format, not a native harness installer.
 
 import fnmatch
 import argparse
+import json
+from copy import copy
 import sys
 import zipfile
 import tempfile
@@ -22,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.quick_validate import validate_skill
 from scripts.compliance import accept_current, assess, skill_hash
+from scripts.utils import parse_frontmatter
 
 # Patterns to exclude when packaging skills.
 EXCLUDE_DIRS = {"__pycache__", "node_modules", ".venv", ".git", "skillcraft-workspaces"}
@@ -184,6 +187,31 @@ def package_skill(skill_path, output_dir=None, *, run_dir=None, run_dirs=None, v
         return None
 
 
+def package_openai_plugin(skill_archive, version):
+    """Wrap a verified standalone archive in the portable Agent Plugins layout."""
+    skill_archive = Path(skill_archive)
+    skill_name = skill_archive.stem
+    output = skill_archive.with_name(f'{skill_name}-openai.zip')
+    temporary = output.with_suffix(f'.{uuid.uuid4().hex}.tmp')
+    try:
+        with zipfile.ZipFile(skill_archive) as source:
+            metadata, _ = parse_frontmatter(source.read(f'{skill_name}/SKILL.md').decode('utf-8'), required=True)
+            manifest = {
+                '$schema': 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json',
+                'name': skill_name, 'version': version, 'description': metadata['description'],
+            }
+            with zipfile.ZipFile(temporary, 'w', zipfile.ZIP_DEFLATED) as bundle:
+                bundle.writestr('plugin.json', json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
+                for asset in source.infolist():
+                    member = copy(asset)
+                    member.filename = f'skills/{asset.filename}'
+                    bundle.writestr(member, source.read(asset))
+        temporary.replace(output)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return output
+
+
 def main():
     parser = argparse.ArgumentParser(description='Package an Agent Skill for distribution. Extract into <project>/.agents/skills/.')
     parser.add_argument('skill', type=Path)
@@ -191,6 +219,7 @@ def main():
     parser.add_argument('--run', action='append', default=[], metavar='[HARNESS=]PATH',
                         help='Completed hash-bound run; repeat once per harness (Codex and OpenCode for SkillCraft)')
     parser.add_argument('--verification-dir', type=Path, help='New directory for current environment verification')
+    parser.add_argument('--openai-plugin-version', help='Also package the verified skill as a Codex plugin ZIP')
     args = parser.parse_args()
     skill_path = args.skill
     output_dir = args.output
@@ -221,6 +250,8 @@ def main():
     result = package_skill(skill_path, output_dir, run_dirs=runs or None, verification_dir=args.verification_dir)
 
     if result:
+        if args.openai_plugin_version:
+            print(f'Packaged OpenAI plugin to: {package_openai_plugin(result, args.openai_plugin_version)}')
         sys.exit(0)
     else:
         sys.exit(1)

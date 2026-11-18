@@ -1160,6 +1160,7 @@
         const harness = metadata.harness === 'codex' ? 'Codex' : 'OpenCode';
         const version = metadata.runtime?.[metadata.harness];
         let html = '<h2>' + harness + (version ? ' ' + escapeHtml(version) : '') + ' benchmark</h2>';
+        if (metadata.requested_harness === 'chatgpt') html += '<p>Local Codex evaluation selected with --harness chatgpt.</p>';
         if (metadata.model) html += '<p>Model <code>' + escapeHtml(metadata.model) + '</code></p>';
         html += '<p>Controlled: ' + String(metadata.controlled) + ' · Errors: ' + data.errors + '</p>';
         if (data.validation_errors?.length) html += '<pre>' + escapeHtml(data.validation_errors.join('\n')) + '</pre>';

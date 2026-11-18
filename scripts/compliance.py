@@ -9,7 +9,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.quick_validate import REVISION, EXIT_CODES, validate_standard
 from scripts.utils import ROOT, EXCLUDED, digest, read_json, write_json
-from scripts.harness import HARNESSES
+from scripts.harness import HARNESSES, runtime_harness
 
 STATUSES = {'PASS', 'FAIL', 'NOT_RUN', 'ERROR'}
 SHARED_RUNNER_FILES = [
@@ -171,6 +171,7 @@ def checked_run(path, skill, *, probe=False, harness=None):
 
 
 def assess(skill, run_dir=None, *, probe_dir=None, require_fresh=False, harness=None):
+    harness = runtime_harness(harness)
     standard = validate_standard(skill)
     runtime = result('NOT_RUN', 'no_execution', 'No compatibility execution supplied')
     selected = harness if harness in HARNESSES else 'opencode'
