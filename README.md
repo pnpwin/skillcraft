@@ -42,17 +42,17 @@ opencode plugin add 'github:pnpwin/skillcraft#main::path:plugins/skillcraft'
 Use a release tag or commit for a reproducible installation. The OpenCode
 package registers the same skill directory used by the Codex plugin.
 
-**Standalone or AI Suite installation**
+**Standalone installation**
 
 Copy the `plugins/skillcraft/skills/skillcraft/` directory from a checkout into
-`<project>/.agents/skills/skillcraft/`, or use that directory as the skill source
-in the AI Suite preset. An exported `.skill` archive contains the same
-standalone directory.
+`<project>/.agents/skills/skillcraft/`. An exported `.skill` archive contains
+the same standalone directory.
 
 **Evaluation dependencies**
 
-Set `SKILLCRAFT` to the absolute directory containing the installed `SKILL.md`.
-Each runtime's registry can show which copy was loaded.
+For a standalone installation, run `export SKILLCRAFT="$PWD/.agents/skills/skillcraft"`
+from the project root. For a Git plugin installation, set `SKILLCRAFT` to the
+absolute directory containing `SKILL.md` in the runtime's skill registry.
 
 ```sh
 python3 -m venv "$SKILLCRAFT/.venv"

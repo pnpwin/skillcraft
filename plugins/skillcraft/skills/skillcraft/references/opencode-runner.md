@@ -13,12 +13,19 @@ event format. The embedded `@opencode/sdk` is not needed for this integration.
 
 ## Dependencies and installation
 
-Set `SKILLCRAFT` to the installed skill directory containing `SKILL.md`. A
-standalone installation can live under `<project>/.agents/skills/skillcraft/`.
-Use Python 3.11+ and Node 22+. Set an absolute base path:
+For a standalone installation under `.agents/skills/skillcraft/`, run this from
+the project root:
 
 ```sh
-export SKILLCRAFT=/absolute/path/to/skillcraft
+export SKILLCRAFT="$PWD/.agents/skills/skillcraft"
+```
+
+For a Git plugin installation, set `SKILLCRAFT` to the absolute directory
+containing the `SKILL.md` reported by the OpenCode skill registry.
+
+Install the evaluation dependencies with Python 3.11+ and Node 22+:
+
+```sh
 python3 -m venv "$SKILLCRAFT/.venv"
 "$SKILLCRAFT/.venv/bin/pip" install -r "$SKILLCRAFT/requirements.txt"
 npm --prefix "$SKILLCRAFT/scripts/opencode-runner" ci
