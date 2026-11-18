@@ -1,10 +1,8 @@
 from pathlib import Path
-import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 from scripts.runtime import profile_settings
 from scripts.utils import write_json
 

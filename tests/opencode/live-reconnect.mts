@@ -1,5 +1,5 @@
 /** Live transport fault injection: explicit auth context and one interrupted log read. */
-import { Service } from '@opencode/client/service';
+import { discoverEndpoint } from '../../plugins/skillcraft/skills/skillcraft/scripts/opencode-runner/src/connection.ts';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -11,10 +11,8 @@ import assert from 'node:assert/strict';
 const output = process.argv[2];
 const model = process.argv[3];
 if (!output || !model) throw Error('Usage: tsx tests/live-reconnect.ts OUTPUT MODEL');
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const endpoint = await Service.discover();
-if (!endpoint) throw Error('No running service');
-const upstreamHeaders = Service.headers(endpoint);
+const root = fileURLToPath(new URL('../../plugins/skillcraft/skills/skillcraft/', import.meta.url));
+const { url: upstreamUrl, headers: upstreamHeaders } = await discoverEndpoint();
 let dropped = false;
 let logReads = 0;
 let unauthorized = 0;
@@ -32,7 +30,7 @@ const server = createServer(async (req, res) => {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const body = Buffer.concat(chunks).toString('utf8');
-    const response = await fetch(new URL(req.url!, endpoint.url), {
+    const response = await fetch(new URL(req.url!, upstreamUrl), {
       method: req.method,
       headers: { ...upstreamHeaders, 'content-type': 'application/json' },
       ...(body ? { body } : {}), signal: AbortSignal.timeout(20000),

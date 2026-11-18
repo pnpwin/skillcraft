@@ -9,7 +9,7 @@ import zipfile
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+from tests import SKILL
 from scripts.compliance import assess, acceptance_exit, runner_hash, skill_hash
 from scripts.utils import copy_tree, digest, write_json
 from scripts.improve_description import improve_description
@@ -185,11 +185,11 @@ class Compliance(unittest.TestCase):
         self.assertEqual(assess(self.skill, self.run)['codex']['status'], 'ERROR')
 
     def test_real_cli_missing_runtime_and_package_block(self):
-        p = subprocess.run([sys.executable, str(ROOT / 'scripts/compliance.py'), str(self.skill),
+        p = subprocess.run([sys.executable, str(SKILL / 'scripts/compliance.py'), str(self.skill),
             '--workspace', str(self.root / 'acceptance')], capture_output=True, text=True)
         self.assertEqual(p.returncode, 2, p.stderr)
         self.assertEqual(json.loads(p.stdout)['opencode']['status'], 'NOT_RUN')
-        p = subprocess.run([sys.executable, str(ROOT / 'scripts/package_skill.py'), str(self.skill), str(self.root / 'dist')], capture_output=True, text=True)
+        p = subprocess.run([sys.executable, str(SKILL / 'scripts/package_skill.py'), str(self.skill), str(self.root / 'dist')], capture_output=True, text=True)
         self.assertEqual(p.returncode, 1, p.stderr)
         self.assertFalse((self.root / 'dist/demo-skill.skill').exists())
 

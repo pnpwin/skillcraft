@@ -130,7 +130,7 @@ def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previou
     pilot_ok = not pilot_report['errors'] and not pilot_report['validation_errors']
     review_error = pilot_manifest.get('report_error')
     if pilot_ok:
-        review = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / 'eval-viewer/generate_review.py'),
+        review = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / 'scripts/generate_review.py'),
                                  str(pilot_root), '--static', str(pilot_root / 'review.html')], capture_output=True, text=True)
         (pilot_root / 'review.log').write_text(review.stdout + review.stderr)
         if review.returncode or not (pilot_root / 'review.html').is_file():

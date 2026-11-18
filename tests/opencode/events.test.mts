@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { SessionLogItem, SessionMessageInfo } from '@opencode/client';
-import { Events, isBusy } from '../src/events.ts';
+import { Events, isBusy, type SessionLogItem, type SessionMessageInfo } from '../../plugins/skillcraft/skills/skillcraft/scripts/opencode-runner/src/events.ts';
 
 const tokens = { input: 11, output: 7, reasoning: 3, cache: { read: 5, write: 2 } };
 test('historical busy timestamp is not current activity after idle', () => {

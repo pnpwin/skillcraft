@@ -1,12 +1,10 @@
 import json
 from pathlib import Path
-import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.generate_report import generate_html, load_report
 from scripts.run_loop import optimize
 

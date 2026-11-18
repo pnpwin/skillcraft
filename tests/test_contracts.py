@@ -3,10 +3,9 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+from tests import SKILL
 from scripts.utils import frontmatter, copy_tree, load_evals, snapshot_fixtures, write_json
 from scripts.run_eval import summarize
 from scripts.run_loop import split_evals, selection_score
@@ -14,7 +13,7 @@ from scripts.grade import grade_run, validate_grading, check_one
 from scripts.aggregate_benchmark import stats, aggregate
 from scripts.package_skill import should_exclude
 
-spec = importlib.util.spec_from_file_location('viewer', ROOT / 'eval-viewer' / 'generate_review.py')
+spec = importlib.util.spec_from_file_location('viewer', SKILL / 'scripts/generate_review.py')
 viewer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(viewer)
 
@@ -114,9 +113,9 @@ class Contracts(unittest.TestCase):
         self.assertEqual(viewer.validate_feedback(data, runs), data)
 
     def test_distribution_excludes_runtime_and_eval_data(self):
-        for path in ['skill/evals/test.json', 'skill/.venv/bin/python', 'skill/runner/node_modules/pkg/a.js']:
+        for path in ['skill/evals/test.json', 'skill/.venv/bin/python', 'skill/scripts/opencode-runner/node_modules/pkg/a.js']:
             self.assertTrue(should_exclude(Path(path)))
-        self.assertFalse(should_exclude(Path('skill/runner/package-lock.json')))
+        self.assertFalse(should_exclude(Path('skill/scripts/opencode-runner/package-lock.json')))
 
     def test_fixtures_are_frozen_before_workers(self):
         original = self.root / 'input.txt'

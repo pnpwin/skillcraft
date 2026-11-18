@@ -23,7 +23,7 @@ either requirement. A baseline can be measured without becoming eligible for rel
 
 A skill is a directory containing `SKILL.md`, with a YAML frontmatter mapping and
 a Markdown body. `scripts/`, `references/`, and `assets/` are optional. Additional
-directories such as `tests/`, `runner/`, `agents/` and `eval-viewer/` are permitted.
+additional directories may be included as needed.
 Do not delete useful resources merely because they are not one of the example
 directories. References should be directly discoverable from `SKILL.md`.
 

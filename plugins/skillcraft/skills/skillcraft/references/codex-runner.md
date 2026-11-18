@@ -1,17 +1,18 @@
 # Codex runner
 
-SkillCraft uses Codex CLI and its local App Server over stdio. Install the
-shared skill in `.agents/skills/skillcraft/` and keep experiment workspaces outside
-the skill directory.
+SkillCraft uses Codex CLI and its local App Server over stdio. Install the skill
+as a Git marketplace plugin, or place it in `.agents/skills/skillcraft/`. Keep
+experiment workspaces outside the skill directory.
 
 Live checks used Codex 0.170.0. The runner records the installed CLI version and
 checks the applicable App Server operations during execution.
 
 ## Local Codex in the ChatGPT desktop app
 
-Put the shared package in `.agents/skills/skillcraft/` in the workspace and open
-a fresh local Codex chat for that workspace. Invoke `$skillcraft` and check that
-the chat reads the workspace copy of `SKILL.md`. For ZIP distribution, pass
+Install SkillCraft from the Codex marketplace, or put its standalone directory
+in `.agents/skills/skillcraft/`. Open a fresh local Codex chat and select SkillCraft.
+Check that Codex reads the installed `SKILL.md` and its neighboring resources.
+For ZIP distribution, pass
 `--openai-plugin-version VERSION` to the packager and install the resulting
 plugin through a local marketplace. [OpenAI plugin guide](https://developers.openai.com/plugins/build/plugins)
 

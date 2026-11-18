@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 
+from tests import SKILL
 from scripts.harness import harness_metadata, model_ref, resolve_harness
 
 
@@ -29,7 +30,7 @@ class HarnessTests(unittest.TestCase):
             workspace = Path(tmp) / 'eval'
             env = {key: value for key, value in os.environ.items()
                    if key not in {'CODEX_THREAD_ID', 'OPENCODE', 'OPENCODE_SESSION_ID'}}
-            result = subprocess.run([sys.executable, '-B', 'scripts/run_quality_eval.py', '--model', 'example',
+            result = subprocess.run([sys.executable, '-B', str(SKILL / 'scripts/run_quality_eval.py'), '--model', 'example',
                                      '--workspace', str(workspace), '--skill', 'unused', '--evals', 'unused'],
                                     cwd=root, env=env, capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 2)

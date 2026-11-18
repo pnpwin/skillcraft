@@ -10,8 +10,7 @@ from unittest.mock import patch
 
 import yaml
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+from tests import SKILL
 from scripts.quick_validate import validate_metadata, validate_standard, validate_skill, validate_opencode_static
 from scripts.utils import frontmatter, parse_frontmatter, set_description, tree_hash
 
@@ -129,7 +128,7 @@ class StandardValidation(unittest.TestCase):
         for data, expected in [(self.data, 0), (dict(self.data, description='x'*1025), 1), ({}, 1)]:
             self.write(data)
             before = self.file.read_bytes()
-            p = subprocess.run([sys.executable, str(ROOT/'scripts/quick_validate.py'), str(self.root), '--json'], capture_output=True, text=True)
+            p = subprocess.run([sys.executable, str(SKILL / 'scripts/quick_validate.py'), str(self.root), '--json'], capture_output=True, text=True)
             self.assertEqual(p.returncode, expected, p.stderr)
             result = json.loads(p.stdout)
             self.assertEqual(result['check'], 'agent_skills')
@@ -139,7 +138,7 @@ class StandardValidation(unittest.TestCase):
 
     def test_cli_io_error_and_useful_text_diagnostics(self):
         self.write(dict(self.data, description='x'*1025))
-        command = [sys.executable, str(ROOT/'scripts/quick_validate.py'), str(self.root)]
+        command = [sys.executable, str(SKILL / 'scripts/quick_validate.py'), str(self.root)]
         text = subprocess.run(command, capture_output=True, text=True)
         self.assertEqual(text.returncode, 1)
         self.assertIn('description [length]', text.stdout)
@@ -194,7 +193,7 @@ class StandardValidation(unittest.TestCase):
         (installed / 'scripts').mkdir(parents=True)
         for name in ['__init__.py', 'quick_validate.py', 'utils.py']:
             target = installed / 'scripts' / name
-            shutil.copy2(ROOT / 'scripts' / name, target)
+            shutil.copy2(SKILL / 'scripts' / name, target)
             target.chmod(0o444)
         before = tree_hash(installed)
         p = subprocess.run([sys.executable, str(installed / 'scripts/quick_validate.py'), str(self.root), '--json'], capture_output=True, text=True)

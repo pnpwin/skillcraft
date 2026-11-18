@@ -18,7 +18,8 @@ SHARED_RUNNER_FILES = [
     'scripts/preparation.py', 'scripts/harness.py',
 ]
 HARNESS_RUNNER_FILES = {
-    'opencode': ['runner/src/main.ts', 'runner/src/events.ts', 'runner/package-lock.json'],
+    'opencode': [f'scripts/opencode-runner/{path}' for path in (
+        'src/main.ts', 'src/connection.ts', 'src/events.ts', 'package-lock.json')],
     'codex': ['scripts/codex_runner.py'],
 }
 

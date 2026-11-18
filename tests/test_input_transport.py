@@ -1,10 +1,8 @@
 import json
 from pathlib import Path
-import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.inputs import copy_inputs, input_specs, serial_inputs
 from scripts.utils import snapshot_fixtures
 

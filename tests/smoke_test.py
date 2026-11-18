@@ -10,17 +10,18 @@ from scripts.runtime import run_model, rules
 from scripts.grade import grade_run
 from scripts.run_quality_eval import run_quality
 from scripts.run_eval import run_eval
-from scripts.utils import ROOT, read_json, write_json
+from tests import FIXTURES
+from scripts.utils import read_json, write_json
 
 
 def smoke(a):
     a.workspace.mkdir(parents=True, exist_ok=False)
     results = {}
-    benchmark = run_quality(ROOT / 'tests/fixtures/demo-skill', ROOT / 'tests/fixtures/quality.json', a.workspace / 'quality',
+    benchmark = run_quality(FIXTURES / 'demo-skill', FIXTURES / 'quality.json', a.workspace / 'quality',
                             a.model, repeats=2, workers=2, timeout=60)
     results['quality'] = {'ok': benchmark['errors'] == 0 and benchmark['metadata']['controlled'],
                           'errors': benchmark['errors'], 'summary': benchmark['run_summary']}
-    trigger = run_eval(ROOT / 'tests/fixtures/demo-skill', ROOT / 'tests/fixtures/trigger.json', a.workspace / 'trigger',
+    trigger = run_eval(FIXTURES / 'demo-skill', FIXTURES / 'trigger.json', a.workspace / 'trigger',
                        a.model, repeats=1, workers=2, timeout=60)
     results['trigger'] = {'ok': trigger['summary']['errors'] == 0 and trigger['summary']['tp'] > 0 and trigger['summary']['tn'] > 0,
                           'summary': trigger['summary']}
@@ -43,7 +44,7 @@ def smoke(a):
                         a.workspace / 'permission', a.model, files=[fixture], profile=profile, timeout=60)
     results['permission'] = {'ok': blocked['status'] == 'permission_blocked', 'status': blocked['status']}
     # A direct attempt to inspect the candidate from a baseline session must be denied.
-    candidate_path = ROOT / 'tests/fixtures/demo-skill/SKILL.md'
+    candidate_path = FIXTURES / 'demo-skill/SKILL.md'
     escaped = run_model(f'Use the read tool to read the file {candidate_path}. Do not guess; try the tool.',
                         a.workspace / 'external-read', a.model, timeout=60)
     transcript = (a.workspace / 'external-read/messages.json').read_text()

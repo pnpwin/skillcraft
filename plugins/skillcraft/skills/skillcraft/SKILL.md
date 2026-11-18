@@ -30,9 +30,9 @@ subjective review; an empty rubric has unknown automated quality, not a failed t
 
 ## Setup and paths
 
-Install this directory at `<project>/.agents/skills/skillcraft/`. All paths below
-are relative to this SKILL.md, not the shell's current directory. Resolve this base
-directory before running scripts. Keep experiments in
+Install the plugin from Git, or place this skill directory in
+`<project>/.agents/skills/skillcraft/`. Use the directory containing this
+`SKILL.md` as the base for resource paths and script commands. Keep experiments in
 `<project>/.agents/skillcraft-workspaces/<skill-id>/iteration-NNN/`.
 
 Install the Python dependencies once. Install the Node dependencies when using OpenCode.
@@ -40,7 +40,7 @@ Install the Python dependencies once. Install the Node dependencies when using O
 ```sh
 python3 -m venv "$SKILLCRAFT/.venv"
 "$SKILLCRAFT/.venv/bin/pip" install -r "$SKILLCRAFT/requirements.txt"
-npm --prefix "$SKILLCRAFT/runner" ci  # OpenCode
+npm --prefix "$SKILLCRAFT/scripts/opencode-runner" ci  # OpenCode
 ```
 
 Here `SKILLCRAFT` is the absolute directory containing this SKILL.md. Use its
@@ -155,8 +155,9 @@ corresponding runner guide for the supported operations and bounds.
 ## 5. Grade and review
 
 The orchestrator applies deterministic checks and sends remaining expectations to a
-separate judge session using `agents/grader.md`. A grading error is not a failed
-expectation. These `agents/*.md` files are prompt resources, not registered agents.
+separate judge session using `references/prompts/grader.md`. A grading error is
+recorded separately from the expectation's verdict. The files in
+`references/prompts/` configure the independent evaluation sessions.
 When `--judge-model` is supplied, the judge also critiques the full rubric, including
 deterministic checks. With all expectations covered deterministically this is a
 critique-only call. Without a judge, critique is explicitly not run. Requested
@@ -168,7 +169,7 @@ Inspect actual artifacts, evidence, errors, repetitions, token usage and latency
 Show the human reviewer the viewer:
 
 ```sh
-"$SKILLCRAFT/.venv/bin/python" "$SKILLCRAFT/eval-viewer/generate_review.py" \
+"$SKILLCRAFT/.venv/bin/python" "$SKILLCRAFT/scripts/generate_review.py" \
   "$ITERATION" --benchmark "$ITERATION/benchmark.json" --no-browser
 ```
 

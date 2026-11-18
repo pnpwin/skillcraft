@@ -14,7 +14,8 @@ import sys
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.utils import ROOT, read_json, write_json, parse_json_response
+from tests import FIXTURES, SKILL
+from scripts.utils import read_json, write_json, parse_json_response
 from scripts.run_quality_eval import run_quality
 from scripts.run_eval import run_eval
 from scripts.run_loop import optimize
@@ -53,12 +54,12 @@ def verify(a):
                   'minimum_with_skill_pass_rate': .85, 'trigger_errors_allowed': 0,
                   'minimum_trigger_recall': .9, 'maximum_trigger_false_positives': 0}
     write_json(workspace / 'acceptance.json', acceptance)
-    evaluation_profile = ROOT / 'tests/fixtures/installed-extensions-profile.json'
+    evaluation_profile = FIXTURES / 'installed-extensions-profile.json'
     acceptance['environment'] = 'Installed global plugins are audited and recorded; all custom-profile runs are uncontrolled.'
     write_json(workspace / 'acceptance.json', acceptance)
-    quality = run_quality(ROOT, ROOT / 'tests/fixtures/creator-quality.json', workspace / 'creator-quality', a.model,
-                          repeats=1, workers=2, timeout=240, profile=ROOT / 'tests/fixtures/shell-profile.json', judge_model=a.judges[0], judge_profile=evaluation_profile)
-    trigger = run_eval(ROOT, ROOT / 'tests/fixtures/creator-trigger.json', workspace / 'creator-trigger', a.model,
+    quality = run_quality(SKILL, FIXTURES / 'creator-quality.json', workspace / 'creator-quality', a.model,
+                          repeats=1, workers=2, timeout=240, profile=FIXTURES / 'shell-profile.json', judge_model=a.judges[0], judge_profile=evaluation_profile)
+    trigger = run_eval(SKILL, FIXTURES / 'creator-trigger.json', workspace / 'creator-trigger', a.model,
                        repeats=1, workers=2, timeout=180, profile=evaluation_profile)
     generated = workspace / 'creator-quality/eval-author-receipt/with_skill/run-001/outputs/receipt-normalizer'
     if not (generated / 'SKILL.md').is_file():
@@ -83,20 +84,20 @@ def verify(a):
               timeout=90, profile=evaluation_profile)
     compliance = {}
     for label, artifact, run in [
-        ('creator', workspace / 'creator-quality/snapshots/candidate' / ROOT.name,
+        ('creator', workspace / 'creator-quality/snapshots/candidate' / SKILL.name,
          workspace / 'creator-quality/eval-author-receipt/with_skill/run-001'),
         ('receipt-normalizer', generated, workspace / 'generated-quality/eval-generated-receipt/with_skill/run-001'),
         ('brief-editor', editor, workspace / 'generated-editor')]:
         compliance[label] = accept_current(artifact, run, workspace / 'compliance' / label)
     write_json(workspace / 'compliance-results.json', compliance)
-    loop = optimize(SimpleNamespace(workspace=workspace / 'optimization', skill=ROOT / 'tests/fixtures/demo-skill',
-        evals=ROOT / 'tests/fixtures/trigger.json', quality_evals=ROOT / 'tests/fixtures/quality.json',
+    loop = optimize(SimpleNamespace(workspace=workspace / 'optimization', skill=FIXTURES / 'demo-skill',
+        evals=FIXTURES / 'trigger.json', quality_evals=FIXTURES / 'quality.json',
         model=a.model, optimizer_model=a.model, judge_model=a.judges[0], profile=evaluation_profile,
         judge_profile=evaluation_profile, optimizer_profile=evaluation_profile,
         iterations=3, repeats=1, workers=2, timeout=120, seed=42))
     # Blind to expected score and creator identity. Only task, outputs and execution
     # evidence are supplied; judge thresholds are enforced outside the model.
-    tasks = read_json(ROOT / 'tests/fixtures/creator-quality.json')['evals']
+    tasks = read_json(FIXTURES / 'creator-quality.json')['evals']
     evidence = []
     for task in tasks:
         run = workspace / f'creator-quality/eval-{task["id"]}/with_skill/run-001'
@@ -152,7 +153,7 @@ def verify(a):
         not loop['quality_regression']['errors'] and not loop['quality_regression']['validation_errors'] and all(j['pass'] for j in judged)
         and all(check['accepted'] for check in compliance.values()))
     write_json(workspace / 'acceptance-results.json', summary)
-    subprocess.run([sys.executable, str(ROOT / 'eval-viewer/generate_review.py'), str(workspace / 'creator-quality'),
+    subprocess.run([sys.executable, str(SKILL / 'scripts/generate_review.py'), str(workspace / 'creator-quality'),
                     '--static', str(workspace / 'creator-quality/review.html')], check=True, capture_output=True)
     return summary
 

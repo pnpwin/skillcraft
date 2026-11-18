@@ -1,13 +1,11 @@
 import importlib.util
 from pathlib import Path
-import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
-ROOT=Path(__file__).resolve().parents[1]
-sys.path.insert(0,str(ROOT))
+from tests import SKILL
 from scripts.grade import grade_run
 from scripts.grading_store import read_grading
 from scripts.grading_store import reserve_attempt
@@ -66,7 +64,7 @@ class Regrading(unittest.TestCase):
             self.assertEqual(report['deltas']['without_skill']['paired_pass_rate']['n'],1)
             self.assertTrue(all(r['judge_attempts']==3 for r in report['runs']))
             self.assertEqual(tree_hash(source),before)
-            spec=importlib.util.spec_from_file_location('attempt_viewer',ROOT/'eval-viewer/generate_review.py')
+            spec=importlib.util.spec_from_file_location('attempt_viewer',SKILL / 'scripts/generate_review.py')
             viewer=importlib.util.module_from_spec(spec);spec.loader.exec_module(viewer)
             runs=viewer.find_runs(source,selection)
             self.assertTrue(all('@' in r['id'] and len(r['grading_history'])==3 for r in runs))
