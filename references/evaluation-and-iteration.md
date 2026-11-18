@@ -2,7 +2,8 @@
 
 Read this guide before defining tests, running comparisons or revising a skill.
 It preserves the methodological guidance of upstream skill-creator while using
-OpenCode API execution. Commands and JSON formats are in SKILL.md and schemas.md.
+native Codex and OpenCode execution. Commands and JSON formats are in SKILL.md
+and schemas.md.
 
 ## Choose evaluation for the task
 
@@ -307,6 +308,6 @@ show the actual deliverables, not only prose about them.
 Deliver the skill directory, required resources/dependencies, usage examples,
 benchmark and triggering evidence, human review status, and limitations. Preserve
 LICENSE and provenance. An optional `.skill` ZIP is a distribution archive: install
-its directory under `.opencode/skills/`, not through a nonexistent native importer.
+its directory under `.agents/skills/`.
 Keep experiment outputs out of the package. Validate the package from a clean
 directory, and make sure all referenced files needed by future users are included.

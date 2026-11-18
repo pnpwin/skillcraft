@@ -1,13 +1,11 @@
 ---
 name: skillcraft
-description: Create, improve, and evaluate OpenCode skills. Use this skill whenever the user wants to turn a repeated workflow into a skill, draft or revise skill instructions, compare versions against a baseline, review skill benchmarks, or diagnose and improve natural triggering—even when they do not name SkillCraft or use evaluation terminology. Also use it for requests such as “capture this process as a skill” or “make my skill get picked for the right tasks.” Ordinary prose editing, unrelated coding, and explanations of a term without a skill-authoring or evaluation task are outside its scope.
-metadata:
-  opencode/autoinvoke: "true"
+description: Create and improve Agent Skills for Codex and OpenCode. Use when the user wants to turn a recurring workflow into a skill, revise skill instructions, compare versions with A/B tests, review a skill benchmark, or improve when a skill is picked.
 license: Apache-2.0
-compatibility: Requires OpenCode 2.2.7, Python 3.11+ with requirements.txt installed, Node.js 22+ with runner dependencies installed, and an accessible configured model. Runner and server must share the same absolute filesystem paths.
+compatibility: Evaluations require Python 3.11+ and a configured model in Codex CLI 0.170.0 or OpenCode 2.2.7. The OpenCode runner also requires Node.js 22+ and shared absolute filesystem paths.
 ---
 
-# SkillCraft for OpenCode V2
+# SkillCraft
 
 Build skills through measured iterations: intent → draft → evals → baseline/with-skill
 → grading → human feedback → revision → regression check → triggering optimization.
@@ -17,7 +15,7 @@ Build skills through measured iterations: intent → draft → evals → baselin
 Before interviewing or drafting, read **references/authoring-guide.md in full**.
 Before creating, reviewing or changing frontmatter, also read
 **references/agent-skills-specification.md in full**. It distinguishes mandatory
-Agent Skills rules from OpenCode runtime behavior and portability recommendations.
+Agent Skills rules from runtime behavior and portability recommendations.
 Before defining evaluations, grading, reviewing or revising, read
 **references/evaluation-and-iteration.md in full**. These contain the complete
 method, examples and reasoning, not optional background. Reuse them if already
@@ -32,31 +30,32 @@ subjective review; an empty rubric has unknown automated quality, not a failed t
 
 ## Setup and paths
 
-Install this directory at `<project>/.opencode/skills/skillcraft/`. All paths below
+Install this directory at `<project>/.agents/skills/skillcraft/`. All paths below
 are relative to this SKILL.md, not the shell's current directory. Resolve this base
 directory before running scripts. Keep experiments in
-`<project>/.opencode/skillcraft-workspaces/<skill-id>/iteration-NNN/`.
+`<project>/.agents/skillcraft-workspaces/<skill-id>/iteration-NNN/`.
 
-Requirements: Python 3.11+, Node 22+, OpenCode **2.2.7** running locally or at an
-explicitly configured endpoint. Install once:
+Install the Python dependencies once. Install the Node dependencies when using OpenCode.
 
 ```sh
 python3 -m venv "$SKILLCRAFT/.venv"
 "$SKILLCRAFT/.venv/bin/pip" install -r "$SKILLCRAFT/requirements.txt"
-npm --prefix "$SKILLCRAFT/runner" ci
+npm --prefix "$SKILLCRAFT/runner" ci  # OpenCode
 ```
 
 Here `SKILLCRAFT` is the absolute directory containing this SKILL.md. Use its
-virtualenv Python for all commands. Read `references/opencode-runner.md` before
-configuring models, isolation, server authentication or a custom permissions profile.
+virtualenv Python for all commands. Scripts detect the harness from the calling
+session. In a terminal or CI, or to override detection, pass `--harness codex`
+or `--harness opencode`. Read the corresponding runner guide before configuring
+models, authentication or permissions: `references/codex-runner.md` or
+`references/opencode-runner.md`.
 Read `references/schemas.md` before generating eval inputs or consuming results.
 
 ## Frontmatter: mandatory Agent Skills contract
 
-Every releasable skill must pass **both** strict Agent Skills validation and
-verified OpenCode compatibility. OpenCode accepting a file does not waive the
-format rules. Both results use PASS / FAIL / NOT_RUN / ERROR; only two PASS values
-establish acceptance. Task quality and triggering are additional evidence.
+For release, verify Agent Skills conformance and compatibility with every
+target harness. The checks report PASS, FAIL, NOT_RUN or ERROR. Task quality
+and triggering have their own measurements.
 
 | Field | Required | Constraint / purpose |
 |---|---|---|
@@ -87,11 +86,9 @@ criteria → present artifacts, evidence and remaining limitations.
 
 ## 2. Write a draft
 
-Create `.opencode/skills/<skill-id>/SKILL.md` with a clear description and concise
-instructions. The directory determines the ID; `name` is a display label.
-For Agent Skills conformance, that frontmatter label must also meet the standard's
-identifier rules and match the directory; use a human-readable Markdown heading
-for a separate title. This requirement is stricter than OpenCode's loader.
+Create `.agents/skills/<skill-id>/SKILL.md` with a clear description and concise
+instructions. Match the frontmatter `name` to the directory identifier. Use a
+human-readable Markdown heading for the title.
 Put reusable code in `scripts/`, detailed knowledge in `references/`, and templates
 in `assets/`.
 Explain the purpose of important instructions. Prefer generalizable rules over
@@ -107,9 +104,8 @@ Validate with:
 "$SKILLCRAFT/.venv/bin/python" "$SKILLCRAFT/scripts/quick_validate.py" "$CANDIDATE" --lint
 ```
 
-OpenCode has no runtime 1024-character description limit, but Agent Skills does:
-a release description must be at most 1024 characters. Check format conformance
-separately from actual runtime compatibility; recommendations are not format errors.
+Agent Skills requires a description of at most 1024 characters. Check format
+conformance separately from actual runtime compatibility.
 Preserve upstream licenses. The detailed examples and exceptions of the reference
 implementation are explained in the required specification guide.
 
@@ -130,7 +126,7 @@ review section for a worked policy and its limits.
 
 ## 4. Run paired quality evaluations
 
-Choose explicit executor and judge models available on this OpenCode server. For a
+Choose explicit executor and judge models available in the selected harness. For a
 new skill compare `without_skill` against `with_skill`; for revisions also pass
 `--previous` pointing to the saved prior skill directory.
 
@@ -150,13 +146,10 @@ Technical failures stop dispatch; valid negative quality verdicts do not. Pilot
 cost and evidence are separate from main scores. See evaluation-and-iteration.md.
 Do not edit an in-flight snapshot or reuse an experiment directory.
 
-The default bounded-files profile permits input reads, skill resources and output
-writes. Skills requiring shell/network need an explicit `--profile`; such runs are
-labelled uncontrolled unless an external sandbox is independently established.
-Report that limitation with the benchmark. Never call a new session a sandbox.
-Profiles can inherit bounded file rules, set a step budget and opt into the owned
-worker for delegation. The effective profile and child evidence are recorded; see
-`references/opencode-runner.md` before changing capabilities.
+Both default profiles support input reads, skill resources and output writes.
+OpenCode can opt in to additional capabilities with `--profile`. Those runs
+are labelled uncontrolled. Codex uses its own sandbox settings. See the
+corresponding runner guide for the supported operations and bounds.
 
 ## 5. Grade and review
 
@@ -207,10 +200,10 @@ and a `group` shared by paraphrases/near-duplicates.
 ```
 
 The prompt must not instruct the model to load the candidate or disclose its ID.
-The runner installs and advertises a real native skill, then records successful
-`skill` tool calls. Other tools do not end the observation. Technical errors and
-timeouts remain errors, not false negatives. Loading is not proof of following
-the skill: use quality evals for that.
+The runner stages the skill under `.agents/skills/` and observes native invocation.
+OpenCode records successful `skill` tool calls. Codex records implicit-invocation
+events scoped to the turn. Errors, timeouts and unavailable observations have
+their own counts. Use quality evals to measure whether the skill was followed.
 
 Include real action cases with prepared projects and close negatives. Separate
 ready, missing-but-creatable and read-only-missing capabilities. Path-bound indexes
@@ -244,32 +237,29 @@ datasets may have no independent test; report this explicitly. The selected copy
 is exported, never silently applied to the installed candidate. Run quality regression
 checks after description selection, and review their results before promotion.
 Previous descriptions, training results and rationale are supplied to the optimizer
-in generation order. The interactive `report.html` shows separate dataset matrices,
-per-repeat errors/results and the validation-selected candidate; final test is shown
-only for that candidate. Use `scripts/generate_report.py HISTORY_JSON OUTPUT_HTML`
+in generation order. The interactive `report.html` shows dataset matrices,
+per-repeat results, errors, and the final-test comparison with the original
+description. Use `scripts/generate_report.py HISTORY_JSON OUTPUT_HTML`
 to regenerate a report, including legacy histories with adjacent result files.
 
 ## Completion
 
 Deliver the skill directory, concise usage instructions, benchmark/trigger reports,
-human feedback status and remaining limitations. OpenCode installs directories;
-`scripts/package_skill.py` can create an optional distribution ZIP. A `.skill` ZIP
-does not install itself. Keep artifacts out of the distribution and include LICENSE.
+human feedback status and remaining limitations. `scripts/package_skill.py` can
+create a distribution ZIP. Install by extracting the skill directory into
+`.agents/skills/`. Include the license and keep experiment artifacts separate.
 
-Before acceptance or distribution, verify the current candidate against a completed
-representative quality run using native attachment. Natural triggering alone is
-not compatibility proof. Both Agent Skills and OpenCode must report PASS:
+For each target harness, verify the candidate against a completed representative
+quality run using native attachment. Release this shared SkillCraft package with
+evidence from both harnesses.
 
 ```sh
 "$SKILLCRAFT/.venv/bin/python" "$SKILLCRAFT/scripts/compliance.py" "$CANDIDATE" \
   --run "$QUALITY_RUN" --workspace "$NEW_ACCEPTANCE_DIR"
 "$SKILLCRAFT/.venv/bin/python" "$SKILLCRAFT/scripts/package_skill.py" "$CANDIDATE" "$DIST" \
-  --run "$QUALITY_RUN" --verification-dir "$NEW_PACKAGE_CHECK_DIR"
+  --run "$CODEX_QUALITY_RUN" --run "$OPENCODE_QUALITY_RUN" --verification-dir "$NEW_PACKAGE_CHECK_DIR"
 ```
 
-Each command checks evidence hashes and refreshes the current OpenCode environment;
-packaging also checks the archive's execution files against the verified candidate.
-A changed skill, runner or environment requires new applicable evidence. Old runs
-without the new evidence contract remain NOT_RUN. Static validation can be used
-offline, but cannot certify OpenCode compatibility. Quality and real human feedback
-remain separately reported; a two-contract PASS does not fabricate either.
+Each command checks evidence hashes and refreshes its target environment.
+Packaging also verifies the archived bytes. Refresh evidence after changes to
+the skill, runner or environment. Report quality and human feedback separately.

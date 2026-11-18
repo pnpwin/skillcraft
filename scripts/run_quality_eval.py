@@ -7,13 +7,17 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.runtime import add_runtime_args, run_model, profile_settings
+from scripts.harness import VERSIONS, model_ref, parse_harness_args
 from scripts.compliance import require_standard, assess
 from scripts.utils import copy_tree, digest, load_evals, read_json, safe_id, snapshot_fixtures, tree_hash, write_json
 from scripts.reporting import print_report
 
 
-def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previous=None, timeout=180, profile=None, judge_model=None, judge_profile=None, historical_baseline=None, pilot_ids=None, stop_threshold=2):
+def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previous=None, timeout=180, profile=None, judge_model=None, judge_profile=None, historical_baseline=None, pilot_ids=None, stop_threshold=2, harness='opencode'):
     skill, workspace = Path(skill).resolve(), Path(workspace).resolve()
+    model_ref(model, harness)
+    if judge_model:
+        model_ref(judge_model, harness)
     if repeats < 1 or workers < 1 or stop_threshold < 1:
         raise ValueError('repeats, workers and stop_threshold must be positive')
     workspace.mkdir(parents=True, exist_ok=False)
@@ -21,8 +25,8 @@ def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previou
     pilot_ids = list(dict.fromkeys(pilot_ids or [rows[0]['id']]))
     if not set(pilot_ids) <= {row['id'] for row in rows}:
         raise ValueError('Unknown pilot case ID')
-    profile_settings(profile, safe_id(skill.name))
-    profile_settings(judge_profile)
+    profile_settings(profile, safe_id(skill.name), harness=harness)
+    profile_settings(judge_profile, harness=harness)
     fixtures, fixture_hashes = snapshot_fixtures(rows, skill, workspace)
     if profile:
         fixed_profile = workspace / 'snapshots' / 'profile.json'
@@ -35,7 +39,7 @@ def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previou
     skill_id = safe_id(skill.name)
     candidate = workspace / 'snapshots' / 'candidate' / skill_id
     candidate_hash = copy_tree(skill, candidate, skill=True, readonly=True)
-    write_json(workspace / 'compliance.json', assess(candidate))
+    write_json(workspace / 'compliance.json', assess(candidate, harness=harness))
     require_standard(candidate)
     configs = {'without_skill': None, 'with_skill': candidate}
     if previous:
@@ -47,13 +51,14 @@ def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previou
             from scripts.historical_baseline import verify
             write_json(workspace / 'historical-baseline.json', verify(old, historical_baseline))
         configs['previous_skill'] = old
-    manifest = {'schema_version': 1, 'kind': 'quality', 'skill_id': skill_id, 'model': model,
+    manifest = {'schema_version': 1, 'kind': 'quality', 'skill_id': skill_id, 'harness': harness, 'model': model,
                 'judge_model': judge_model, 'repeats': repeats, 'workers': workers,
                 'configurations': {k: {'role': k, 'snapshot_hash': tree_hash(v) if v else None} for k, v in configs.items()},
                 'candidate_hash': candidate_hash, 'evals': rows, 'controlled_requested': profile is None,
                 'fixture_hashes': fixture_hashes, 'profile_hash': digest(profile) if profile else None,
                 'judge_profile_hash': digest(judge_profile) if judge_profile else None,
-                'runtime': {'opencode': '2.2.7', 'client': '2.2.7', 'runner': '1.0.0'}, 'timeout_seconds': timeout,
+                'runtime': {harness: VERSIONS[harness], **({'client': '2.2.7', 'runner': '1.0.0'} if harness == 'opencode' else {})},
+                'timeout_seconds': timeout,
                 'pilot_policy': {'case_ids': pilot_ids, 'selection': 'explicit' if pilot_ids != [rows[0]['id']] else 'first case or explicitly selected first',
                                  'configurations': list(configs), 'stop_threshold': stop_threshold, 'max_in_flight': workers}}
     write_json(workspace / 'manifest.json', manifest)
@@ -73,12 +78,12 @@ def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previou
         try:
             result = run_model(row['prompt'], target, model, skill=snapshot, skill_id=skill_id,
                                attach=snapshot is not None, files=files, timeout=timeout, profile=profile,
-                               preparation=row.get('preparation'))
+                               preparation=row.get('preparation'), harness=harness)
             write_json(target / 'eval_metadata.json', {'eval_id': row['id'], **row, 'configuration': config,
                        'snapshot_hash': manifest['configurations'][config]['snapshot_hash']})
             stage = 'grading'
             from scripts.grade import grade_run
-            grade = grade_run(target, row, judge_model=judge_model, timeout=timeout, judge_profile=judge_profile)
+            grade = grade_run(target, row, judge_model=judge_model, timeout=timeout, judge_profile=judge_profile, harness=harness)
             complete = result['status'] == 'completed' and grade['evaluation_complete']
             return {'complete': complete, 'run': result,
                     'stage': 'executor' if result['status'] != 'completed' else grade.get('failure_stage', 'grading'),
@@ -136,7 +141,7 @@ def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previou
     else:
         manifest['queue'] = {'jobs': {key: {'status': 'not_started_after_stop'} for key, _ in jobs},
                              'stop': {'stage': 'pilot', 'reason': review_error or 'Pilot pipeline incomplete'}}
-    manifest['compliance'] = {config: [assess(snapshot, job[3]) for _, job in jobs
+    manifest['compliance'] = {config: [assess(snapshot, job[3], harness=harness) for _, job in jobs
                                       if job[4] == config and (job[3] / 'run.json').exists()]
                               for config, snapshot in configs.items() if snapshot}
     write_json(workspace / 'manifest.json', manifest)
@@ -160,11 +165,11 @@ def main():
     p.add_argument('--pilot-case', action='append', help='Representative case ID; repeat for distinct capabilities. Default: first case')
     p.add_argument('--stop-threshold', type=int, default=2, help='Stop dispatch after this many matching infrastructure errors')
     add_runtime_args(p)
-    args = p.parse_args()
+    args = parse_harness_args(p)
     report = run_quality(args.skill, args.evals, args.workspace, args.model, repeats=args.repeats,
                         workers=args.workers, previous=args.previous, timeout=args.timeout,
                          profile=args.profile, judge_model=args.judge_model, judge_profile=args.judge_profile,
-                         pilot_ids=args.pilot_case, stop_threshold=args.stop_threshold)
+                         pilot_ids=args.pilot_case, stop_threshold=args.stop_threshold, harness=args.harness)
     print_report(report, args.workspace / 'benchmark.json', as_json=args.json)
     return 1 if report['errors'] or report['validation_errors'] else 0
 

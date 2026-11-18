@@ -1,6 +1,13 @@
 # Version 1 contracts
 
-## Agent Skills and OpenCode compliance result (additive contract)
+## Agent Skills and harness compliance result
+
+New executor and request records carry `harness` (`codex` or `opencode`). Codex
+requests encode the model as `{"id":"MODEL","effort":"EFFORT"}`, with optional
+`effort`. OpenCode requests retain their existing model reference. Individual
+compliance reports check one target harness. Shared SkillCraft packaging binds
+one representative execution and a fresh probe per harness to the same skill
+hash. Codex explicit attachment evidence is kept in `codex_attachment.json`.
 
 Existing artifact schema_version 1 stays readable. The new compliance object has
 its own schema_version 1 and is independent of task grading and critique:
@@ -11,7 +18,8 @@ its own schema_version 1 and is independent of task grading and critique:
   "skill_hash": "hash-of-the-checked-artifact",
   "contract": {
     "agent_skills_revision": "83021e2be457a9b6679148719c1f6074f0ad975e",
-    "opencode_version": "2.2.6"
+    "opencode_version": "2.2.7",
+    "codex_version": "0.170.0"
   },
   "agent_skills": {
     "status": "FAIL",
@@ -172,7 +180,7 @@ per class are needed for train/validation, three for a two-class final test.
   "timeout_seconds": 180,
   "mode": "quality",
   "skill_id": "candidate",
-  "skill_path": "/absolute/execution-location/.opencode/skills/candidate/SKILL.md",
+  "skill_path": "/absolute/execution-location/.agents/skills/candidate/SKILL.md",
   "skill_sha256": "sha256-of-SKILL.md",
   "attach_skill": true,
   "permissions": [{"action":"*","resource":"*","effect":"deny"}],

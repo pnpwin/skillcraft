@@ -6,7 +6,8 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.runtime import add_runtime_args, run_model
+from scripts.runtime import add_runtime_args, profile_settings, run_model
+from scripts.harness import model_ref, parse_harness_args
 from scripts.compliance import require_standard, assess
 from scripts.utils import copy_tree, digest, load_evals, read_json, safe_id, snapshot_fixtures, write_json
 
@@ -24,8 +25,13 @@ def summarize(results):
             'accuracy': (counts['tp'] + counts['tn']) / len(valid) if valid else None}
 
 
-def run_eval(skill, evals, workspace, model, *, repeats=3, workers=1, timeout=180, profile=None, historical_baseline=None, judge_model=None, judge_profile=None):
+def run_eval(skill, evals, workspace, model, *, repeats=3, workers=1, timeout=180, profile=None, historical_baseline=None, judge_model=None, judge_profile=None, harness='opencode'):
     skill, workspace = Path(skill).resolve(), Path(workspace).resolve()
+    model_ref(model, harness)
+    if judge_model:
+        model_ref(judge_model, harness)
+    profile_settings(profile, safe_id(skill.name), harness=harness)
+    profile_settings(judge_profile, harness=harness)
     if repeats < 1 or workers < 1:
         raise ValueError('repeats and workers must be positive')
     rows = load_evals(evals, trigger=True) if isinstance(evals, (str, Path)) else evals
@@ -42,13 +48,13 @@ def run_eval(skill, evals, workspace, model, *, repeats=3, workers=1, timeout=18
     skill_id = safe_id(skill.name)
     snapshot = workspace / 'snapshots' / skill_id
     snapshot_hash = copy_tree(skill, snapshot, skill=True, readonly=True)
-    write_json(workspace / 'compliance.json', assess(snapshot))
+    write_json(workspace / 'compliance.json', assess(snapshot, harness=harness))
     if historical_baseline is None:
         require_standard(snapshot)
     else:
         from scripts.historical_baseline import verify
         write_json(workspace / 'historical-baseline.json', verify(snapshot, historical_baseline))
-    write_json(workspace / 'manifest.json', {'schema_version': 1, 'kind': 'trigger', 'skill_id': skill_id,
+    write_json(workspace / 'manifest.json', {'schema_version': 1, 'kind': 'trigger', 'skill_id': skill_id, 'harness': harness,
                'snapshot_hash': snapshot_hash, 'model': model, 'evals': rows, 'repeats': repeats, 'timeout_seconds': timeout,
                'fixture_hashes': fixture_hashes, 'profile_hash': digest(profile) if profile else None,
                'judge_model': judge_model, 'judge_profile_hash': digest(judge_profile) if judge_profile else None})
@@ -58,13 +64,13 @@ def run_eval(skill, evals, workspace, model, *, repeats=3, workers=1, timeout=18
         target = workspace / f'eval-{row["id"]}' / 'natural' / f'run-{repeat:03d}'
         result = run_model(row['prompt'], target, model,
                            mode='trigger', skill=snapshot, skill_id=skill_id, timeout=timeout, profile=profile,
-                           files=fixtures[row['id']], preparation=row.get('preparation'))
+                           files=fixtures[row['id']], preparation=row.get('preparation'), harness=harness)
         from scripts.trigger_diagnostics import diagnose
         diagnostics = diagnose(target, result, skill_id)
         write_json(target / 'eval_metadata.json', {**row, 'eval_id': row['id'], 'snapshot_hash': snapshot_hash})
         if judge_model and row.get('expectations'):
             from scripts.grade import grade_run
-            grade = grade_run(target, row, judge_model=judge_model, judge_profile=judge_profile, timeout=timeout)
+            grade = grade_run(target, row, judge_model=judge_model, judge_profile=judge_profile, timeout=timeout, harness=harness)
             diagnostics['quality_status'] = 'completed' if grade['evaluation_complete'] else 'incomplete'
             if grade['evaluation_complete'] and grade['summary']['total']:
                 diagnostics['task_correct'] = grade['summary']['failed'] == 0
@@ -90,8 +96,8 @@ def run_eval(skill, evals, workspace, model, *, repeats=3, workers=1, timeout=18
     summary['environment_consistent'] = len(signatures) <= 1
     summary['controlled'] = (len(environments) == len(results) and bool(environments)
                              and all(e['controlled'] for e in environments) and len(signatures) == 1)
-    report = {'schema_version': 1, 'summary': summary, 'results': results,
-              'compliance': assess(snapshot)}
+    report = {'schema_version': 1, 'harness': harness, 'summary': summary, 'results': results,
+              'compliance': assess(snapshot, harness=harness)}
     if historical_baseline is not None:
         report['role'] = 'immutable_oversized_historical_baseline'
         report['eligible_for_promotion'] = False
@@ -111,9 +117,9 @@ def main():
     p.add_argument('--judge-model', help='Optional independent task grading, separate from trigger counts')
     p.add_argument('--judge-profile', type=Path)
     add_runtime_args(p)
-    a = p.parse_args()
+    a = parse_harness_args(p)
     report = run_eval(a.skill, a.evals, a.workspace, a.model, repeats=a.repeats, workers=a.workers, timeout=a.timeout, profile=a.profile,
-                      judge_model=a.judge_model, judge_profile=a.judge_profile)
+                      judge_model=a.judge_model, judge_profile=a.judge_profile, harness=a.harness)
     print(__import__('json').dumps(report['summary'], indent=2))
     return 1 if report['summary']['errors'] or report['summary']['quality_errors'] or not report['summary']['environment_consistent'] else 0
 

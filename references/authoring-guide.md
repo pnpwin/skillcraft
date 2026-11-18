@@ -116,7 +116,7 @@ being written once and verified. Use a reference for knowledge the agent must re
 and reason about. Assets are resources used in outputs, not a substitute for
 instructions. Explain where each resource is and when it must be used.
 
-For OpenCode, resolve resources relative to the loaded SKILL.md location. Do not
+Resolve resources relative to the loaded SKILL.md location. Do not
 assume that the shell working directory equals the installed skill directory.
 Document dependencies and their installation instead of relying on hidden state.
 
