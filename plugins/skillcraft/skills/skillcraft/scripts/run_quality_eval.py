@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Repeated, paired quality evaluation using native skill attachments."""
 import argparse
+import os
+import sqlite3
 import subprocess
 from pathlib import Path
 import sys
@@ -57,6 +59,7 @@ def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previou
                 'judge_model': judge_model, 'repeats': repeats, 'workers': workers,
                 'configurations': {k: {'role': k, 'snapshot_hash': tree_hash(v) if v else None} for k, v in configs.items()},
                 'candidate_hash': candidate_hash, 'evals': rows, 'controlled_requested': profile is None,
+                'learning_internal': os.environ.get('SKILLCRAFT_LEARNING_INTERNAL') == '1',
                 'fixture_hashes': fixture_hashes, 'profile_hash': digest(profile) if profile else None,
                 'judge_profile_hash': digest(judge_profile) if judge_profile else None,
                 'runtime': {runtime: None}, 'timeout_seconds': timeout,
@@ -153,6 +156,12 @@ def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previou
     report = aggregate(workspace)
     report['compliance'] = manifest['compliance']
     write_json(workspace / 'benchmark.json', report)
+    if not manifest['learning_internal']:
+        try:
+            from scripts.learning import notify_eval
+            notify_eval(workspace)
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError, sqlite3.Error) as error:
+            print(f'SkillCraft experience import skipped: {type(error).__name__}', file=sys.stderr)
     return report
 
 

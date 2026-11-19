@@ -11,13 +11,15 @@ class MarketplaceLayoutTests(unittest.TestCase):
         catalog = read_json(REPO / '.agents/plugins/marketplace.json')
         [entry] = catalog['plugins']
         package_root = REPO / entry['source']['path']
-        codex = read_json(package_root / 'plugin.json')
+        codex = read_json(package_root / '.codex-plugin/plugin.json')
         opencode = read_json(package_root / 'package.json')
 
         self.assertEqual(entry['name'], codex['name'])
         self.assertEqual(codex['version'], opencode['version'])
         self.assertTrue((package_root / opencode['exports']['.']).is_file())
         self.assertIn('skills/', opencode['files'])
+        self.assertEqual((package_root / codex['skills']).resolve(), SKILL.parent)
+        self.assertEqual(set(read_json(package_root / codex['hooks'])['hooks']), {'UserPromptSubmit', 'Stop'})
         self.assertEqual(list(package_root.rglob('SKILL.md')), [SKILL / 'SKILL.md'])
         self.assertEqual(ROOT, SKILL)
 

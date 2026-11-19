@@ -192,6 +192,12 @@ avoid overfitting to prompts. Save the old candidate, create a new iteration dir
 and repeat all affected evals against baseline and the previous version. Report
 paired deltas, variance, completion rates and any environment drift.
 
+
+For opted-in projects, SkillCraft can accumulate verified successes,
+failures, and corrections, draft a small revision, and run A/B before
+locally applying it. See [automatic learning](references/learning.md)
+before configuring collection or automatic updates.
+
 ## 7. Evaluate natural triggering
 
 Build realistic positive, negative and near-miss requests. Include negatives sharing

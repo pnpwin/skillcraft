@@ -1,0 +1,7 @@
+{
+  "name": "skillcraft",
+  "version": "0.1.0",
+  "description": "Create, evaluate, and refine Agent Skills with paired tests and reports.",
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json"
+}

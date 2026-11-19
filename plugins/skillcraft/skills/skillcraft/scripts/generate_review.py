@@ -17,6 +17,7 @@ import base64
 import json
 import mimetypes
 import re
+import secrets
 import sys
 import webbrowser
 from functools import partial
@@ -60,18 +61,23 @@ def find_runs(workspace: Path, selection=None) -> list[dict]:
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from scripts.grading_store import load_selection
         selection = load_selection(workspace, selection)
-    _find_runs_recursive(workspace, workspace, runs, selection)
+        for logical_id in selection['runs']:
+            run = build_run(workspace, workspace / logical_id, selection)
+            if run:
+                runs.append(run)
+    else:
+        _find_runs_recursive(workspace, workspace, runs)
     runs.sort(key=lambda r: (str(r.get("eval_id", "")), r["logical_id"]))
     return runs
 
 
-def _find_runs_recursive(root: Path, current: Path, runs: list[dict], selection=None) -> None:
+def _find_runs_recursive(root: Path, current: Path, runs: list[dict]) -> None:
     if not current.is_dir():
         return
 
     outputs_dir = current / "outputs"
     if outputs_dir.is_dir():
-        run = build_run(root, current, selection)
+        run = build_run(root, current)
         if run:
             runs.append(run)
         return
@@ -79,7 +85,7 @@ def _find_runs_recursive(root: Path, current: Path, runs: list[dict], selection=
     skip = {"node_modules", ".git", "__pycache__", "skill", "inputs", "snapshots", "judge", "optimizer", "candidates", "selected"}
     for child in sorted(current.iterdir()):
         if child.is_dir() and not child.is_symlink() and child.name not in skip:
-            _find_runs_recursive(root, child, runs, selection)
+            _find_runs_recursive(root, child, runs)
 
 
 def build_run(root: Path, run_dir: Path, selection=None) -> dict | None:
@@ -316,22 +322,39 @@ def generate_html(
 # HTTP server (stdlib only, zero dependencies)
 # ---------------------------------------------------------------------------
 
-def validate_feedback(data, runs):
+def validate_feedback_entries(data):
     if not isinstance(data, dict) or data.get('schema_version') != 1 or not isinstance(data.get('reviews'), list):
         raise ValueError('Expected versioned feedback with reviews')
-    lookup = {r['id']: r for r in runs}
     seen = set()
     for review in data['reviews']:
+        if not isinstance(review, dict):
+            raise ValueError('Expected a feedback object for each run')
         rid = review.get('run_id')
-        if rid not in lookup or rid in seen:
+        if not isinstance(rid, str) or not rid or rid in seen:
             raise ValueError('Unknown or duplicate feedback run_id')
         seen.add(rid)
-        if review.get('snapshot_hash') != lookup[rid]['snapshot_hash']:
-            raise ValueError('Feedback snapshot mismatch')
         if not isinstance(review.get('feedback'), str) or type(review.get('reviewed')) is not bool:
             raise ValueError('Invalid feedback text/reviewed flag')
-    if data.get('status') == 'complete' and (seen != set(lookup) or not all(r['reviewed'] for r in data['reviews'])):
+        verdict = review.get('verdict')
+        if verdict is not None and verdict not in ('success', 'failure', 'correction'):
+            raise ValueError('Invalid feedback verdict')
+        if verdict == 'correction' and (review.get('reviewed') is not True or not review['feedback'].strip()):
+            raise ValueError('Correction verdict requires a reviewed run and nonempty feedback')
+    if data.get('status') == 'complete' and not all(r['reviewed'] for r in data['reviews']):
         raise ValueError('Complete feedback must review every run')
+    return seen
+
+
+def validate_feedback(data, runs):
+    seen = validate_feedback_entries(data)
+    lookup = {r['id']: r for r in runs}
+    if not seen <= lookup.keys():
+        raise ValueError('Unknown or duplicate feedback run_id')
+    if data.get('status') == 'complete' and seen != lookup.keys():
+        raise ValueError('Complete feedback must review every run')
+    for review in data['reviews']:
+        if review.get('snapshot_hash') != lookup[review['run_id']]['snapshot_hash']:
+            raise ValueError('Feedback snapshot mismatch')
     return data
 
 
@@ -340,6 +363,19 @@ def save_feedback(path, data, runs):
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
     temporary.replace(path)
+
+
+def notify_feedback_safely(workspace: Path, feedback_path: Path, selection=None) -> None:
+    """Offer completed feedback to the learning pipeline when it is available."""
+    package_root = str(Path(__file__).resolve().parents[1])
+    if package_root not in sys.path:
+        sys.path.insert(0, package_root)
+    try:
+        from scripts.learning import notify_feedback
+        notify_feedback(workspace, feedback_path, selection=selection)
+    except Exception:
+        # Learning ingestion is optional; saving feedback must remain successful.
+        pass
 
 class ReviewHandler(BaseHTTPRequestHandler):
     """Serves the review HTML and handles feedback saves.
@@ -357,6 +393,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
         benchmark_path: Path | None,
         *args,
         selection=None,
+        authorization_token=None,
         **kwargs,
     ):
         self.workspace = workspace
@@ -365,9 +402,39 @@ class ReviewHandler(BaseHTTPRequestHandler):
         self.previous = previous
         self.benchmark_path = benchmark_path
         self.selection = selection
+        self.authorization_token = authorization_token
         super().__init__(*args, **kwargs)
 
+    def _allowed_hosts(self) -> set[str]:
+        port = self.server.server_port
+        return {f'localhost:{port}', f'127.0.0.1:{port}'}
+
+    def _request_host_is_allowed(self) -> bool:
+        # Compare the raw authority exactly: parsing and normalizing Host can
+        # accidentally admit alternate authorities or userinfo syntax.
+        return self.headers.get('Host') in self._allowed_hosts()
+
+    def _origin_is_allowed(self, *, required: bool) -> bool:
+        origin = self.headers.get('Origin')
+        if origin is None:
+            return not required
+        host = self.headers.get('Host')
+        return host in self._allowed_hosts() and origin == f'http://{host}'
+
+    def _authorized(self) -> bool:
+        expected = f'Bearer {self.authorization_token}'.encode('ascii')
+        supplied = self.headers.get('Authorization', '').encode('utf-8')
+        return bool(self.authorization_token) and secrets.compare_digest(supplied, expected)
+
+    def _reject_untrusted_request(self, *, require_origin: bool = False) -> bool:
+        if not self._request_host_is_allowed() or not self._origin_is_allowed(required=require_origin):
+            self.send_error(403)
+            return True
+        return False
+
     def do_GET(self) -> None:
+        if self._reject_untrusted_request():
+            return
         if self.path == "/" or self.path == "/index.html":
             # Regenerate HTML on each request (re-scans workspace for new outputs)
             runs = find_runs(self.workspace, self.selection)
@@ -385,6 +452,9 @@ class ReviewHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(content)
         elif self.path == "/api/feedback":
+            if not self._authorized():
+                self.send_error(403)
+                return
             data = b"{}"
             if self.feedback_path.exists():
                 data = self.feedback_path.read_bytes()
@@ -397,9 +467,10 @@ class ReviewHandler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self) -> None:
+        if self._reject_untrusted_request(require_origin=True):
+            return
         if self.path == "/api/feedback":
-            origin = self.headers.get('Origin')
-            if origin and origin not in {f'http://{self.headers.get("Host")}', f'http://127.0.0.1:{self.server.server_port}', f'http://localhost:{self.server.server_port}'}:
+            if not self._authorized():
                 self.send_error(403)
                 return
             length = int(self.headers.get("Content-Length", 0))
@@ -410,6 +481,8 @@ class ReviewHandler(BaseHTTPRequestHandler):
             try:
                 data = json.loads(body)
                 save_feedback(self.feedback_path, data, find_runs(self.workspace, self.selection))
+                if data.get('status') == 'complete':
+                    notify_feedback_safely(self.workspace, self.feedback_path, self.selection)
                 resp = b'{"ok":true}'
                 self.send_response(200)
             except (json.JSONDecodeError, OSError, ValueError) as e:
@@ -471,7 +544,10 @@ def main() -> None:
         if args.selection and not args.feedback_output:
             parser.error('Selected review imports require a separate --feedback-output')
         feedback_path.parent.mkdir(parents=True, exist_ok=True)
-        save_feedback(feedback_path, json.loads(args.import_feedback.read_text()), runs)
+        data = json.loads(args.import_feedback.read_text())
+        save_feedback(feedback_path, data, runs)
+        if data.get('status') == 'complete':
+            notify_feedback_safely(workspace, feedback_path, args.selection)
         print(f'Imported feedback: {feedback_path}')
         return
 
@@ -495,7 +571,17 @@ def main() -> None:
         sys.exit(0)
 
     port = args.port
-    handler = partial(ReviewHandler, workspace, skill_name, feedback_path, previous, benchmark_path, selection=args.selection)
+    authorization_token = secrets.token_urlsafe(32)
+    handler = partial(
+        ReviewHandler,
+        workspace,
+        skill_name,
+        feedback_path,
+        previous,
+        benchmark_path,
+        selection=args.selection,
+        authorization_token=authorization_token,
+    )
     try:
         server = HTTPServer(("127.0.0.1", port), handler)
     except OSError:
@@ -503,7 +589,7 @@ def main() -> None:
         server = HTTPServer(("127.0.0.1", 0), handler)
     port = server.server_address[1]
 
-    url = f"http://localhost:{port}"
+    url = f"http://localhost:{port}/#cap={authorization_token}"
     print(f"\n  Eval Viewer")
     print(f"  ─────────────────────────────────")
     print(f"  URL:       {url}", flush=True)
