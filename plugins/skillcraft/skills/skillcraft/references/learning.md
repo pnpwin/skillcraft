@@ -90,7 +90,9 @@ Codex uses `UserPromptSubmit` and `Stop`. A supported local rollout can prove
 a completed read of the whole `SKILL.md` in that turn. Its bytes and the
 package fingerprint must match the source observed at both hooks. Missing
 rollouts, unsupported records, partial reads, and changed files leave the
-turn unbound. OpenCode checks its persisted skill and message projection.
+turn unbound. OpenCode follows execution and inbox events, then verifies
+the skill body in persisted attachments or successful native skill tool
+results against the enrolled version observed at the start of the turn.
 
 The worker uses three independent observations or one correction backed by
 a reproducible failure. A/B imports use completed deterministic and independent
