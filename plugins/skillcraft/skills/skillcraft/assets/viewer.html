@@ -671,6 +671,7 @@
     const verdictMap = new Map();
     const visitedRuns = new Set();
     const draftKey = `skillcraft-review:${location.pathname}`;
+    const feedbackCapability = new URLSearchParams(location.hash.slice(1)).get("cap") || "";
     let currentIndex = 0;
     let saveTimeout = null;
     let pendingWrite = Promise.resolve();
@@ -681,7 +682,10 @@
     async function init() {
       try {
         const data = EMBEDDED_DATA.server_available
-          ? await (await fetch("/api/feedback", { cache: "no-store" })).json()
+          ? await (await fetch("/api/feedback", {
+              cache: "no-store",
+              headers: { "Authorization": `Bearer ${feedbackCapability}` },
+            })).json()
           : JSON.parse(sessionStorage.getItem(draftKey));
         if (Array.isArray(data?.reviews)) {
           const saved = new Map(data.reviews.map(review => [review.run_id, review]));
@@ -1092,7 +1096,10 @@
       const write = pendingWrite.then(async () => {
         const response = await fetch("/api/feedback", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${feedbackCapability}`,
+          },
           body: payload,
         });
         if (!response.ok) throw new Error("Feedback save failed");

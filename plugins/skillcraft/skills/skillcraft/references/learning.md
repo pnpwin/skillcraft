@@ -10,6 +10,8 @@ Completed quality evaluations and validated HTML feedback feed the same journal.
 A review mark alone records that a run was seen. Set an explicit success,
 failure, or correction verdict to use human feedback as evidence. For a
 correction, include the changed behavior in the comment.
+For live feedback, open the full URL printed by the review server. Its
+fragment carries the session capability for reading and submitting feedback.
 
 ## Project configuration
 

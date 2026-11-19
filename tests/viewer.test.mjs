@@ -15,6 +15,7 @@ const runs = ['first', 'second', 'third'].map(id => ({
 async function loadViewer({ saved, storage, onPost = async () => ({ ok: true }) } = {}) {
   const nodes = new Map();
   const posts = [];
+  const requests = [];
   const timers = new Map();
   let ready;
   const initialized = new Promise(resolve => { ready = resolve; });
@@ -39,12 +40,14 @@ async function loadViewer({ saved, storage, onPost = async () => ({ ok: true }) 
   }
   const context = createContext({
     document: { getElementById: element, querySelector: element, addEventListener: () => {} },
-    location: { pathname: '/review.html' },
+    location: { pathname: '/review.html', hash: storage ? '' : '#cap=viewer-test-capability' },
+    URLSearchParams,
     sessionStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
     setTimeout: callback => { const id = Symbol(); timers.set(id, callback); return id; },
     clearTimeout: id => timers.delete(id),
     fetch: async (url, options) => {
       assert.equal(url, '/api/feedback');
+      requests.push({ method: options?.method ?? 'GET', authorization: options?.headers?.Authorization });
       if (options?.method !== 'POST') return { json: async () => saved };
       const payload = JSON.parse(options.body);
       posts.push(payload);
@@ -55,11 +58,21 @@ async function loadViewer({ saved, storage, onPost = async () => ({ ok: true }) 
   runInContext(script.replace('/*__EMBEDDED_DATA__*/', 'const EMBEDDED_DATA = ' + JSON.stringify(data) + ';'), context);
   await initialized;
   return {
-    posts, timers, element, next: () => context.navigate(1), submit: () => context.showDoneDialog(),
+    posts, requests, timers, element, next: () => context.navigate(1), submit: () => context.showDoneDialog(),
     edit: text => { element('feedback').value = text; listeners.get('feedback:input')(); },
     verdict: value => { element('verdict').value = value; listeners.get('verdict:change')(); },
   };
 }
+
+test('live feedback reads and writes use the capability from the review URL', async () => {
+  const viewer = await loadViewer();
+  viewer.next();
+  viewer.next();
+  await viewer.submit();
+  assert.equal(viewer.requests[0].method, 'GET');
+  assert.equal(viewer.requests.at(-1).method, 'POST');
+  assert.ok(viewer.requests.every(request => request.authorization === 'Bearer viewer-test-capability'));
+});
 
 test('immediate submit cancels draft timer and keeps visited runs without comments', async () => {
   const viewer = await loadViewer();
