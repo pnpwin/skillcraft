@@ -38,6 +38,7 @@ RUNNER_ENV = {
     'codex': {'codex_home': 'SKILLCRAFT_CODEX_HOME', 'binary': 'SKILLCRAFT_CODEX'},
     'opencode': {'server': 'SKILLCRAFT_SERVER'},
 }
+MANUAL_RETRY_PREFIX = 'manual-retry:'
 
 
 @contextmanager
@@ -250,6 +251,132 @@ def protected_success_cases(db, name, version):
         "AND kind='success' AND case_id IS NOT NULL", (name, version))}
 
 
+def fingerprint(value):
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
+
+
+def validate_proposal(proposal):
+    if (not isinstance(proposal, dict) or set(proposal) != {'rationale', 'changes'}
+            or not isinstance(proposal.get('rationale'), str) or not proposal['rationale'].strip()
+            or not isinstance(proposal.get('changes'), list) or len(proposal['changes']) > 8):
+        raise ValueError('Candidate must contain a rationale and a bounded list of changes')
+    for edit in proposal['changes']:
+        if (not isinstance(edit, dict) or set(edit) != {'path', 'content'}
+                or not isinstance(edit['path'], str) or not isinstance(edit['content'], str)):
+            raise ValueError('Invalid file replacement')
+    return proposal
+
+
+def proposal_record(attempt):
+    return Path(attempt) / 'optimizer' / 'proposal.json'
+
+
+def proposal_hash(proposal):
+    return fingerprint(proposal)
+
+
+def proposal_archive(proposal, report, *, response_hash=None):
+    return {
+        'sha256': proposal_hash(proposal), 'proposal': proposal,
+        'input_hash': report.get('optimizer', {}).get('input_hash'),
+        'source_hash': report.get('before'), 'source_modes': report.get('source_modes'),
+        'response_hash': response_hash,
+    }
+
+
+def load_saved_proposal(attempt, report):
+    """Load a schema-checked proposal only when its durable content hash matches."""
+    expected = report.get('optimizer', {}).get('proposal_hash')
+    path = proposal_record(attempt)
+    if not isinstance(expected, str) or not path.is_file() or path.is_symlink():
+        return None
+    try:
+        record = read_json(path)
+        proposal = validate_proposal(record['proposal'])
+    except (OSError, KeyError, TypeError, ValueError):
+        return None
+    actual = proposal_hash(proposal)
+    if (record.get('sha256') != actual or expected != actual
+            or record.get('input_hash') != report.get('optimizer', {}).get('input_hash')
+            or record.get('source_hash') != report.get('before')
+            or record.get('source_modes') != report.get('source_modes')):
+        return None
+    return proposal
+
+
+def validation_fingerprint(config, settings):
+    """Hash every owner-controlled input that can change code or A/B verification."""
+    harnesses = settings.get('harnesses', {})
+    runtime = {}
+    for harness, models in harnesses.items():
+        runtime[harness] = {
+            'model': models.get('model'), 'judge_model': models.get('judge_model'),
+            'runtime_overrides': {
+                env: models.get(key, os.environ.get(env)) for key, env in RUNNER_ENV[harness].items()
+            },
+        }
+    fixtures = []
+    source = local_path(config['root'], settings['source'], directory=True)
+    for split in ('train', 'holdout'):
+        eval_path = local_path(config['root'], settings[split])
+        for case in load_evals(eval_path):
+            for item in input_specs(case.get('files', []), source):
+                fixtures.append({
+                    'case': case['id'], 'destination': item['destination'], 'role': item['role'],
+                    'sha256': digest(Path(item['source'])),
+                })
+    fixtures.sort(key=lambda row: (row['case'], row['destination']))
+    return fingerprint({
+        'tests': settings.get('tests', []), 'editable': settings.get('editable', EDITABLE),
+        'repeats': settings.get('repeats', 3), 'timeout': settings.get('timeout', 180),
+        'train': digest(local_path(config['root'], settings['train'])),
+        'holdout': digest(local_path(config['root'], settings['holdout'])),
+        'fixtures': fixtures, 'harnesses': runtime,
+        'test_image': os.environ.get('SKILLCRAFT_TEST_IMAGE'),
+        'container_runtimes': {name: shutil.which(name) for name in ('docker', 'podman')},
+    })
+
+
+def proposal_source_matches(prior_path, report, source, version):
+    if report.get('before') != version:
+        return False
+    original = Path(prior_path) / 'original' / report.get('skill', '')
+    try:
+        from scripts.learning_promotion import tree_modes
+        return (tree_hash(source) == version and tree_hash(original) == version
+                and report.get('source_modes') == tree_modes(source) == tree_modes(original))
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def prior_proposal(db, name, version, input_hash, attempt, source):
+    rows = db.execute('SELECT path, status FROM revisions WHERE skill=? AND version=? ORDER BY id DESC',
+                      (name, version)).fetchall()
+    for row in rows:
+        path = Path(row['path'])
+        if path == attempt or row['status'] not in {'blocked', 'interrupted', 'running'}:
+            continue
+        report_path = path / 'report.json'
+        if not report_path.is_file():
+            continue
+        try:
+            report = read_json(report_path)
+        except (OSError, ValueError, TypeError):
+            continue
+        optimizer = report.get('optimizer', {})
+        if optimizer.get('input_hash') != input_hash:
+            continue
+        proposal = load_saved_proposal(path, report)
+        if optimizer.get('proposal_hash') and (
+                proposal is None or not proposal_source_matches(path, report, source, version)):
+            return None
+        if proposal is None:
+            continue
+        return proposal, report, path
+    return None
+
+
 def failed_optimizer_input_seen(db, name, version, input_hash, attempt):
     """Avoid repeating a failed call until the actual optimizer input changes."""
     prior = db.execute('SELECT path, status FROM revisions WHERE skill=? AND version=? ORDER BY id DESC',
@@ -265,12 +392,13 @@ def failed_optimizer_input_seen(db, name, version, input_hash, attempt):
             report = read_json(report_path)
         except (OSError, ValueError, TypeError):
             continue
-        if report.get('optimizer', {}).get('input_hash') == input_hash:
+        if (report.get('optimizer', {}).get('input_hash') == input_hash
+                and load_saved_proposal(path, report) is None):
             return True
     return False
 
 
-def revise(config, name, settings, source, version, rows, attempt, db):
+def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_only=False, manual_retry=False):
     attempt.mkdir(parents=True, exist_ok=False)
     started = time.monotonic()
     report = {'skill': name, 'source': str(source), 'before': version, 'evidence': [row['id'] for row in rows],
@@ -288,7 +416,12 @@ def revise(config, name, settings, source, version, rows, attempt, db):
             raise ValueError('The opted-in skill changed while taking the snapshot')
         if tree_modes(original) != source_modes or tree_modes(source) != source_modes:
             raise ValueError('The opted-in skill permissions changed while taking the snapshot')
+        report['source_modes'] = source_modes
+        validation_hash = validation_fingerprint(config, settings)
         options, (train, holdout), evals, repeats, timeout, excluded = configured_runs(config, settings, source, attempt)
+        if validation_fingerprint(config, settings) != validation_hash:
+            raise ValueError('Validation inputs changed while taking the snapshot')
+        report['validation_hash'] = validation_hash
         train_ids = {row['id'] for row in train}
         holdout_ids = {row['id'] for row in holdout}
         withheld = families(holdout)
@@ -339,30 +472,53 @@ def revise(config, name, settings, source, version, rows, attempt, db):
             env: optimizer_settings.get(key, os.environ.get(env))
             for key, env in RUNNER_ENV[optimizer].items()
         }
-        fingerprint_input = json.dumps({
+        input_hash = fingerprint({
             'prompt': prompt, 'harness': optimizer, 'model': optimizer_model,
             'timeout': timeout, 'runtime_overrides': runtime_overrides,
-        }, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
-        input_hash = hashlib.sha256(fingerprint_input.encode('utf-8')).hexdigest()
-        if failed_optimizer_input_seen(db, name, version, input_hash, attempt):
-            report.update(status='retry_suppressed', reason='Optimizer request is unchanged since its failed attempt')
-            return report
+        })
         report['optimizer'] = {'harness': optimizer, 'evidence': [row['id'] for row in usable],
                                'input_hash': input_hash}
-        report['status'] = 'optimizing'
-        write_recovery_record(attempt / 'report.json', report)
-        with runner_environment(optimizer, optimizer_settings):
-            result = run_model(prompt, attempt / 'optimizer', optimizer_model,
-                               mode='optimizer', harness=optimizer, timeout=timeout, output_schema=REPLACEMENTS)
-        usage = attempt / 'optimizer/usage.json'
-        if usage.is_file():
-            report['optimizer']['usage'] = read_json(usage)
-        if result['status'] != 'completed':
-            raise ValueError(f'Optimizer did not complete: {result["status"]}')
-        proposed = parse_json_response((attempt / 'optimizer/response.txt').read_text())
-        if not isinstance(proposed, dict) or not isinstance(proposed.get('rationale'), str) or not proposed['rationale'].strip():
-            raise ValueError('Candidate must explain the proposed change')
-        report['rationale'] = sanitize(proposed['rationale'])
+        saved = prior_proposal(db, name, version, input_hash, attempt, source)
+        if reuse_only and saved is None:
+            report.update(status='retry_suppressed', reason='Manual validation retry requires a matching verified proposal')
+            return report
+        if saved is not None and (manual_retry or saved[1].get('validation_hash') != validation_hash):
+            proposed, prior_report, prior_path = saved
+            report['optimizer'].update({
+                'proposal_hash': proposal_hash(proposed), 'reused_from': str(prior_path),
+            })
+            if prior_report.get('optimizer', {}).get('usage') is not None:
+                report['optimizer']['usage'] = prior_report['optimizer']['usage']
+            report['rationale'] = sanitize(proposed['rationale'])
+            write_recovery_record(proposal_record(attempt), proposal_archive(proposed, report))
+            report['status'] = 'validating'
+            write_recovery_record(attempt / 'report.json', report)
+        elif saved is not None:
+            report.update(status='retry_suppressed', reason='Validation settings are unchanged since the newest saved proposal')
+            return report
+        else:
+            if failed_optimizer_input_seen(db, name, version, input_hash, attempt):
+                report.update(status='retry_suppressed', reason='Optimizer request is unchanged since its failed attempt')
+                return report
+            report['status'] = 'optimizing'
+            write_recovery_record(attempt / 'report.json', report)
+            with runner_environment(optimizer, optimizer_settings):
+                result = run_model(prompt, attempt / 'optimizer', optimizer_model,
+                                   mode='optimizer', harness=optimizer, timeout=timeout, output_schema=REPLACEMENTS)
+            usage = attempt / 'optimizer/usage.json'
+            if usage.is_file():
+                report['optimizer']['usage'] = read_json(usage)
+            if result['status'] != 'completed':
+                raise ValueError(f'Optimizer did not complete: {result["status"]}')
+            proposed = validate_proposal(parse_json_response((attempt / 'optimizer/response.txt').read_text()))
+            response_hash = digest(attempt / 'optimizer' / 'response.txt')
+            saved_hash = proposal_hash(proposed)
+            write_recovery_record(proposal_record(attempt),
+                                  proposal_archive(proposed, report, response_hash=response_hash))
+            report['optimizer']['proposal_hash'] = saved_hash
+            report['rationale'] = sanitize(proposed['rationale'])
+            report['status'] = 'validating'
+            write_recovery_record(attempt / 'report.json', report)
         candidate = attempt / 'candidate' / name
         candidate.parent.mkdir()
         patch = apply_replacements(original, candidate, proposed, patterns)
@@ -430,7 +586,7 @@ def recover_attempt(attempt, source, state):
     if not path.is_file():
         return 'interrupted'
     report = read_json(path)
-    if report['status'] not in {'optimizing', 'qualified', 'blocked'}:
+    if report['status'] not in {'optimizing', 'validating', 'qualified', 'blocked'}:
         return report['status']
     promotion = attempt / 'promotion.json'
     if promotion.is_file():
@@ -447,15 +603,83 @@ def recover_attempt(attempt, source, state):
             report.pop('reason', None)
             write_recovery_record(path, report)
             return 'applied'
-    if report['status'] == 'optimizing':
-        report.update(status='interrupted', reason='Worker stopped before recording verification results')
+    if report['status'] in {'optimizing', 'validating'}:
+        artifact = proposal_record(attempt)
+        if artifact.is_file() and not artifact.is_symlink():
+            try:
+                saved = read_json(artifact)
+                proposal = validate_proposal(saved['proposal'])
+                actual = proposal_hash(proposal)
+            except (OSError, KeyError, TypeError, ValueError):
+                actual = None
+            optimizer = report.get('optimizer', {})
+            bound_hash = optimizer.get('proposal_hash')
+            archive_matches = (actual is not None and saved.get('sha256') == actual
+                               and saved.get('input_hash') == optimizer.get('input_hash')
+                               and saved.get('source_hash') == report.get('before')
+                               and saved.get('source_modes') == report.get('source_modes')
+                               and (bound_hash is None or bound_hash == actual))
+            if archive_matches and bound_hash is None:
+                response = attempt / 'optimizer' / 'response.txt'
+                try:
+                    parsed = validate_proposal(parse_json_response(response.read_text()))
+                    archive_matches = (saved.get('response_hash') == digest(response)
+                                       and proposal_hash(parsed) == actual)
+                except (OSError, TypeError, ValueError):
+                    archive_matches = False
+            if archive_matches:
+                optimizer['proposal_hash'] = actual
+                report['rationale'] = sanitize(proposal['rationale'])
+                report.update(status='blocked', reason='Worker stopped after saving the optimizer proposal')
+            else:
+                report.update(status='interrupted', reason='Worker stopped before saving a verified optimizer proposal')
+        else:
+            report.update(status='interrupted', reason='Worker stopped before saving a verified optimizer proposal')
         write_recovery_record(path, report)
     return report['status']
+
+
+def enqueue_changed_validation_retries(config, db):
+    if db.execute("SELECT 1 FROM checkpoints WHERE status != 'done' LIMIT 1").fetchone():
+        return
+    for name, settings in config['skills'].items():
+        source = local_path(config['root'], settings['source'], directory=True)
+        version = tree_hash(source)
+        try:
+            current_validation = validation_fingerprint(config, settings)
+        except (OSError, KeyError, TypeError, ValueError):
+            continue
+        revisions = db.execute(
+            "SELECT path, status, id FROM revisions WHERE skill=? AND version=? "
+            "AND status IN ('blocked','interrupted') ORDER BY id DESC", (name, version)).fetchall()
+        for row in revisions:
+            attempt = Path(row['path'])
+            report_path = attempt / 'report.json'
+            if not report_path.is_file():
+                continue
+            try:
+                report = read_json(report_path)
+            except (OSError, ValueError, TypeError):
+                continue
+            optimizer = report.get('optimizer', {})
+            if not optimizer.get('proposal_hash'):
+                continue
+            if (load_saved_proposal(attempt, report) is None
+                    or not proposal_source_matches(attempt, report, source, version)):
+                break
+            if report.get('validation_hash') != current_validation and optimizer.get('input_hash'):
+                witness = f"validation-retry:{name}:{row['id']}:{current_validation}"
+                db.execute('INSERT OR IGNORE INTO checkpoints(witness) VALUES (?)', (witness,))
+            break
 
 
 def drain(config, db):
     while (job := db.execute("SELECT * FROM checkpoints WHERE status != 'done' ORDER BY id LIMIT 1").fetchone()):
         for name, settings in config['skills'].items():
+            if job['witness'].startswith('validation-retry:'):
+                target = job['witness'].split(':', 2)[1]
+                if target != name:
+                    continue
             prior = db.execute('SELECT * FROM revisions WHERE checkpoint=? AND skill=?', (job['id'], name)).fetchone()
             if prior:
                 if prior['status'] == 'running':
@@ -475,7 +699,10 @@ def drain(config, db):
             db.execute('INSERT INTO revisions(checkpoint,skill,version,status,path) VALUES (?,?,?,?,?)',
                        (job['id'], name, version, 'running', str(attempt)))
             db.commit()
-            report = revise(config, name, settings, source, version, rows, attempt, db)
+            manual_retry = job['witness'].startswith(MANUAL_RETRY_PREFIX)
+            reuse_only = manual_retry or job['witness'].startswith('validation-retry:')
+            report = revise(config, name, settings, source, version, rows, attempt, db,
+                            reuse_only=reuse_only, manual_retry=manual_retry)
             revision = db.execute('SELECT id FROM revisions WHERE checkpoint=? AND skill=?',
                                    (job['id'], name)).fetchone()['id']
             record_revision_outcome(db, revision, report['status'], report)
@@ -488,7 +715,13 @@ def work(config, *, lock_fd=None):
     os.environ[INTERNAL] = '1'
     try:
         with project_lock(config, lock_fd), connection(config) as db:
-            drain(config, db)
+            while True:
+                drain(config, db)
+                enqueue_changed_validation_retries(config, db)
+                db.commit()
+                pending = db.execute("SELECT 1 FROM checkpoints WHERE status != 'done' LIMIT 1").fetchone()
+                if not pending:
+                    break
     finally:
         if previous is None:
             os.environ.pop(INTERNAL, None)

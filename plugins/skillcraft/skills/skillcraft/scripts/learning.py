@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import secrets
 import sqlite3
 import subprocess
 import sys
@@ -443,6 +444,8 @@ def main(argv=None):
             parser.add_argument('revision', type=int)
         if verb == 'work':
             parser.add_argument('--lock-fd', type=int, help=argparse.SUPPRESS)
+            parser.add_argument('--retry-blocked', action='store_true',
+                                help='Queue one durable validation-only retry for saved blocked proposals')
     ingest = sub.add_parser('ingest', help='Import a completed A/B or an explicit feedback file')
     ingest.add_argument('workspace', type=Path)
     ingest.add_argument('--project', type=Path)
@@ -476,6 +479,9 @@ def main(argv=None):
             print(json.dumps(source_inventory(config), ensure_ascii=False))
         elif args.command == 'work':
             from scripts.learning_worker import work
+            if args.retry_blocked:
+                with connection(config) as db:
+                    queue(db, f'manual-retry:{secrets.token_hex(16)}')
             work(config, lock_fd=args.lock_fd)
         elif args.command == 'rollback':
             from scripts.learning_worker import rollback_revision

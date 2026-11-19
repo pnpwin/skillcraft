@@ -123,3 +123,12 @@ Repeat imports are idempotent. A worker picks up pending checkpoints the next
 time a hook or `work "$PWD"` starts it. Failed and interrupted optimizer
 attempts keep their evidence. A later checkpoint can retry when new evidence
 or changed optimizer settings produce a different request.
+
+When a proposal is saved but code or A/B verification is blocked, fixing the
+owner-controlled tests, evaluator settings, or validation runtime and running
+`work "$PWD"` queues a validation retry that reuses the verified proposal.
+Use `work "$PWD" --retry-blocked` to request one durable validation-only retry
+without changing those settings. These validation checkpoints never call the
+optimizer; they run only when a hash-verified proposal for the same source and
+optimizer request is available. Failed or interrupted optimizer calls still
+wait for new evidence or a changed optimizer request.

@@ -45,6 +45,12 @@ class LearningRetryTest(unittest.TestCase):
         self.config['state'].mkdir(parents=True, exist_ok=True)
         (self.config['state'] / 'enabled').write_text(self.config['fingerprint'] + '\n')
 
+    def disable_auto_apply(self):
+        self.configuration['skills']['demo']['auto_apply'] = False
+        write_json(self.project / learning.CONFIG, self.configuration)
+        self.config = learning.config_for(self.project, enrolling=True)
+        self.enable()
+
     def write_cases(self):
         for name, case, hidden in [('train', 'fail', 'Training owner'),
                                    ('holdout', 'secret-case', 'Protected unseen portion')]:
@@ -63,6 +69,27 @@ class LearningRetryTest(unittest.TestCase):
     def no_change(self, prompt, out, model, **kwargs):
         write_json(out / 'response.txt', {'rationale': 'No justified change', 'changes': []})
         return {'status': 'completed'}
+
+    def proposal(self, prompt, out, model, **kwargs):
+        body = self.markdown.read_text().replace('Old behavior.', 'Preserve the supplied date.')
+        write_json(out / 'response.txt', {'rationale': 'Preserve dates from confirmed evidence',
+                                          'changes': [{'path': 'SKILL.md', 'content': body}]})
+        return {'status': 'completed'}
+
+    def quality(self, candidate, evals, workspace, model, *, repeats, previous, **kwargs):
+        write_json(workspace / 'manifest.json', {'controlled': True, 'environment_consistent': True})
+        for case in ('fail', 'secret-case'):
+            for arm in ('previous_skill', 'with_skill'):
+                for repeat in range(1, repeats + 1):
+                    write_json(workspace / f'eval-{case}' / arm / f'run-{repeat:03d}' / 'grading.json', {
+                        'evaluation_complete': True,
+                        'expectations': [{'text': 'Stable date', 'source': 'deterministic',
+                                          'passed': arm == 'with_skill' or case == 'secret-case'}],
+                    })
+        return {'errors': 0, 'validation_errors': [], 'deltas': {
+            arm: {'excluded_pairs': [], 'paired_pass_rate': {'n': 2 * repeats}}
+            for arm in ('previous_skill', 'without_skill')
+        }}
 
     def test_timeout_keeps_evidence_and_suppresses_same_input_without_new_signal(self):
         self.seed()
@@ -158,7 +185,7 @@ class LearningRetryTest(unittest.TestCase):
             consumed = db.execute("SELECT consumed FROM evidence WHERE kind='correction'").fetchone()[0]
         report = json.loads((Path(revision['path']) / 'report.json').read_text())
         self.assertEqual(revision['status'], 'running')
-        self.assertEqual(report['status'], 'optimizing')
+        self.assertEqual(report['status'], 'validating')
         self.assertEqual(consumed, 0)
 
     def test_restart_reconciles_durable_terminal_report_and_evidence_atomically(self):
@@ -208,6 +235,88 @@ class LearningRetryTest(unittest.TestCase):
             db.execute("UPDATE evidence SET consumed=1 WHERE kind='success'")
             db.commit()
             self.assertEqual(learning_worker.protected_success_cases(db, 'demo', version), {'confirmed'})
+
+    def test_blocked_evaluator_recovery_reuses_proposal_after_validation_change(self):
+        self.seed()
+        self.disable_auto_apply()
+        with patch.object(learning_worker, 'run_model', side_effect=self.proposal) as model, \
+                patch.object(learning_worker, 'run_quality', side_effect=OSError('temporary evaluator outage')):
+            learning_worker.work(self.config)
+        model.assert_called_once()
+        with learning.connection(self.config) as db:
+            first = db.execute('SELECT path, status FROM revisions ORDER BY id DESC LIMIT 1').fetchone()
+        first_report = json.loads((Path(first['path']) / 'report.json').read_text())
+        self.assertEqual(first['status'], 'blocked')
+        self.assertTrue(first_report['optimizer'].get('proposal_hash'))
+
+        # An unchanged ordinary checkpoint performs neither another optimizer nor another A/B.
+        self.queue('unchanged-empty-checkpoint')
+        with patch.object(learning_worker, 'run_model', side_effect=AssertionError('optimizer must not repeat')), \
+                patch.object(learning_worker, 'run_quality', side_effect=AssertionError('validation unchanged')):
+            learning_worker.work(self.config)
+
+        self.config['skills']['demo']['harnesses']['codex']['judge_model'] = 'gpt-judge-new'
+        with patch.object(learning_worker, 'run_model', side_effect=AssertionError('saved proposal should be reused')) as model, \
+                patch.object(learning_worker, 'run_quality', side_effect=self.quality) as quality:
+            learning_worker.work(self.config)
+        model.assert_not_called()
+        quality.assert_called_once()
+        with learning.connection(self.config) as db:
+            latest = db.execute('SELECT path, status FROM revisions ORDER BY id DESC LIMIT 1').fetchone()
+        latest_report = json.loads((Path(latest['path']) / 'report.json').read_text())
+        self.assertEqual(latest['status'], 'qualified')
+        self.assertEqual(latest_report['optimizer']['reused_from'], first['path'])
+
+    def test_manual_retry_without_saved_proposal_never_calls_optimizer(self):
+        self.seed()
+        with patch.object(learning_worker, 'run_model', side_effect=self.timeout) as model:
+            learning_worker.work(self.config)
+            model.assert_called_once()
+        with learning.connection(self.config) as db:
+            learning.record(db, 'manual-new-signal', 'demo', tree_hash(self.source), 'feedback', 'codex', 's3', 't3',
+                            'case:manual-new', None, 'correction', 'Use the verified new constraint.', True)
+        self.configuration['skills']['demo']['harnesses']['codex']['optimizer_model'] = 'gpt-new'
+        write_json(self.project / learning.CONFIG, self.configuration)
+        self.config = learning.config_for(self.project, enrolling=True)
+        self.enable()
+        with patch.object(learning_worker, 'run_model', side_effect=AssertionError('manual retry must not optimize')) as model:
+            self.assertEqual(learning.main(['work', str(self.project), '--retry-blocked']), 0)
+        model.assert_not_called()
+        with learning.connection(self.config) as db:
+            statuses = [row[0] for row in db.execute('SELECT status FROM revisions ORDER BY id')]
+        self.assertEqual(statuses, ['blocked', 'retry_suppressed'])
+
+    def test_manual_retry_reuses_saved_proposal_without_optimizer_call(self):
+        self.seed()
+        self.disable_auto_apply()
+        with patch.object(learning_worker, 'run_model', side_effect=self.proposal) as model, \
+                patch.object(learning_worker, 'run_quality', side_effect=OSError('temporary evaluator outage')):
+            learning_worker.work(self.config)
+        model.assert_called_once()
+        with patch.object(learning_worker, 'run_model', side_effect=AssertionError('manual retry must reuse')) as model, \
+                patch.object(learning_worker, 'run_quality', side_effect=self.quality):
+            self.assertEqual(learning.main(['work', str(self.project), '--retry-blocked']), 0)
+        model.assert_not_called()
+        with learning.connection(self.config) as db:
+            status = db.execute('SELECT status FROM revisions ORDER BY id DESC LIMIT 1').fetchone()[0]
+        self.assertEqual(status, 'qualified')
+
+    def test_latest_blocked_validation_plan_does_not_fall_back_to_older_plan(self):
+        self.seed()
+        self.disable_auto_apply()
+        with patch.object(learning_worker, 'run_model', side_effect=self.proposal) as model, \
+                patch.object(learning_worker, 'run_quality', side_effect=OSError('evaluator remains unavailable')) as quality:
+            learning_worker.work(self.config)
+            self.config['skills']['demo']['harnesses']['codex']['judge_model'] = 'gpt-judge-b'
+            learning_worker.work(self.config)
+            learning_worker.work(self.config)
+        model.assert_called_once()
+        self.assertEqual(quality.call_count, 2)
+        with learning.connection(self.config) as db:
+            rows = db.execute('SELECT status, path FROM revisions ORDER BY id').fetchall()
+        reports = [json.loads((Path(row['path']) / 'report.json').read_text()) for row in rows]
+        self.assertEqual([row['status'] for row in rows], ['blocked', 'blocked'])
+        self.assertNotEqual(reports[0]['validation_hash'], reports[1]['validation_hash'])
 
 
 if __name__ == '__main__':
