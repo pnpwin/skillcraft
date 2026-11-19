@@ -41,6 +41,8 @@ opencode plugin add 'github:pnpwin/skillcraft#main::path:plugins/skillcraft'
 
 Use a release tag or commit for a reproducible installation. The OpenCode
 package registers the same skill directory used by the Codex plugin.
+The shared package declares Codex hooks in `.codex-plugin/plugin.json` and
+the OpenCode entry point in `package.json`.
 
 **Standalone installation**
 
@@ -106,6 +108,10 @@ To package SkillCraft, pass the Codex and OpenCode run directories with two
 The packager refreshes both environments before it writes the archive.
 Use `--openai-plugin-version VERSION` to also wrap the same skill in an OpenAI
 plugin ZIP for Codex.
+
+
+For opt-in automatic revisions from local sessions and evaluated experience,
+see the [learning workflow](plugins/skillcraft/skills/skillcraft/references/learning.md).
 
 ## Connection and migration
 

@@ -253,6 +253,16 @@
       border-color: var(--accent);
       box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
     }
+    .feedback-verdict {
+      margin-bottom: 0.625rem;
+      padding: 0.5rem 0.625rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      background: var(--surface);
+      font: inherit;
+      font-size: 0.875rem;
+    }
     .feedback-status {
       font-size: 0.75rem;
       color: var(--text-muted);
@@ -601,6 +611,13 @@
       <div class="section">
         <div class="section-header">Your Feedback</div>
         <div class="section-body">
+          <label for="verdict" style="display:block; margin-bottom:0.375rem; font-size:0.8125rem;">Verdict (optional)</label>
+          <select class="feedback-verdict" id="verdict">
+            <option value="">No verdict</option>
+            <option value="success">Success</option>
+            <option value="failure">Failure</option>
+            <option value="correction">Correction</option>
+          </select>
           <textarea
             class="feedback-textarea"
             id="feedback"
@@ -651,6 +668,7 @@
     // ---- State ----
     const runs = EMBEDDED_DATA.runs;
     const feedbackMap = new Map();
+    const verdictMap = new Map();
     const visitedRuns = new Set();
     const draftKey = `skillcraft-review:${location.pathname}`;
     let currentIndex = 0;
@@ -671,6 +689,9 @@
             const review = saved.get(run.id);
             if (review && review.snapshot_hash === run.snapshot_hash) {
               feedbackMap.set(run.id, review.feedback);
+              if (["success", "failure", "correction"].includes(review.verdict)) {
+                verdictMap.set(run.id, review.verdict);
+              }
               if (review.reviewed === true) visitedRuns.add(index);
             }
           });
@@ -694,6 +715,17 @@
         } else {
           saveDraft();
         }
+      });
+      document.getElementById("verdict").addEventListener("change", () => {
+        const id = runs[currentIndex].id;
+        const verdict = document.getElementById("verdict").value;
+        if (verdict) verdictMap.set(id, verdict);
+        else verdictMap.delete(id);
+        revision++;
+        clearTimeout(saveTimeout);
+        document.getElementById("feedback-status").textContent = "";
+        if (EMBEDDED_DATA.server_available) saveTimeout = setTimeout(saveDraft, 800);
+        else saveDraft();
       });
     }
 
@@ -761,6 +793,7 @@
 
       // Feedback
       document.getElementById("feedback").value = feedbackMap.get(run.id) || "";
+      document.getElementById("verdict").value = verdictMap.get(run.id) || "";
       document.getElementById("feedback-status").textContent = "";
 
       updateNavButtons();
@@ -1033,13 +1066,18 @@
     // ---- Feedback ----
     function feedbackPayload(status) {
       const timestamp = new Date().toISOString();
-      const reviews = runs.map((run, index) => ({
-        run_id: run.id,
-        snapshot_hash: run.snapshot_hash,
-        reviewed: visitedRuns.has(index),
-        feedback: feedbackMap.get(run.id) || "",
-        timestamp,
-      }));
+      const reviews = runs.map((run, index) => {
+        const review = {
+          run_id: run.id,
+          snapshot_hash: run.snapshot_hash,
+          reviewed: visitedRuns.has(index),
+          feedback: feedbackMap.get(run.id) || "",
+          timestamp,
+        };
+        const verdict = verdictMap.get(run.id);
+        if (verdict) review.verdict = verdict;
+        return review;
+      });
       return JSON.stringify({ schema_version: 1, reviews, status });
     }
 

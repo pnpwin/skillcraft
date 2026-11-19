@@ -1,0 +1,121 @@
+# Learn from verified skill use
+
+Enable learning for a specific project and its checked-out skill sources.
+Install the SkillCraft plugin in Codex or OpenCode to collect conversation
+events. Standalone SkillCraft can collect evaluation and review evidence.
+Review and trust SkillCraft's two bundled hooks in Codex before using
+conversation collection. The marketplace package uses the Codex compatibility
+manifest for hook discovery. [Codex hook trust](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks)
+Completed quality evaluations and validated HTML feedback feed the same journal.
+A review mark alone records that a run was seen. Set an explicit success,
+failure, or correction verdict to use human feedback as evidence. For a
+correction, include the changed behavior in the comment.
+
+## Project configuration
+
+Create `.skillcraft/learning.json` at the project root. For example:
+
+```json
+{
+  "schema_version": 1,
+  "enabled": true,
+  "sources": ["sessions", "evals"],
+  "skills": {
+    "meeting-actions": {
+      "source": ".agents/skills/meeting-actions",
+      "auto_apply": true,
+      "train": "evals/meeting-actions/train.json",
+      "holdout": "evals/meeting-actions/test.json",
+      "harnesses": {
+        "codex": {"model": "gpt-6.2-sol#low", "optimizer_model": "gpt-6.2-sol#low"}
+      },
+      "editable": ["SKILL.md", "references/*", "assets/*", "scripts/*", "agents/*"],
+      "tests": [["python", "-m", "unittest", "discover", "-s", "/verification/tests"]],
+      "repeats": 3
+    }
+  }
+}
+```
+
+Use project-relative source and dataset paths. Give training and holdout
+cases distinct IDs, prompts, and paraphrase groups. Datasets use the same
+format as quality evaluations. Keep holdout files outside deployable skill
+resources. Set `harnesses` to each runtime required for
+activation. Configure its model and authenticated connection as in the
+runner guides. The first configured runtime supplies the optimizer. Add an
+independent `judge_model` where deterministic checks do not cover the rubric.
+For background runs, set Codex's optional `codex_home` and `binary` paths
+or OpenCode's optional `server` URL in the corresponding runtime settings.
+Keep credentials in the authorized runtime profile or process environment.
+
+Approve the exact local configuration to start collecting. A configuration
+change pauses learning until the owner enables it again. The journal stores
+message identities, version bindings, and short redacted evidence outside the
+skill directory. Identified skill turns can retain a short redacted answer
+excerpt so a later confirmation preserves the concrete successful behavior.
+
+```sh
+"${SKILLCRAFT_VENV:-${XDG_DATA_HOME:-$HOME/.local/share}/skillcraft/venv}/bin/python" \
+  "$SKILLCRAFT/scripts/learning.py" enable "$PWD"
+```
+
+Set `sources` to `["evals"]` for an evaluation-only comparison. To suspend
+collection, set `enabled` to false. Existing journal and revision files stay
+available for inspection.
+
+## Collection and promotion
+
+The observer schedules background work after 15 new user or final-answer
+messages, or after an A/B result or feedback import adds new evidence. It
+ignores intermediate tool messages and learning-generated evaluations. A
+signal with an unknown skill or version stays diagnostic. Repeated A/B
+samples from one case or one explicit paraphrase group count as one source
+of evidence.
+
+Codex uses `UserPromptSubmit` and `Stop`. A supported local rollout can prove
+a completed read of the whole `SKILL.md` in that turn. Its bytes and the
+package fingerprint must match the source observed at both hooks. Missing
+rollouts, unsupported records, partial reads, and changed files leave the
+turn unbound. OpenCode checks its persisted skill and message projection.
+
+The worker uses three independent observations or one correction backed by
+a reproducible failure. A/B imports use completed deterministic and independent
+judge grades. A correction needs a deterministic reproduction to qualify on its own.
+Ordinary English or Russian confirmations, failure reports and corrections
+are recognized when they can be attributed to the preceding skill use. Add
+`[skillcraft-case:case-id]` to link feedback to an existing case. A
+correction to a deterministically graded failure can trigger an immediate
+review at the next checkpoint. Confirmed successes linked to existing cases
+must also pass when the candidate is tested. Test prompts and holdout evidence
+stay with the evaluator.
+
+Each proposal starts in an isolated copy. The worker preserves frontmatter,
+limits edits to approved resources, and compares the candidate with the
+original and clean baseline using the same frozen checks. A candidate needs
+a reproducible gain and no per-check regression across the configured runtimes.
+A review outcome or technical failure alone cannot activate a new version.
+
+For executable changes, pre-load a trusted validation image in Docker or
+Podman and set `SKILLCRAFT_TEST_IMAGE` in the worker launch environment. The
+worker uses an already-present local image and runs the command vectors in
+`tests` without network access or host credentials. The candidate is at
+`/candidate`, and tests can refer to the frozen original at `/verification`.
+The configured commands should exercise the candidate and come from the
+owner, not the proposal. A missing runner, validation image or tests leaves
+the candidate with a blocked report.
+
+## Inspect and recover
+
+Use the same interpreter and script with `status "$PWD"` to list checkpoint
+counts and revision IDs. Revision directories contain the proposed diff,
+A/B reports, usage when available, and the promotion or rejection reason.
+The source hash must still match the tested version at activation. A
+supported same-filesystem atomic exchange is required for auto-apply.
+
+Use `rollback "$PWD" REVISION_ID` to restore a recorded backup. Rollback
+checks the currently installed hash before switching directories. To import
+an existing run by hand use `ingest WORKSPACE --project "$PWD"`, with
+`--feedback FILE` for an already generated review file. Repeat imports are
+idempotent. A worker picks up pending checkpoints the next time a hook or
+`work "$PWD"` starts it. An interrupted model attempt is recorded rather
+than silently sending the same request again.

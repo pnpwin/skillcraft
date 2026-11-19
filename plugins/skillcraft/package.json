@@ -9,6 +9,8 @@
   },
   "files": [
     "opencode.js",
+    "opencode-learning.js",
+    "hooks/",
     "skills/",
     "!skills/**/node_modules/**",
     "!skills/**/.venv/**",

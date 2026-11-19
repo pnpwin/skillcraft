@@ -330,6 +330,11 @@ def validate_feedback(data, runs):
             raise ValueError('Feedback snapshot mismatch')
         if not isinstance(review.get('feedback'), str) or type(review.get('reviewed')) is not bool:
             raise ValueError('Invalid feedback text/reviewed flag')
+        verdict = review.get('verdict')
+        if verdict is not None and verdict not in {'success', 'failure', 'correction'}:
+            raise ValueError('Invalid feedback verdict')
+        if verdict == 'correction' and (review.get('reviewed') is not True or not review['feedback'].strip()):
+            raise ValueError('Correction verdict requires a reviewed run and nonempty feedback')
     if data.get('status') == 'complete' and (seen != set(lookup) or not all(r['reviewed'] for r in data['reviews'])):
         raise ValueError('Complete feedback must review every run')
     return data
@@ -340,6 +345,19 @@ def save_feedback(path, data, runs):
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
     temporary.replace(path)
+
+
+def notify_feedback_safely(workspace: Path, feedback_path: Path) -> None:
+    """Offer completed feedback to the learning pipeline when it is available."""
+    package_root = str(Path(__file__).resolve().parents[1])
+    if package_root not in sys.path:
+        sys.path.insert(0, package_root)
+    try:
+        from scripts.learning import notify_feedback
+        notify_feedback(workspace, feedback_path)
+    except Exception:
+        # Learning ingestion is optional; saving feedback must remain successful.
+        pass
 
 class ReviewHandler(BaseHTTPRequestHandler):
     """Serves the review HTML and handles feedback saves.
@@ -410,6 +428,8 @@ class ReviewHandler(BaseHTTPRequestHandler):
             try:
                 data = json.loads(body)
                 save_feedback(self.feedback_path, data, find_runs(self.workspace, self.selection))
+                if data.get('status') == 'complete':
+                    notify_feedback_safely(self.workspace, self.feedback_path)
                 resp = b'{"ok":true}'
                 self.send_response(200)
             except (json.JSONDecodeError, OSError, ValueError) as e:
@@ -471,7 +491,10 @@ def main() -> None:
         if args.selection and not args.feedback_output:
             parser.error('Selected review imports require a separate --feedback-output')
         feedback_path.parent.mkdir(parents=True, exist_ok=True)
-        save_feedback(feedback_path, json.loads(args.import_feedback.read_text()), runs)
+        data = json.loads(args.import_feedback.read_text())
+        save_feedback(feedback_path, data, runs)
+        if data.get('status') == 'complete':
+            notify_feedback_safely(workspace, feedback_path)
         print(f'Imported feedback: {feedback_path}')
         return
 
