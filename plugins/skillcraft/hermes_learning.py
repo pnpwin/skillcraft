@@ -122,7 +122,7 @@ class Learning:
             turn = self.sessions.get(key)
             if turn and turn.id == turn_id and not turn.finished:
                 entry = turn.inventory.get(path)
-                if entry and digest == entry['hash']:
+                if entry and digest == entry['content_hash']:
                     turn.loaded[path] = entry
 
     def finish(self, *, session_id=None, turn_id=None, assistant_response=None,

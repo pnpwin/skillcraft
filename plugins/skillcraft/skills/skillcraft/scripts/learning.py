@@ -357,7 +357,7 @@ def binding(config, loaded):
     return bindings
 
 
-def source_inventory(config):
+def source_inventory(config, *, hermes=False):
     versions = []
     if 'sessions' not in config['sources']:
         return versions
@@ -365,7 +365,14 @@ def source_inventory(config):
         try:
             source = local_path(config['root'], settings['source'], directory=True)
             markdown = source / 'SKILL.md'
-            versions.append({'path': str(markdown), 'hash': digest(markdown), 'snapshot_hash': tree_hash(source)})
+            content = markdown.read_bytes()
+            version = {'path': str(markdown), 'hash': sha256(content).hexdigest(),
+                       'snapshot_hash': tree_hash(source)}
+            if hermes:
+                # Hermes decodes SKILL.md with utf-8-sig and universal newlines.
+                decoded = content.decode('utf-8-sig').replace('\r\n', '\n').replace('\r', '\n')
+                version['content_hash'] = sha256(decoded.encode()).hexdigest()
+            versions.append(version)
         except (OSError, ValueError):
             # A source being edited can still be observed as an unbound turn.
             continue
@@ -662,7 +669,7 @@ def main(argv=None):
             Path(marker.name).replace(config['state'] / 'enabled')
             print(json.dumps({'enabled': str(config['root']), 'journal': str(config['state'])}))
         elif args.command == 'inventory':
-            print(json.dumps(source_inventory(config), ensure_ascii=False))
+            print(json.dumps(source_inventory(config, hermes=home is not None), ensure_ascii=False))
         elif args.command == 'work':
             from scripts.learning_worker import work
             if args.retry_blocked:

@@ -112,6 +112,19 @@ class HermesLearningTest(unittest.TestCase):
             self.command('enable')
             self.assertEqual(self.command('status')['messages'], 0)
 
+    def test_hermes_normalized_skill_read_preserves_raw_version(self):
+        self.markdown.write_bytes(b'\xef\xbb\xbf' + self.content.replace('\n', '\r\n').encode())
+        self.command('enable')
+        self.start('one')
+        self.view('one')
+        self.finish('one')
+        self.start('two', 'Подтверждаю: всё правильно.')
+        cfg = learning.config_for(self.project, hermes_home=self.home)
+        with learning.connection(cfg) as db:
+            row = db.execute('SELECT kind,version FROM evidence').fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(tuple(row), ('success', tree_hash(self.source)))
+
     def test_wrong_path_reference_partial_or_changed_version_is_unbound(self):
         self.command('enable')
         other = self.project / 'other/demo'
