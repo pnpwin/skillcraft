@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -95,11 +96,42 @@ def enabled(project):
     return False
 
 
+def command_skill_path(item, cwd, candidates):
+    parts = item.get('parsed_cmd') or []
+    if not isinstance(parts, list):
+        return None
+    if len(parts) == 1 and parts[0]['type'] == 'read':
+        return (cwd / parts[0]['path']).resolve()
+
+    # A wrapper may hide the read from the command parser. The actual
+    # arguments and the parser's source text can still name the file.
+    command = item.get('command')
+    arguments = set(command[1:]) if isinstance(command, list) else set()
+    for part in parts:
+        source = part.get('cmd')
+        if not isinstance(source, str):
+            continue
+        try:
+            arguments.update(shlex.split(source, comments=True))
+        except ValueError:
+            continue
+    paths = set()
+    for argument in arguments:
+        path = Path(argument)
+        if path.name == 'SKILL.md':
+            resolved = (cwd / path).resolve()
+            if resolved in candidates:
+                paths.add(resolved)
+    return next(iter(paths)) if len(paths) == 1 else None
+
+
 def confirmed_reads(path, session, turn, versions):
     if not isinstance(path, str) or not versions:
         return []
     matches = {}
-    expected = {Path(item['path']): item for item in versions}
+    expected = {}
+    for version in versions:
+        expected.setdefault(version['hash'], {})[Path(version['path'])] = version
     # Native completion records include their own thread and turn identifiers.
     try:
         transcript = Path(path)
@@ -125,17 +157,17 @@ def confirmed_reads(path, session, turn, versions):
             item = payload['item']
             if item['type'] != 'CommandExecution' or item['status'] != 'completed' or item['exit_code'] != 0:
                 continue
-            parts = item['parsed_cmd']
-            if not isinstance(parts, list) or len(parts) != 1 or parts[0]['type'] != 'read':
-                continue
             cwd = urlsplit(item['cwd'])
             if cwd.scheme not in {'', 'file'} or cwd.netloc not in {'', 'localhost'} or not cwd.path.startswith('/'):
                 continue
-            source = (Path(unquote(cwd.path)) / parts[0]['path']).resolve()
-            version = expected.get(source)
             output = item['aggregated_output']
-            if version and isinstance(output, str) and hashlib.sha256(output.encode()).hexdigest() == version['hash']:
-                matches[source] = version
+            if not isinstance(output, str):
+                continue
+            candidates = expected.get(hashlib.sha256(output.encode()).hexdigest())
+            if candidates:
+                source = command_skill_path(item, Path(unquote(cwd.path)), candidates)
+                if source in candidates:
+                    matches[source] = candidates[source]
         except (AttributeError, KeyError, OSError, TypeError, ValueError):
             continue
     return list(matches.values())
@@ -170,7 +202,7 @@ def main():
     state_path = data_dir / 'learning-capture' / f'{session_key}.json' if data_dir else None
     state = read_state(state_path) if state_path else {}
     loaded = []
-    diagnostic = 'No complete direct skill read could be verified in this Codex turn.'
+    diagnostic = 'No complete skill read could be verified in this Codex turn.'
 
     if event_name == 'UserPromptSubmit':
         prompt_turns = state.get('prompt_turns', [])
