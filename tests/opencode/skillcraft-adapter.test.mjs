@@ -116,23 +116,42 @@ test('reconnect reconciliation recovers every completed turn whose idle event wa
   assert.equal(state.cursor, 'uC');
 });
 
-test('binds native attachment only when its body, file hash, and enrolled snapshot match', async () => {
+test('binds exact raw and wrapped native skill projections to current source and saved inventory', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'skillcraft-opencode-'));
   try {
     const file = join(directory, 'SKILL.md');
-    const source = '---\nname: demo\n---\n\nExact body\n';
-    const body = '\nExact body\n';
+    const source = '---\nname: demo\n---\n# Demo\nExact body\n';
+    const body = '# Demo\nExact body\n';
     await writeFile(file, source);
     const hash = createHash('sha256').update(await readFile(file)).digest('hex');
     const snapshotHash = 'snapshot-at-turn-start';
-    const message = { skill: 'demo', text: body };
-    const entry = { id: 'demo', path: file, content: body };
+    const entry = { id: 'demo', name: 'demo', path: file, content: body };
     const inventory = [{ path: file, hash, snapshot_hash: snapshotHash }];
-    assert.deepEqual(await verifiedSkills([message], [entry], inventory), [
+    const expected = [
       { path: file, hash, snapshot_hash: snapshotHash },
-    ]);
-    assert.deepEqual(await verifiedSkills([{ ...message, text: 'changed body' }], [entry], inventory), []);
-    assert.deepEqual(await verifiedSkills([message], [entry], [{ ...inventory[0], hash: 'changed' }]), []);
+    ];
+    assert.deepEqual(await verifiedSkills([{ type: 'skill', skill: 'demo', text: body }], [entry], inventory), expected);
+
+    const base = directory;
+    const wrapped = `<skill_content name="demo">\n# Skill: demo\n\n# Demo\nExact body\n\nBase directory for this skill: ${base}\nRelative paths in this skill (e.g., scripts/, reference/) are relative to this base directory.\nNote: file list is sampled.\n\n<skill_files>\n\n</skill_files>\n</skill_content>`;
+    const userProjection = { type: 'user', skills: [{ id: 'demo', name: 'demo', text: wrapped }] };
+    const toolProjection = {
+      type: 'assistant',
+      content: [{ type: 'tool', name: 'skill', executed: true, state: {
+        status: 'completed', input: { id: 'demo' }, content: [{ type: 'text', text: wrapped }],
+      } }],
+    };
+    assert.deepEqual(await verifiedSkills([userProjection], [entry], inventory), expected);
+    assert.deepEqual(await verifiedSkills([toolProjection], [entry], inventory), expected);
+    assert.deepEqual(await verifiedSkills([userProjection, toolProjection], [entry], inventory), expected, 'duplicate native projections produce one attribution');
+    assert.deepEqual(await verifiedSkills([{ ...userProjection, skills: [{ ...userProjection.skills[0], text: wrapped.replace('Exact body', 'tampered') }] }], [entry], inventory), []);
+    assert.deepEqual(await verifiedSkills([{ ...userProjection, skills: [{ ...userProjection.skills[0], id: 'file:///demo' }] }], [entry], inventory), []);
+    assert.deepEqual(await verifiedSkills([{ ...toolProjection, content: [{ ...toolProjection.content[0], executed: false }] }], [entry], inventory), expected, 'completed durable tool output remains evidence when executed is false');
+    assert.deepEqual(await verifiedSkills([{ ...toolProjection, content: [{ ...toolProjection.content[0], state: { ...toolProjection.content[0].state, status: 'error' } }] }], [entry], inventory), []);
+    assert.deepEqual(await verifiedSkills([{ type: 'assistant', content: [{ type: 'text', text: wrapped }] }], [entry], inventory), [], 'assistant prose is not native tool evidence');
+    assert.deepEqual(await verifiedSkills([{ type: 'skill', skill: 'demo', text: 'changed body' }], [entry], inventory), []);
+    assert.deepEqual(await verifiedSkills([{ type: 'skill', skill: 'demo', text: body }], [entry], [{ ...inventory[0], hash: 'changed' }]), []);
+    assert.deepEqual(await verifiedSkills([{ type: 'skill', skill: 'demo', text: body }], [entry, entry], inventory), [], 'ambiguous catalog identities are rejected');
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

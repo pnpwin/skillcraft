@@ -1,6 +1,33 @@
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { dirname, isAbsolute, relative, sep } from 'node:path';
+
+export const learningEventTypes = [
+  'session.inbox.enqueued', 'session.inbox.delivered',
+  'session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted',
+  'session.status', 'session.idle',
+];
+
+export function learningEventPhase(event) {
+  switch (event.type) {
+    case 'session.inbox.enqueued':
+      return event.data.item.type === 'user' ? 'start' : null;
+    case 'session.inbox.delivered':
+      return 'start';
+    case 'session.execution.succeeded':
+    case 'session.execution.failed':
+    case 'session.execution.interrupted':
+    case 'session.idle':
+      return 'finish';
+    case 'session.status':
+      if (event.data.status.type === 'busy') return 'start';
+      if (event.data.status.type === 'idle') return 'finish';
+      return null;
+    default:
+      return null;
+  }
+}
 
 export function selectTurn(messages) {
   const turns = completedTurns(messages);
@@ -45,7 +72,11 @@ export function completedTurns(messages) {
   return turns;
 }
 
-export function initialCursor(messages, includePending = false) {
+export function initialCursor(messages, includePending = false, inboxID) {
+  if (inboxID) {
+    const index = messages.findIndex((message) => message.type === 'user' && message.id === inboxID);
+    if (index >= 0) return messages.findLast((message, i) => i < index && message.type === 'user')?.id;
+  }
   if (includePending) return completedTurns(messages).at(-1)?.user.id;
   return messages.findLast((message) => message.type === 'user')?.id;
 }
@@ -135,21 +166,87 @@ export function spawnBounded(command, args, options, { timeoutMs = 10_000, input
   });
 }
 
-export async function verifiedSkills(skillMessages, catalog, inventory) {
-  const skillsByID = new Map(catalog.map((entry) => [entry.id, entry]));
-  const enrolledByPath = new Map(inventory.map((entry) => [entry.path, entry]));
+function wrappedSkillMatches(text, entry) {
+  if (typeof text !== 'string' || typeof entry.content !== 'string' || !entry.path) return false;
+  const name = entry.name ?? entry.id;
+  if (typeof name !== 'string' || !name) return false;
+  const base = dirname(entry.path);
+  const prefix = `<skill_content name="${name}">\n# Skill: ${name}\n\n${entry.content.trim()}\n\nBase directory for this skill: ${base}\nRelative paths in this skill (e.g., scripts/, reference/) are relative to this base directory.\nNote: file list is sampled.\n\n<skill_files>\n`;
+  if (!text.startsWith(prefix) || !text.endsWith('\n</skill_files>\n</skill_content>')) return false;
+  const filesText = text.slice(prefix.length, -'\n</skill_files>\n</skill_content>'.length);
+  const fileLines = filesText === '' ? [] : filesText.split('\n');
+  if (fileLines.length > 10 || fileLines.some((line) => !/^<file>[^<>]+<\/file>$/.test(line))) return false;
+  const seen = new Set();
+  for (const line of fileLines) {
+    const file = line.slice('<file>'.length, -'</file>'.length);
+    if (!isAbsolute(file) || file.endsWith(`${sep}SKILL.md`) || seen.has(file)) return false;
+    const pathFromBase = relative(dirname(entry.path), file);
+    if (!pathFromBase || pathFromBase === '..' || pathFromBase.startsWith(`..${sep}`) || isAbsolute(pathFromBase)) return false;
+    seen.add(file);
+  }
+  return true;
+}
+
+function nativeSkillAttachments(segment) {
+  const attachments = [];
+  for (const message of segment) {
+    if (message.type === 'skill' && typeof message.skill === 'string') {
+      attachments.push({ id: message.skill, text: message.text, raw: true });
+    }
+    if (message.type === 'user' && Array.isArray(message.skills)) {
+      for (const skill of message.skills) {
+        if (skill && typeof skill.id === 'string') attachments.push({ id: skill.id, name: skill.name, text: skill.text });
+      }
+    }
+    if (message.type === 'assistant' && Array.isArray(message.content)) {
+      for (const part of message.content) {
+        if (part?.type !== 'tool' || part.name !== 'skill'
+          || part.state?.status !== 'completed' || typeof part.state.input?.id !== 'string'
+          || !Array.isArray(part.state.content)) continue;
+        const texts = part.state.content.filter((item) => item?.type === 'text' && typeof item.text === 'string');
+        if (texts.length === 1 && texts.length === part.state.content.length) {
+          attachments.push({ id: part.state.input.id, text: texts[0].text });
+        }
+      }
+    }
+  }
+  return attachments;
+}
+
+export async function verifiedSkills(segment, catalog, inventory) {
+  const skillsByID = new Map();
+  for (const entry of catalog) {
+    if (typeof entry.id !== 'string' || !entry.id) continue;
+    const matches = skillsByID.get(entry.id) ?? [];
+    matches.push(entry);
+    skillsByID.set(entry.id, matches);
+  }
+  const enrolledByPath = new Map();
+  for (const entry of inventory) {
+    const matches = enrolledByPath.get(entry.path) ?? [];
+    matches.push(entry);
+    enrolledByPath.set(entry.path, matches);
+  }
   const loaded = [];
-  for (const attached of skillMessages) {
-    const entry = skillsByID.get(attached.skill);
-    if (!entry?.path) continue;
+  const seen = new Set();
+  for (const attached of nativeSkillAttachments(segment)) {
+    const entries = skillsByID.get(attached.id);
+    if (entries?.length !== 1) continue;
+    const entry = entries[0];
+    if (!entry?.path || typeof entry.content !== 'string' || enrolledByPath.get(entry.path)?.length !== 1) continue;
     try {
       const bytes = await readFile(entry.path);
       const source = bytes.toString('utf8');
       const frontmatter = /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/.exec(source);
       const currentBody = frontmatter ? source.slice(frontmatter[0].length) : source;
-      const enrolled = enrolledByPath.get(entry.path);
+      const enrolled = enrolledByPath.get(entry.path)[0];
       const hash = createHash('sha256').update(bytes).digest('hex');
-      if (!enrolled || enrolled.hash !== hash || attached.text !== entry.content || attached.text !== currentBody) continue;
+      if (enrolled.hash !== hash || entry.content !== currentBody) continue;
+      if (attached.name !== undefined && attached.name !== (entry.name ?? entry.id)) continue;
+      if (attached.raw ? attached.text !== currentBody : !wrappedSkillMatches(attached.text, entry)) continue;
+      const key = `${entry.path}\0${hash}\0${enrolled.snapshot_hash}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       loaded.push({ path: entry.path, hash, snapshot_hash: enrolled.snapshot_hash });
     } catch {
       // An attachment without a readable source cannot certify a file binding.

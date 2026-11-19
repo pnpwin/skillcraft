@@ -5,7 +5,10 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { Plugin, Skill } from '@opencode/plugin';
 import { parse } from 'yaml';
-import { consumeWithReconnect, initialCursor, messageText, reconcileProjection, selectTurn, spawnBounded, verifiedSkills } from './opencode-learning.js';
+import {
+  consumeWithReconnect, initialCursor, learningEventPhase, learningEventTypes, messageText,
+  reconcileProjection, selectTurn, spawnBounded, turnsAfter, verifiedSkills,
+} from './opencode-learning.js';
 
 const skillID = Skill.ID.make('skillcraft');
 const skillPath = fileURLToPath(new URL('./skills/skillcraft/SKILL.md', import.meta.url));
@@ -59,41 +62,61 @@ export async function inventory(project) {
   }
 }
 
-function sessionState(messages, includePending = false) {
+function sessionState(messages, includePending = false, inboxID) {
   return {
-    cursor: initialCursor(messages, includePending),
+    cursor: initialCursor(messages, includePending, inboxID),
     completed: new Set(),
     pendingSeen: new Set(),
-    baseline: null,
+    baselines: new Map(),
+    pendingBaseline: null,
   };
 }
 
-function baselineForTurn(state, turn, messages) {
-  const baseline = state.baseline;
-  if (!Array.isArray(baseline?.inventory)) return null;
-  if (baseline.turnID === turn.user.id) return baseline;
-  if (baseline.turnID) {
-    const baselineIndex = messages.findIndex((message) => message.type === 'user' && message.id === baseline.turnID);
-    const turnIndex = messages.findIndex((message) => message.type === 'user' && message.id === turn.user.id);
-    if (baselineIndex >= 0 && turnIndex > baselineIndex) state.baseline = null;
-    return null;
-  }
-  if (baseline.afterUserID === undefined) return baseline;
-  const afterIndex = messages.findIndex((message) => message.type === 'user' && message.id === baseline.afterUserID);
-  const turnIndex = messages.findIndex((message) => message.type === 'user' && message.id === turn.user.id);
-  return afterIndex >= 0 && turnIndex > afterIndex ? baseline : null;
+function baselineForTurn(state, userID, messages) {
+  if (state.baselines.has(userID)) return state.baselines.get(userID);
+  const pending = state.pendingBaseline;
+  if (!pending) return null;
+  const index = pending.afterUserID === undefined ? -1
+    : messages.findIndex((message) => message.type === 'user' && message.id === pending.afterUserID);
+  if (pending.afterUserID !== undefined && index < 0) return null;
+  const nextUser = messages.slice(index + 1).find((message) => message.type === 'user');
+  if (nextUser?.id !== userID) return null;
+  state.pendingBaseline = null;
+  state.baselines.set(userID, pending.inventory);
+  return pending.inventory;
 }
 
-async function captureProjection(ctx, sessionID, state) {
-  const session = await ctx.session.get({ sessionID });
-  if (!session?.id || session.parentID || session.metadata?.skillcraft === true) return;
+async function rememberStart({ session, messages }, state, event) {
+  const project = session.location.directory;
+  if (event.type !== 'session.status') {
+    // OpenCode promotes an inbox item to a message with the same ID.
+    const { inboxID } = event.data;
+    if (!inboxID || state.baselines.has(inboxID)) return;
+    const turn = turnsAfter(messages, state.cursor).find(({ user }) => user.id === inboxID);
+    if (turn?.final || (!turn && event.type === 'session.inbox.delivered')) return;
+    if (!turn && messages.some((message) => message.id === inboxID)) return;
+    state.baselines.set(inboxID, await enabled(project) ? await inventory(project) : null);
+    return;
+  }
+  const current = selectTurn(messages);
+  if (current && !current.final) {
+    baselineForTurn(state, current.user.id, messages);
+    if (!state.baselines.has(current.user.id)) {
+      state.baselines.set(current.user.id, await enabled(project) ? await inventory(project) : null);
+    }
+  } else if (!state.pendingBaseline && await enabled(project)) {
+    state.pendingBaseline = { afterUserID: current?.user.id, inventory: await inventory(project) };
+  }
+}
+
+async function captureProjection(ctx, { session, messages }, state) {
+  const sessionID = session.id;
   const project = session.location.directory;
   if (!(await enabled(project))) return;
-  const messages = await ctx.session.context({ sessionID });
   await reconcileProjection(messages, state, async (turn) => {
-    const bound = baselineForTurn(state, turn, messages);
+    const bound = baselineForTurn(state, turn.user.id, messages);
     const now = bound ? await inventory(project) : null;
-    const baselineByPath = new Map((bound?.inventory || []).map((entry) => [entry.path, entry.snapshot_hash]));
+    const baselineByPath = new Map((bound || []).map((entry) => [entry.path, entry.snapshot_hash]));
     const stable = now ? now.filter((entry) => baselineByPath.get(entry.path) === entry.snapshot_hash) : [];
     let loaded = [];
     let diagnostic;
@@ -101,7 +124,7 @@ async function captureProjection(ctx, sessionID, state) {
       diagnostic = 'No live skill inventory baseline was available for this OpenCode turn; captured without skill attribution.';
     } else if (turn.final) {
       const catalog = await ctx.skill.list({ location: { directory: project } });
-      loaded = await verifiedSkills(turn.segment.filter((message) => message.type === 'skill'), catalog.data, stable);
+      loaded = await verifiedSkills(turn.segment, catalog.data, stable);
       diagnostic = loaded.length ? undefined : stable.length < now.length
         ? 'The enrolled skill package changed during the turn; message captured without skill attribution.'
         : 'No readable native skill attachment matching the current installed skill body was confirmed in the persisted OpenCode session projection.';
@@ -112,15 +135,12 @@ async function captureProjection(ctx, sessionID, state) {
       diagnostic: turn.targetTurn ? undefined : 'No immediately preceding completed assistant turn is available for feedback association.',
     });
     if (!userRecorded) return false;
-    if (!turn.final) {
-      if (bound) state.baseline = { ...bound, turnID: turn.user.id, afterUserID: undefined };
-      return true;
-    }
+    if (!turn.final) return true;
     const assistantRecorded = await observe({
       project, harness: 'opencode', session: sessionID, turn: turn.user.id, role: 'assistant',
       text: messageText(turn.final), loaded, diagnostic,
     });
-    if (assistantRecorded && bound && state.baseline === bound) state.baseline = null;
+    if (assistantRecorded) state.baselines.delete(turn.user.id);
     return assistantRecorded;
   });
 }
@@ -162,6 +182,8 @@ export default Plugin.define({
     const inspectSession = async (sessionID) => {
       const session = await ctx.session.get({ sessionID });
       if (!session?.id || session.parentID || session.metadata?.skillcraft === true) return null;
+      // The event stream can include other locations, whose skill catalogs differ.
+      if (resolve(session.location.directory) !== resolve(ctx.location.directory)) return null;
       return { session, messages: await ctx.session.context({ sessionID }) };
     };
     const reconcileAll = async () => {
@@ -176,52 +198,25 @@ export default Plugin.define({
           state = sessionState(projection.messages);
           sessions.set(session.id, state);
         } else {
-          await captureProjection(ctx, session.id, state);
+          await captureProjection(ctx, projection, state);
         }
       }
     };
     void consumeWithReconnect(
-      (signal) => ctx.event.subscribe({ types: ['session.status', 'session.idle'], signal }),
+      (signal) => ctx.event.subscribe({ types: learningEventTypes, signal }),
       async (event) => {
-        if (event.type === 'session.status') {
-          const sessionID = event.data.sessionID;
-          const projection = await inspectSession(sessionID);
-          if (!projection) return;
-          const { session, messages } = projection;
-          const project = session.location.directory;
-          if (event.data.status.type === 'busy') {
-            let state = sessions.get(sessionID);
-            if (!state) {
-              state = sessionState(messages, true);
-              sessions.set(sessionID, state);
-            }
-            const current = selectTurn(messages);
-            const enrolled = await enabled(project) ? await inventory(project) : null;
-            const latestUser = messages.findLast((message) => message.type === 'user');
-            state.baseline = {
-              inventory: Array.isArray(enrolled) ? enrolled : null,
-              turnID: current && !current.final ? current.user.id : undefined,
-              afterUserID: current && !current.final ? undefined : latestUser?.id,
-            };
-          } else if (event.data.status.type === 'idle') {
-            let state = sessions.get(sessionID);
-            if (!state) {
-              state = sessionState(messages);
-              sessions.set(sessionID, state);
-            }
-            await captureProjection(ctx, sessionID, state);
-          }
-          return;
+        const phase = learningEventPhase(event);
+        if (!phase) return;
+        const sessionID = event.data.sessionID;
+        const projection = await inspectSession(sessionID);
+        if (!projection) return;
+        let state = sessions.get(sessionID);
+        if (!state) {
+          state = sessionState(projection.messages, phase === 'start', event.data.inboxID);
+          sessions.set(sessionID, state);
         }
-        if (event.type === 'session.idle') {
-          const sessionID = event.data.sessionID;
-          if (!sessions.has(sessionID)) {
-            const projection = await inspectSession(sessionID);
-            if (!projection) return;
-            sessions.set(sessionID, sessionState(projection.messages));
-          }
-          await captureProjection(ctx, sessionID, sessions.get(sessionID));
-        }
+        if (phase === 'start') await rememberStart(projection, state, event);
+        else await captureProjection(ctx, projection, state);
       },
       abort.signal,
       { onConnected: reconcileAll },
