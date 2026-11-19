@@ -11,6 +11,8 @@ import subprocess
 import sys
 from threading import Lock
 
+import yaml
+
 SCRIPT = Path(__file__).resolve().parent / 'skills/skillcraft/scripts/learning.py'
 LOCAL_SURFACES = {'cli', 'tui', 'desktop'}
 MAX_SESSIONS = 128
@@ -19,11 +21,13 @@ LOG = logging.getLogger(__name__)
 
 def run_learning(home, verb, *args, payload=None):
     # The CLI owns its imports and SQLite state outside the gateway process.
+    # Hermes may add the managed dependency environment to sys.path only.
+    env = {**os.environ, 'PYTHONPATH': str(Path(yaml.__file__).resolve().parents[1])}
     try:
         result = subprocess.run(
             [sys.executable, '-B', str(SCRIPT), '--hermes-home', str(home.resolve()), verb, *args],
             input=json.dumps(payload) if payload is not None else '',
-            capture_output=True, text=True, timeout=4,
+            capture_output=True, text=True, timeout=4, env=env,
         )
     except subprocess.TimeoutExpired as error:
         raise RuntimeError('SkillCraft journal command timed out') from error

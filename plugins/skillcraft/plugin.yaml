@@ -1,6 +1,8 @@
 name: skillcraft
 version: 0.1.0
 description: "SkillCraft authoring and opt-in learning journal for local Hermes chats."
+python_dependencies:
+  - "PyYAML==6.0.3"
 provides_hooks:
   - pre_llm_call
   - post_tool_call

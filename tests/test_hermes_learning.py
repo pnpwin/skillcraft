@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
+from venv import EnvBuilder
 
 from plugins import skillcraft
 from scripts import learning
@@ -102,6 +103,14 @@ class HermesLearningTest(unittest.TestCase):
         self.context.session_surface.return_value = 'cli'
         self.start('subagent', parent_session_id='parent')
         self.assertEqual(self.command('status')['messages'], 0)
+
+    def test_journal_child_can_use_hermes_managed_yaml(self):
+        # The Hermes launcher can add its managed packages only to the host process.
+        bare = self.home.with_name('bare-python')
+        EnvBuilder(with_pip=False).create(bare)
+        with patch('plugins.skillcraft.hermes_learning.sys.executable', str(bare / 'bin/python')):
+            self.command('enable')
+            self.assertEqual(self.command('status')['messages'], 0)
 
     def test_wrong_path_reference_partial_or_changed_version_is_unbound(self):
         self.command('enable')
