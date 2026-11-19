@@ -36,6 +36,7 @@ class LearningTest(unittest.TestCase):
                 'harnesses': {'codex': {'model': 'gpt-test'}}, 'repeats': 2, 'auto_apply': True,
             }},
         }
+        self.write_cases()
         write_json(self.project / learning.CONFIG, self.configuration)
         self.enterContext(patch.object(Path, 'home', return_value=self.home))
         self.enterContext(patch.dict(os.environ, {learning.INTERNAL: '0'}))
@@ -44,7 +45,14 @@ class LearningTest(unittest.TestCase):
 
     def enable(self):
         self.config['state'].mkdir(parents=True, exist_ok=True)
-        (self.config['state'] / 'enabled').write_text(self.config['fingerprint'] + '\n')
+        write_json(self.config['state'] / 'enabled', learning.approval_record(self.config))
+        self.config = learning.config_for(self.project)
+
+    def pending_model_evidence(self):
+        with learning.connection(self.config) as db:
+            learning.queue(db, 'security-review')
+            learning.record(db, 'repair-a', 'demo', tree_hash(self.source), 'feedback', 'codex', 's', '1',
+                            'case:a', 'a', 'correction', 'Keep the supplied date.', True)
 
     def message(self, session, turn, role, text='', *, binds=False, harness='codex', target=None):
         loaded = learning.source_inventory(self.config) if binds else []
@@ -90,6 +98,118 @@ class LearningTest(unittest.TestCase):
         self.assertIsNone(learning.classify('Всё работает?'))
         self.assertEqual(learning.classify('Подтверждаю, что не работает'), 'failure')
         self.assertNotIn('sk-abcdefghijk', learning.sanitize('token: sk-abcdefghijk'))
+
+    def test_changed_dataset_blocks_model_until_owner_reenables(self):
+        self.enable()
+        self.pending_model_evidence()
+        write_json(self.project / 'train.json', {'evals': [{
+            'id': 'changed', 'prompt': 'New unauthorized training case', 'expectations': ['Stable date'],
+        }]})
+        with patch.object(learning_worker, 'run_model') as model:
+            learning_worker.work(self.config)
+        model.assert_not_called()
+        self.enable()
+        self.assertIsInstance(learning.require_model_approval(self.config), dict)
+
+    def test_changed_fixture_blocks_model_until_owner_reenables(self):
+        fixture = self.project / 'fixture.txt'
+        fixture.write_text('Owner approved fixture')
+        write_json(self.project / 'train.json', {'evals': [{
+            'id': 'fail', 'prompt': 'Training owner', 'expectations': ['Stable date'],
+            'files': [str(fixture)],
+        }]})
+        self.enable()
+        self.pending_model_evidence()
+        fixture.write_text('Changed fixture')
+        with patch.object(learning_worker, 'run_model') as model:
+            learning_worker.work(self.config)
+        model.assert_not_called()
+
+    def test_changed_frozen_fixture_is_rejected_before_optimizer(self):
+        fixture = self.project / 'fixture.txt'
+        fixture.write_text('Owner approved fixture')
+        write_json(self.project / 'train.json', {'evals': [{
+            'id': 'fail', 'prompt': 'Training owner', 'expectations': ['Stable date'],
+            'files': [str(fixture)],
+        }]})
+        self.enable()
+        self.pending_model_evidence()
+        snapshot = learning_worker.snapshot_fixtures
+
+        def mutate_frozen(rows, skill, workspace):
+            frozen, hashes = snapshot(rows, skill, workspace)
+            copied = Path(frozen['fail'][0])
+            copied.write_text('Changed after snapshot hash')
+            return frozen, hashes
+
+        with (patch.object(learning_worker, 'snapshot_fixtures', side_effect=mutate_frozen),
+              patch.object(learning_worker, 'run_model') as model):
+            learning_worker.work(self.config)
+        model.assert_not_called()
+
+    def test_enable_rejects_out_of_project_fixture(self):
+        outside = Path(self.temp.name) / 'outside.txt'
+        outside.write_text('Harmless external fixture')
+        write_json(self.project / 'train.json', {'evals': [{
+            'id': 'fail', 'prompt': 'Training owner', 'expectations': ['Stable date'],
+            'files': [str(outside)],
+        }]})
+        with self.assertRaisesRegex(ValueError, 'inside the approved project'):
+            self.enable()
+
+    def test_legacy_marker_allows_evidence_but_requires_reenable_for_models(self):
+        marker = self.config['state'] / 'enabled'
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(self.config['fingerprint'] + '\n')
+        legacy = learning.config_for(self.project)
+        self.assertIsNone(legacy['approval'])
+        with self.assertRaisesRegex(ValueError, 're-enable'):
+            learning.require_model_approval(legacy)
+        self.enable()
+        self.assertIsInstance(learning.require_model_approval(self.config), dict)
+
+    def test_observe_only_configuration_without_datasets_stays_usable(self):
+        settings = self.configuration['skills']['demo']
+        settings.pop('train')
+        settings.pop('holdout')
+        write_json(self.project / learning.CONFIG, self.configuration)
+        self.config = learning.config_for(self.project, enrolling=True)
+        self.enable()
+        self.assertTrue(self.message('observe-only', 'one', 'user', 'A harmless observation'))
+        with learning.connection(self.config) as db:
+            learning.queue(db, 'observe-only')
+        with patch.object(learning_worker, 'run_model') as model:
+            learning_worker.work(self.config)
+        model.assert_not_called()
+
+    def test_config_parse_and_fingerprint_use_the_same_open_buffer(self):
+        original = (self.project / learning.CONFIG).read_bytes()
+        replacement = original.replace(b'"enabled": true', b'"enabled": false')
+        original_fdopen = learning.os.fdopen
+        changed = False
+
+        def replace_after_open(fd, *args, **kwargs):
+            nonlocal changed
+            if not changed:
+                staged = self.project / 'replacement.json'
+                staged.write_bytes(replacement)
+                staged.replace(self.project / learning.CONFIG)
+                changed = True
+            return original_fdopen(fd, *args, **kwargs)
+
+        with patch.object(learning.os, 'fdopen', side_effect=replace_after_open):
+            config = learning.config_for(self.project, enrolling=True)
+        self.assertTrue(config['fingerprint'] == __import__('hashlib').sha256(original).hexdigest())
+        self.assertIsNotNone(config)
+
+    def test_symlink_learning_config_is_refused(self):
+        file = self.project / learning.CONFIG
+        target = self.project / 'config-target.json'
+        file.unlink()
+        target.write_bytes(json.dumps(self.configuration).encode())
+        file.symlink_to(target)
+        with self.assertRaises(OSError):
+            learning.config_for(self.project, enrolling=True)
 
     def test_same_request_across_sessions_is_one_case(self):
         self.enable()
@@ -260,8 +380,8 @@ class LearningTest(unittest.TestCase):
             }]})
 
     def seed_worker(self):
-        self.enable()
         self.write_cases()
+        self.enable()
         with learning.connection(self.config) as db:
             learning.queue(db, 'restore')
             learning.record(db, 'correction', 'demo', tree_hash(self.source), 'feedback', 'codex', 's', 't',
@@ -334,6 +454,27 @@ class LearningTest(unittest.TestCase):
         self.assertIn('Preserve the supplied date', self.markdown.read_text())
         learning_worker.rollback_revision(self.config, row['id'])
         self.assertEqual(self.markdown.read_text(), before)
+
+    def test_changed_approval_blocks_activation(self):
+        self.seed_worker()
+        before = self.markdown.read_text()
+
+        def change_approval(*args, **kwargs):
+            result = self.fake_quality(*args, **kwargs)
+            write_json(self.config['state'] / 'enabled', {
+                'config_sha256': self.config['fingerprint'], 'validation': {},
+            })
+            return result
+
+        with (patch.object(learning_worker, 'run_model', side_effect=self.fake_proposal),
+              patch.object(learning_worker, 'run_quality', side_effect=change_approval)):
+            learning_worker.work(self.config)
+        self.assertEqual(self.markdown.read_text(), before)
+        with learning.connection(self.config) as db:
+            row = db.execute('SELECT * FROM revisions').fetchone()
+        report = json.loads((Path(row['path']) / 'report.json').read_text())
+        self.assertEqual(report['status'], 'blocked')
+        self.assertIn('Owner configuration changed', report['reason'])
 
     def test_regression_and_improvement_are_independent(self):
         matrix = {

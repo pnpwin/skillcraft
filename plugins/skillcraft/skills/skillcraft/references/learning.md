@@ -50,8 +50,11 @@ For background runs, set Codex's optional `codex_home` and `binary` paths
 or OpenCode's optional `server` URL in the corresponding runtime settings.
 Keep credentials in the authorized runtime profile or process environment.
 
-Approve the exact local configuration to start collecting. A configuration
-change pauses learning until the owner enables it again. The journal stores
+Approve the exact local configuration to start collecting. Enabling also
+records the train/holdout dataset bytes and each in-project fixture identity
+and hash for model evaluation. Dataset or fixture changes pause model work
+until the owner enables learning again. A configuration change pauses learning
+until the owner enables it again. The journal stores
 message identities, version bindings, and short redacted evidence outside the
 skill directory. Identified skill turns can retain a short redacted answer
 excerpt so a later confirmation preserves the concrete successful behavior.

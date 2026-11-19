@@ -130,7 +130,10 @@ def safe_id(value):
 
 
 def load_evals(path, trigger=False):
-    data = read_json(path)
+    return parse_evals(read_json(path), trigger=trigger)
+
+
+def parse_evals(data, trigger=False):
     rows = data if isinstance(data, list) else data['evals']
     seen = set()
     result = []

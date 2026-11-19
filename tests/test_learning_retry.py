@@ -26,14 +26,12 @@ class LearningRetryTest(unittest.TestCase):
                 'harnesses': {'codex': {'model': 'gpt-test'}}, 'repeats': 2, 'auto_apply': True,
             }},
         }
-        write_json(self.project / learning.CONFIG, self.configuration)
         self.enterContext(patch.object(Path, 'home', return_value=self.home))
         self.enterContext(patch.dict(os.environ, {learning.INTERNAL: '0'}))
-        self.config = learning.config_for(self.project, enrolling=True)
+        self.write_cases()
 
     def seed(self):
         self.enable()
-        self.write_cases()
         with learning.connection(self.config) as db:
             learning.queue(db, 'restore')
             learning.record(db, 'seed-correction', 'demo', tree_hash(self.source), 'feedback', 'codex', 's', 't',
@@ -42,13 +40,12 @@ class LearningRetryTest(unittest.TestCase):
                             'case:secret-case', 'secret-case', 'success', 'DO NOT SEND TO OPTIMIZER', False)
 
     def enable(self):
-        self.config['state'].mkdir(parents=True, exist_ok=True)
-        (self.config['state'] / 'enabled').write_text(self.config['fingerprint'] + '\n')
+        write_json(self.project / learning.CONFIG, self.configuration)
+        self.assertEqual(learning.main(['enable', str(self.project)]), 0)
+        self.config = learning.config_for(self.project)
 
     def disable_auto_apply(self):
         self.configuration['skills']['demo']['auto_apply'] = False
-        write_json(self.project / learning.CONFIG, self.configuration)
-        self.config = learning.config_for(self.project, enrolling=True)
         self.enable()
 
     def write_cases(self):
@@ -145,10 +142,12 @@ class LearningRetryTest(unittest.TestCase):
         with patch.object(learning_worker, 'run_model', side_effect=record_timeout):
             learning_worker.work(self.config)
             self.queue('changed-model-window')
-            self.config['skills']['demo']['harnesses']['codex']['optimizer_model'] = 'gpt-new'
+            self.configuration['skills']['demo']['harnesses']['codex']['optimizer_model'] = 'gpt-new'
+            self.enable()
             learning_worker.work(self.config)
             self.queue('changed-runtime-window')
-            self.config['skills']['demo']['harnesses']['codex']['codex_home'] = str(self.home)
+            self.configuration['skills']['demo']['harnesses']['codex']['codex_home'] = str(self.home)
+            self.enable()
             learning_worker.work(self.config)
 
         self.assertEqual([call[0] for call in calls], ['gpt-test', 'gpt-new', 'gpt-new'])
@@ -255,7 +254,8 @@ class LearningRetryTest(unittest.TestCase):
                 patch.object(learning_worker, 'run_quality', side_effect=AssertionError('validation unchanged')):
             learning_worker.work(self.config)
 
-        self.config['skills']['demo']['harnesses']['codex']['judge_model'] = 'gpt-judge-new'
+        self.configuration['skills']['demo']['harnesses']['codex']['judge_model'] = 'gpt-judge-new'
+        self.enable()
         with patch.object(learning_worker, 'run_model', side_effect=AssertionError('saved proposal should be reused')) as model, \
                 patch.object(learning_worker, 'run_quality', side_effect=self.quality) as quality:
             learning_worker.work(self.config)
@@ -276,8 +276,6 @@ class LearningRetryTest(unittest.TestCase):
             learning.record(db, 'manual-new-signal', 'demo', tree_hash(self.source), 'feedback', 'codex', 's3', 't3',
                             'case:manual-new', None, 'correction', 'Use the verified new constraint.', True)
         self.configuration['skills']['demo']['harnesses']['codex']['optimizer_model'] = 'gpt-new'
-        write_json(self.project / learning.CONFIG, self.configuration)
-        self.config = learning.config_for(self.project, enrolling=True)
         self.enable()
         with patch.object(learning_worker, 'run_model', side_effect=AssertionError('manual retry must not optimize')) as model:
             self.assertEqual(learning.main(['work', str(self.project), '--retry-blocked']), 0)
@@ -307,7 +305,8 @@ class LearningRetryTest(unittest.TestCase):
         with patch.object(learning_worker, 'run_model', side_effect=self.proposal) as model, \
                 patch.object(learning_worker, 'run_quality', side_effect=OSError('evaluator remains unavailable')) as quality:
             learning_worker.work(self.config)
-            self.config['skills']['demo']['harnesses']['codex']['judge_model'] = 'gpt-judge-b'
+            self.configuration['skills']['demo']['harnesses']['codex']['judge_model'] = 'gpt-judge-b'
+            self.enable()
             learning_worker.work(self.config)
             learning_worker.work(self.config)
         model.assert_called_once()

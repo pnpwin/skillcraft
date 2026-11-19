@@ -3,11 +3,13 @@
 import argparse
 from contextlib import closing, contextmanager
 from hashlib import sha256
+import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
 import secrets
+import stat
 import sqlite3
 import subprocess
 import sys
@@ -102,17 +104,35 @@ def local_path(root, value, *, directory=False):
     return path
 
 
-def config_for(project, *, enrolling=False):
-    if os.environ.get(INTERNAL) == '1':
+def config_for(project, *, enrolling=False, trusted_internal=False):
+    if os.environ.get(INTERNAL) == '1' and not trusted_internal:
         return None
     path = Path(project).resolve()
     for root in (path, *path.parents):
-        file = root / CONFIG
-        if not file.is_file():
+        directory = root / CONFIG.parent
+        try:
+            dir_fd = os.open(directory, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0))
+        except FileNotFoundError:
             continue
-        if file.is_symlink() or file.parent.is_symlink():
-            raise ValueError('Learning config must be a regular project file')
-        raw = read_json(file)
+        try:
+            fd = os.open(CONFIG.name, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) |
+                         getattr(os, 'O_NONBLOCK', 0), dir_fd=dir_fd)
+        except FileNotFoundError:
+            os.close(dir_fd)
+            continue
+        except BaseException:
+            os.close(dir_fd)
+            raise
+        try:
+            with os.fdopen(fd, 'rb') as stream:
+                metadata = os.fstat(stream.fileno())
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise ValueError('Learning config must be a regular project file')
+                contents = stream.read()
+        finally:
+            os.close(dir_fd)
+        fingerprint = hashlib.sha256(contents).hexdigest()
+        raw = json.loads(contents)
         if not isinstance(raw, dict) or raw.get('schema_version') != 1:
             raise ValueError('Expected learning config schema_version 1')
         if raw.get('enabled') is not True:
@@ -132,12 +152,140 @@ def config_for(project, *, enrolling=False):
             if source == Path(__file__).resolve().parents[1]:
                 raise ValueError('The running SkillCraft installation cannot be its own update target')
         state = Path.home() / '.local/share/skillcraft/learning' / sha256(str(root).encode()).hexdigest()
-        fingerprint = digest(file)
         marker = state / 'enabled'
-        if not enrolling and (not marker.is_file() or marker.read_text().strip() != fingerprint):
-            return None
-        return {'root': root, 'state': state, 'skills': skills, 'sources': sources, 'fingerprint': fingerprint}
+        approval = None
+        if not enrolling:
+            try:
+                marker_fd = os.open(marker, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) |
+                                    getattr(os, 'O_NONBLOCK', 0))
+                with os.fdopen(marker_fd, 'rb') as stream:
+                    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                        return None
+                    marker_raw = stream.read().decode('utf-8')
+                try:
+                    value = json.loads(marker_raw)
+                except (ValueError, TypeError):
+                    value = None
+            except (OSError, ValueError, TypeError):
+                marker_raw, value = '', None
+            # Legacy markers remain sufficient for observation, but never authorize model work.
+            if isinstance(value, str):
+                if value.strip() != fingerprint:
+                    return None
+            elif isinstance(value, dict) and value.get('config_sha256') == fingerprint:
+                approval = value.get('validation')
+            else:
+                if marker_raw.strip() != fingerprint:
+                    return None
+        return {'root': root, 'state': state, 'skills': skills, 'sources': sources,
+                'fingerprint': fingerprint, 'approval': approval}
     return None
+
+
+def dataset_snapshot(path):
+    from scripts.utils import parse_evals
+    contents = path.read_bytes()
+    data = json.loads(contents)
+    return contents, parse_evals(data)
+
+
+def approval_inputs(config):
+    """Hash approved datasets and in-project fixtures only on explicit enable."""
+    from scripts.inputs import input_specs
+    root = config['root'].resolve()
+    result = {}
+    for name, settings in config['skills'].items():
+        if not all(key in settings for key in ('train', 'holdout')):
+            continue
+        approved = {'datasets': {}, 'fixtures': []}
+        source = local_path(root, settings['source'], directory=True)
+        for split in ('train', 'holdout'):
+            path = local_path(root, settings[split])
+            raw, rows = dataset_snapshot(path)
+            approved['datasets'][split] = {
+                'path': path.relative_to(root).as_posix(), 'sha256': sha256(raw).hexdigest(),
+            }
+            for row in rows:
+                _reject_out_of_project_fixtures(row.get('files', []), source, root)
+                for fixture in input_specs(row.get('files', []), source):
+                    fixture_path = Path(fixture['source']).resolve(strict=True)
+                    if not fixture_path.is_relative_to(root):
+                        raise ValueError(f'Fixture source must be inside the approved project: {fixture_path}')
+                    approved['fixtures'].append({
+                        'split': split, 'case_id': row['id'], 'destination': fixture['destination'],
+                        'path': fixture_path.relative_to(root).as_posix(), 'sha256': digest(fixture_path),
+                    })
+        approved['fixtures'].sort(key=lambda x: (x['split'], x['case_id'], x['destination'], x['path']))
+        result[name] = approved
+    return result
+
+
+def _reject_out_of_project_fixtures(items, base, root):
+    for item in items:
+        raw = item.get('source') if isinstance(item, dict) else item
+        if not isinstance(raw, str) or not raw:
+            continue
+        path = Path(raw)
+        resolved = (path if path.is_absolute() else base / path).resolve()
+        if not resolved.is_relative_to(root.resolve()):
+            raise ValueError(f'Fixture source must be inside the approved project: {resolved}')
+
+
+def approval_record(config):
+    return {'config_sha256': config['fingerprint'], 'validation': approval_inputs(config)}
+
+
+def require_model_approval(config):
+    approval = config.get('approval')
+    if not isinstance(approval, dict):
+        raise ValueError('Model learning requires re-enable with approved train, holdout, and fixtures')
+    for name, settings in config['skills'].items():
+        if all(key in settings for key in ('train', 'holdout')) and name not in approval:
+            raise ValueError('Model learning requires re-enable with approved train, holdout, and fixtures')
+    return approval
+
+
+def approval_still_current(config, approval):
+    """Check only identities the owner approved; never hash newly referenced fixtures."""
+    from scripts.inputs import input_specs
+    root = config['root'].resolve()
+    for name, settings in config['skills'].items():
+        if not all(key in settings for key in ('train', 'holdout')):
+            continue
+        expected = approval.get(name)
+        if not isinstance(expected, dict):
+            return False
+        source = local_path(root, settings['source'], directory=True)
+        fixtures = {(item['split'], item['case_id'], item['destination']): item
+                    for item in expected.get('fixtures', [])}
+        seen = set()
+        for split in ('train', 'holdout'):
+            path = local_path(root, settings[split])
+            dataset = expected.get('datasets', {}).get(split, {})
+            raw, cases = dataset_snapshot(path)
+            if (dataset.get('path') != path.relative_to(root).as_posix()
+                    or sha256(raw).hexdigest() != dataset.get('sha256')):
+                return False
+            for row in cases:
+                try:
+                    _reject_out_of_project_fixtures(row.get('files', []), source, root)
+                except ValueError:
+                    return False
+                for spec in input_specs(row.get('files', []), source):
+                    fixture_path = Path(spec['source']).resolve(strict=True)
+                    key = (split, row['id'], spec['destination'])
+                    seen.add(key)
+                    approved_fixture = fixtures.get(key)
+                    if not fixture_path.is_relative_to(root):
+                        return False
+                    relative = fixture_path.relative_to(root).as_posix()
+                    if not approved_fixture or approved_fixture.get('path') != relative:
+                        return False
+                    if digest(fixture_path) != approved_fixture.get('sha256'):
+                        return False
+        if seen != set(fixtures):
+            return False
+    return True
 
 
 @contextmanager
@@ -471,8 +619,11 @@ def main(argv=None):
                 raise ValueError('Enable learning from the project root')
             config['state'].mkdir(parents=True, exist_ok=True, mode=0o700)
             from tempfile import NamedTemporaryFile
-            with NamedTemporaryFile('w', dir=config['state'], delete=False) as marker:
-                marker.write(config['fingerprint'] + '\n')
+            with NamedTemporaryFile('w', encoding='utf-8', dir=config['state'], delete=False) as marker:
+                json.dump(approval_record(config), marker, ensure_ascii=False)
+                marker.write('\n')
+                marker.flush()
+                os.fsync(marker.fileno())
             Path(marker.name).replace(config['state'] / 'enabled')
             print(json.dumps({'enabled': str(config['root']), 'journal': str(config['state'])}))
         elif args.command == 'inventory':

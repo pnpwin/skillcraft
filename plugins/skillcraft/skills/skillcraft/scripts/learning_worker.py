@@ -15,7 +15,9 @@ import time
 
 from scripts.compliance import require_standard
 from scripts.harness import model_ref
-from scripts.learning import CONFIG, INTERNAL, connection, local_path, prompt_key, sanitize, wake
+from scripts.learning import (CONFIG, INTERNAL, _reject_out_of_project_fixtures, approval_still_current,
+                              connection, dataset_snapshot, local_path,
+                              prompt_key, require_model_approval, sanitize, wake)
 from scripts.runtime import run_model
 from scripts.run_quality_eval import run_quality
 from scripts.inputs import input_specs, serial_inputs
@@ -87,7 +89,7 @@ def families(rows):
     return result
 
 
-def configured_runs(config, settings, source, attempt):
+def configured_runs(config, name, settings, source, attempt, approved):
     options = settings.get('harnesses')
     if not isinstance(options, dict) or not options or set(options) - {'codex', 'opencode'}:
         raise ValueError('Configure models for at least one supported harness')
@@ -106,7 +108,20 @@ def configured_runs(config, settings, source, attempt):
                     raise ValueError(f'{harness}.{key} must resolve to an absolute path')
                 value[key] = str(path)
     paths = [local_path(config['root'], settings.get(key)) for key in ('train', 'holdout')]
-    inputs = [load_evals(path) for path in paths]
+    if not all(path.resolve().is_relative_to(config['root'].resolve()) for path in paths):
+        raise ValueError('Training and holdout datasets must be inside the approved project')
+    expected = approved.get(name)
+    if not isinstance(expected, dict) or set(expected.get('datasets', {})) != {'train', 'holdout'}:
+        raise ValueError('Training and holdout datasets require owner approval; re-enable learning')
+    inputs = []
+    for split, path in zip(('train', 'holdout'), paths):
+        snapshot = expected['datasets'][split]
+        if snapshot.get('path') != path.relative_to(config['root']).as_posix():
+            raise ValueError('Approved training or holdout dataset changed; re-enable learning')
+        raw, cases = dataset_snapshot(path)
+        if hashlib.sha256(raw).hexdigest() != snapshot.get('sha256'):
+            raise ValueError('Approved training or holdout dataset changed; re-enable learning')
+        inputs.append(cases)
     if ({row['id'] for row in inputs[0]} & {row['id'] for row in inputs[1]}
             or families(inputs[0]) & families(inputs[1])):
         raise ValueError('Training and holdout cases must have distinct IDs, prompts, and families')
@@ -120,15 +135,58 @@ def configured_runs(config, settings, source, attempt):
                 raise ValueError('Place holdout material outside the deployable skill package')
             excluded.add(relative.as_posix())
     rows = inputs[0] + inputs[1]
-    frozen, _ = snapshot_fixtures(rows, source, attempt)
+    fixture_expectations = {
+        (item['split'], item['case_id'], item['destination']): item
+        for item in expected.get('fixtures', [])
+    }
+    fixture_paths = {}
+    for split, cases in zip(('train', 'holdout'), inputs):
+        for row in cases:
+            _reject_out_of_project_fixtures(row.get('files', []), source, config['root'])
+            for item in input_specs(row.get('files', []), source):
+                fixture_path = Path(item['source']).resolve(strict=True)
+                fixture_key = (split, row['id'], item['destination'])
+                approved_fixture = fixture_expectations.get(fixture_key)
+                relative_fixture = (fixture_path.relative_to(config['root'].resolve()).as_posix()
+                                    if fixture_path.is_relative_to(config['root'].resolve()) else None)
+                if (relative_fixture is None or not approved_fixture
+                        or approved_fixture.get('path') != relative_fixture
+                        or approved_fixture.get('sha256') != digest(fixture_path)):
+                    raise ValueError('Fixture is outside the project or differs from owner approval; re-enable learning')
+                fixture_paths[fixture_key] = relative_fixture
+    frozen, frozen_hashes = snapshot_fixtures(rows, source, attempt)
+    actual = {
+        (split, row['id'], destination): {
+            'path': fixture_paths[(split, row['id'], destination)], 'sha256': sha,
+        }
+        for split, cases in zip(('train', 'holdout'), inputs)
+        for row in cases
+        for destination, sha in frozen_hashes[row['id']].items()
+    }
+    expected_map = {key: {'path': item['path'], 'sha256': item['sha256']}
+                    for key, item in fixture_expectations.items()}
+    if actual != expected_map:
+        raise ValueError('Frozen fixture snapshot differs from owner approval; re-enable learning')
     for row in rows:
         row['files'] = serial_inputs(frozen[row['id']])
     evals = attempt / 'evals.json'
+    eval_body = json.dumps({'evals': rows}, ensure_ascii=False, indent=2, allow_nan=False) + '\n'
+    evals_hash = hashlib.sha256(eval_body.encode('utf-8')).hexdigest()
     write_json(evals, {'evals': rows})
     repeats, timeout = settings.get('repeats', 3), settings.get('timeout', 180)
     if type(repeats) is not int or repeats < 1 or type(timeout) not in {int, float} or timeout <= 0:
         raise ValueError('Expected positive repeats and timeout')
-    return options, inputs, evals, repeats, timeout, excluded
+    return options, inputs, evals, evals_hash, repeats, timeout, excluded, frozen_hashes
+
+
+def verify_frozen(evals, evals_hash, rows, fixture_hashes):
+    if not evals.is_file() or digest(evals) != evals_hash:
+        raise ValueError('Frozen evaluation inputs changed')
+    for row in rows:
+        for destination, expected in fixture_hashes[row['id']].items():
+            path = evals.parent / 'snapshots' / 'fixtures' / row['id'] / destination
+            if not path.is_file() or path.is_symlink() or digest(path) != expected:
+                raise ValueError('Frozen fixture inputs changed')
 
 
 def editable_path(base, value, patterns):
@@ -305,7 +363,7 @@ def load_saved_proposal(attempt, report):
     return proposal
 
 
-def validation_fingerprint(config, settings):
+def validation_fingerprint(config, settings, approved_inputs):
     """Hash every owner-controlled input that can change code or A/B verification."""
     harnesses = settings.get('harnesses', {})
     runtime = {}
@@ -316,23 +374,10 @@ def validation_fingerprint(config, settings):
                 env: models.get(key, os.environ.get(env)) for key, env in RUNNER_ENV[harness].items()
             },
         }
-    fixtures = []
-    source = local_path(config['root'], settings['source'], directory=True)
-    for split in ('train', 'holdout'):
-        eval_path = local_path(config['root'], settings[split])
-        for case in load_evals(eval_path):
-            for item in input_specs(case.get('files', []), source):
-                fixtures.append({
-                    'case': case['id'], 'destination': item['destination'], 'role': item['role'],
-                    'sha256': digest(Path(item['source'])),
-                })
-    fixtures.sort(key=lambda row: (row['case'], row['destination']))
     return fingerprint({
         'tests': settings.get('tests', []), 'editable': settings.get('editable', EDITABLE),
         'repeats': settings.get('repeats', 3), 'timeout': settings.get('timeout', 180),
-        'train': digest(local_path(config['root'], settings['train'])),
-        'holdout': digest(local_path(config['root'], settings['holdout'])),
-        'fixtures': fixtures, 'harnesses': runtime,
+        'approved_inputs': approved_inputs, 'harnesses': runtime,
         'test_image': os.environ.get('SKILLCRAFT_TEST_IMAGE'),
         'container_runtimes': {name: shutil.which(name) for name in ('docker', 'podman')},
     })
@@ -405,6 +450,7 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
               'status': 'blocked', 'validations': {}}
     try:
         from scripts.learning_promotion import promote, tree_modes, verify_code
+        approved = require_model_approval(config)
 
         original = attempt / 'original' / name
         original.parent.mkdir()
@@ -417,9 +463,11 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
         if tree_modes(original) != source_modes or tree_modes(source) != source_modes:
             raise ValueError('The opted-in skill permissions changed while taking the snapshot')
         report['source_modes'] = source_modes
-        validation_hash = validation_fingerprint(config, settings)
-        options, (train, holdout), evals, repeats, timeout, excluded = configured_runs(config, settings, source, attempt)
-        if validation_fingerprint(config, settings) != validation_hash:
+        options, (train, holdout), evals, evals_hash, repeats, timeout, excluded, frozen_hashes = configured_runs(
+            config, name, settings, source, attempt, approved)
+        validation_hash = validation_fingerprint(config, settings, approved.get(name))
+        frozen_rows = train + holdout
+        if validation_fingerprint(config, settings, approved.get(name)) != validation_hash:
             raise ValueError('Validation inputs changed while taking the snapshot')
         report['validation_hash'] = validation_hash
         train_ids = {row['id'] for row in train}
@@ -502,6 +550,7 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
                 return report
             report['status'] = 'optimizing'
             write_recovery_record(attempt / 'report.json', report)
+            verify_frozen(evals, evals_hash, frozen_rows, frozen_hashes)
             with runner_environment(optimizer, optimizer_settings):
                 result = run_model(prompt, attempt / 'optimizer', optimizer_model,
                                    mode='optimizer', harness=optimizer, timeout=timeout, output_schema=REPLACEMENTS)
@@ -536,6 +585,7 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
         improved = False
         for harness, models in options.items():
             workspace = attempt / f'ab-{harness}'
+            verify_frozen(evals, evals_hash, frozen_rows, frozen_hashes)
             with runner_environment(harness, models):
                 quality = run_quality(candidate, evals, workspace, models['model'], repeats=repeats, previous=original,
                                       judge_model=models.get('judge_model'), timeout=timeout, harness=harness)
@@ -562,8 +612,11 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
         # Preserve the full approval inputs before attempting to activate the candidate.
         write_recovery_record(attempt / 'report.json', report)
         if settings.get('auto_apply') is True:
-            if (digest(config['root'] / CONFIG) != config['fingerprint']
-                    or (config['state'] / 'enabled').read_text().strip() != config['fingerprint']):
+            from scripts.learning import config_for
+            current = config_for(config['root'], trusted_internal=True)
+            if (not current or current['fingerprint'] != config['fingerprint']
+                    or current.get('approval') != approved
+                    or not approval_still_current(current, approved)):
                 raise ValueError('Owner configuration changed during qualification')
             report['promotion'] = promote(source, candidate, version, config['state'],
                                           expected_candidate_hash=candidate_hash,
@@ -646,7 +699,10 @@ def enqueue_changed_validation_retries(config, db):
         source = local_path(config['root'], settings['source'], directory=True)
         version = tree_hash(source)
         try:
-            current_validation = validation_fingerprint(config, settings)
+            approved = require_model_approval(config)
+            if not approval_still_current(config, approved):
+                continue
+            current_validation = validation_fingerprint(config, settings, approved.get(name))
         except (OSError, KeyError, TypeError, ValueError):
             continue
         revisions = db.execute(
