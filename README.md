@@ -44,6 +44,16 @@ package registers the same skill directory used by the Codex plugin.
 The shared package declares Codex hooks in `.codex-plugin/plugin.json` and
 the OpenCode entry point in `package.json`.
 
+**Hermes Agent**
+
+```sh
+hermes plugins install 'pnpwin/skillcraft#plugins/skillcraft'
+hermes plugins enable skillcraft
+```
+
+Open the shared skill with `skill_view("skillcraft:skillcraft")`. Hermes supports
+skill authoring and an [opt-in learning journal](plugins/skillcraft/skills/skillcraft/references/learning.md#local-hermes-chats).
+
 **Standalone installation**
 
 Copy the `plugins/skillcraft/skills/skillcraft/` directory from a checkout into

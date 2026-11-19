@@ -77,6 +77,31 @@ Set `sources` to `["evals"]` for an evaluation-only comparison. To suspend
 collection, set `enabled` to false. Existing journal and revision files stay
 available for inspection.
 
+## Local Hermes chats
+
+Install and enable the SkillCraft Git plugin in the Hermes profile that hosts
+the chat. The plugin registers the shared skill as `skillcraft:skillcraft`.
+To journal the use of a project skill, enroll its local source with the project
+configuration above and include `sessions` in `sources`. Use the same Hermes
+profile for enrollment, the chat, and status.
+
+```sh
+hermes skillcraft enable "$PWD"
+hermes skillcraft status "$PWD"
+```
+
+Open a local chat in the project and ask Hermes to use `skill_view` to read the
+enrolled skill. After checking the answer, confirm or correct it in the next
+message. Hermes records evidence when the successful tool result identifies the
+enrolled `SKILL.md` with its complete contents and the version matches through
+the final reply. Use a fresh chat to verify a read if Hermes has already cached
+the tool result. A reference-page read or an unchanged-result stub is
+insufficient on its own.
+
+The Hermes journal lives under `$HERMES_HOME/skillcraft/learning/` in that
+profile. Hermes collects evidence only. Run evaluation and automatic revisions
+from a configured Codex or OpenCode project.
+
 ## Collection and promotion
 
 The observer schedules background work after 15 new user or final-answer
