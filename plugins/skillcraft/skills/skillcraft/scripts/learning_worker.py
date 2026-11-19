@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from difflib import SequenceMatcher, unified_diff
 import fcntl
 import fnmatch
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,7 @@ from scripts.learning import CONFIG, INTERNAL, connection, local_path, prompt_ke
 from scripts.runtime import run_model
 from scripts.run_quality_eval import run_quality
 from scripts.inputs import input_specs, serial_inputs
+from scripts.learning_promotion import write_recovery_record
 from scripts.utils import digest, frontmatter, load_evals, parse_json_response, read_json, snapshot_fixtures, tree_hash, write_json
 
 REPLACEMENTS = {
@@ -196,12 +198,14 @@ def apply_replacements(original, candidate, proposal, patterns):
 
 
 def grade_matrix(workspace, rows, repeats):
+    from scripts.grading_store import read_grading
+
     result = {}
     for row in rows:
         for arm in ('previous_skill', 'with_skill'):
             for repeat in range(1, repeats + 1):
-                path = workspace / f'eval-{row["id"]}' / arm / f'run-{repeat:03d}' / 'grading.json'
-                grade = read_json(path)
+                path = workspace / f'eval-{row["id"]}' / arm / f'run-{repeat:03d}'
+                grade, _, _ = read_grading(path)
                 checks = grade['expectations']
                 if (not grade['evaluation_complete'] or not checks
                         or not all(type(check['passed']) is bool for check in checks)):
@@ -228,19 +232,62 @@ def compare(matrix, repeats, protected=()):
     return improved, regressed
 
 
+def record_revision_outcome(db, revision, status, report):
+    """Persist the revision state and terminal evidence consumption together."""
+    db.execute('UPDATE revisions SET status=? WHERE id=?', (status, revision))
+    if status in {'no_change', 'rejected', 'qualified', 'applied'}:
+        optimizer = report.get('optimizer', {})
+        db.executemany('UPDATE evidence SET consumed=1 WHERE id=? AND skill=? AND version=?', [
+            (evidence_id, report.get('skill'), report.get('before'))
+            for evidence_id in optimizer.get('evidence', [])
+        ])
+    db.commit()
+
+
+def protected_success_cases(db, name, version):
+    return {row['case_id'] for row in db.execute(
+        "SELECT DISTINCT case_id FROM evidence WHERE skill=? AND version=? "
+        "AND kind='success' AND case_id IS NOT NULL", (name, version))}
+
+
+def failed_optimizer_input_seen(db, name, version, input_hash, attempt):
+    """Avoid repeating a failed call until the actual optimizer input changes."""
+    prior = db.execute('SELECT path, status FROM revisions WHERE skill=? AND version=? ORDER BY id DESC',
+                       (name, version)).fetchall()
+    for row in prior:
+        path = Path(row['path'])
+        if path == attempt or row['status'] not in {'blocked', 'interrupted', 'running'}:
+            continue
+        report_path = path / 'report.json'
+        if not report_path.is_file():
+            continue
+        try:
+            report = read_json(report_path)
+        except (OSError, ValueError, TypeError):
+            continue
+        if report.get('optimizer', {}).get('input_hash') == input_hash:
+            return True
+    return False
+
+
 def revise(config, name, settings, source, version, rows, attempt, db):
     attempt.mkdir(parents=True, exist_ok=False)
     started = time.monotonic()
     report = {'skill': name, 'source': str(source), 'before': version, 'evidence': [row['id'] for row in rows],
               'status': 'blocked', 'validations': {}}
     try:
+        from scripts.learning_promotion import promote, tree_modes, verify_code
+
         original = attempt / 'original' / name
         original.parent.mkdir()
         # Keep deployable resources unchanged unless an explicit replacement changes one.
         # tree_hash rejects symlinks both before and after this copy.
+        source_modes = tree_modes(source)
         shutil.copytree(source, original, symlinks=True)
         if tree_hash(original) != version or tree_hash(source) != version:
             raise ValueError('The opted-in skill changed while taking the snapshot')
+        if tree_modes(original) != source_modes or tree_modes(source) != source_modes:
+            raise ValueError('The opted-in skill permissions changed while taking the snapshot')
         options, (train, holdout), evals, repeats, timeout, excluded = configured_runs(config, settings, source, attempt)
         train_ids = {row['id'] for row in train}
         holdout_ids = {row['id'] for row in holdout}
@@ -286,14 +333,26 @@ def revise(config, name, settings, source, version, rows, attempt, db):
                          ensure_ascii=False)
         )
         optimizer = next(iter(options))
-        report['optimizer'] = {'harness': optimizer, 'evidence': [row['id'] for row in usable]}
-        report['status'] = 'optimizing'
-        write_json(attempt / 'report.json', report)
-        db.executemany('UPDATE evidence SET consumed=1 WHERE id=?', [(row['id'],) for row in usable])
-        db.commit()
         optimizer_settings = options[optimizer]
+        optimizer_model = optimizer_settings.get('optimizer_model', optimizer_settings['model'])
+        runtime_overrides = {
+            env: optimizer_settings.get(key, os.environ.get(env))
+            for key, env in RUNNER_ENV[optimizer].items()
+        }
+        fingerprint_input = json.dumps({
+            'prompt': prompt, 'harness': optimizer, 'model': optimizer_model,
+            'timeout': timeout, 'runtime_overrides': runtime_overrides,
+        }, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+        input_hash = hashlib.sha256(fingerprint_input.encode('utf-8')).hexdigest()
+        if failed_optimizer_input_seen(db, name, version, input_hash, attempt):
+            report.update(status='retry_suppressed', reason='Optimizer request is unchanged since its failed attempt')
+            return report
+        report['optimizer'] = {'harness': optimizer, 'evidence': [row['id'] for row in usable],
+                               'input_hash': input_hash}
+        report['status'] = 'optimizing'
+        write_recovery_record(attempt / 'report.json', report)
         with runner_environment(optimizer, optimizer_settings):
-            result = run_model(prompt, attempt / 'optimizer', optimizer_settings.get('optimizer_model', optimizer_settings['model']),
+            result = run_model(prompt, attempt / 'optimizer', optimizer_model,
                                mode='optimizer', harness=optimizer, timeout=timeout, output_schema=REPLACEMENTS)
         usage = attempt / 'optimizer/usage.json'
         if usage.is_file():
@@ -313,10 +372,10 @@ def revise(config, name, settings, source, version, rows, attempt, db):
         (attempt / 'candidate.diff').write_text(patch, encoding='utf-8')
         report['candidate'] = str(candidate)
         candidate_hash = tree_hash(candidate)
+        candidate_modes = tree_modes(candidate)
         report['candidate_hash'] = candidate_hash
-        from scripts.learning_promotion import promote, verify_code
         verify_code(original, candidate, settings.get('tests', []), attempt / 'code-tests')
-        protected = {row['case_id'] for row in rows if row['kind'] == 'success' and row['case_id'] is not None}
+        protected = protected_success_cases(db, name, version)
         report['protected_cases'] = sorted(protected & (train_ids | holdout_ids))
         improved = False
         for harness, models in options.items():
@@ -328,6 +387,12 @@ def revise(config, name, settings, source, version, rows, attempt, db):
             if (quality['errors'] or quality['validation_errors'] or not manifest.get('controlled')
                     or not manifest.get('environment_consistent')):
                 raise ValueError(f'Controlled A/B was incomplete in {harness}')
+            expected_pairs = (len(train) + len(holdout)) * repeats
+            deltas = quality.get('deltas', {})
+            for baseline in ('previous_skill', 'without_skill'):
+                pair = deltas.get(baseline, {})
+                if pair.get('excluded_pairs') or pair.get('paired_pass_rate', {}).get('n') != expected_pairs:
+                    raise ValueError(f'Controlled A/B has missing or incompatible pairs for {baseline} in {harness}')
             gains, losses = compare(grade_matrix(workspace, train + holdout, repeats), repeats, protected)
             report['validations'][harness] = {
                 'improved': gains, 'regressed': losses, 'summary': str(workspace / 'summary.md'),
@@ -339,13 +404,15 @@ def revise(config, name, settings, source, version, rows, attempt, db):
             return report
         report['status'] = 'qualified'
         # Preserve the full approval inputs before attempting to activate the candidate.
-        write_json(attempt / 'report.json', report)
+        write_recovery_record(attempt / 'report.json', report)
         if settings.get('auto_apply') is True:
             if (digest(config['root'] / CONFIG) != config['fingerprint']
                     or (config['state'] / 'enabled').read_text().strip() != config['fingerprint']):
                 raise ValueError('Owner configuration changed during qualification')
             report['promotion'] = promote(source, candidate, version, config['state'],
                                           expected_candidate_hash=candidate_hash,
+                                          expected_source_modes=source_modes,
+                                          expected_candidate_modes=candidate_modes,
                                           record_path=attempt / 'promotion.json')
             report['status'] = 'applied'
         return report
@@ -355,10 +422,10 @@ def revise(config, name, settings, source, version, rows, attempt, db):
         return report
     finally:
         report['seconds'] = round(time.monotonic() - started, 3)
-        write_json(attempt / 'report.json', report)
+        write_recovery_record(attempt / 'report.json', report)
 
 
-def recover_attempt(attempt, source):
+def recover_attempt(attempt, source, state):
     path = attempt / 'report.json'
     if not path.is_file():
         return 'interrupted'
@@ -367,15 +434,22 @@ def recover_attempt(attempt, source):
         return report['status']
     promotion = attempt / 'promotion.json'
     if promotion.is_file():
+        from scripts.learning_promotion import recover_exchange
         record = read_json(promotion)
-        if tree_hash(source) == record['after_hash']:
+        try:
+            recovered = recover_exchange(source, record, state)
+        except (OSError, KeyError, TypeError, ValueError, RuntimeError) as error:
+            report.update(status='blocked', reason=sanitize(str(error)))
+            write_recovery_record(path, report)
+            return 'blocked'
+        if recovered:
             report.update(status='applied', promotion=record, recovered=True)
             report.pop('reason', None)
-            write_json(path, report)
+            write_recovery_record(path, report)
             return 'applied'
     if report['status'] == 'optimizing':
         report.update(status='interrupted', reason='Worker stopped before recording verification results')
-        write_json(path, report)
+        write_recovery_record(path, report)
     return report['status']
 
 
@@ -386,9 +460,10 @@ def drain(config, db):
             if prior:
                 if prior['status'] == 'running':
                     source = local_path(config['root'], settings['source'], directory=True)
-                    status = recover_attempt(Path(prior['path']), source)
-                    db.execute('UPDATE revisions SET status=? WHERE id=?', (status, prior['id']))
-                    db.commit()
+                    status = recover_attempt(Path(prior['path']), source, config['state'])
+                    report_path = Path(prior['path']) / 'report.json'
+                    report = read_json(report_path) if report_path.is_file() else {}
+                    record_revision_outcome(db, prior['id'], status, report)
                 continue
             source = local_path(config['root'], settings['source'], directory=True)
             version = tree_hash(source)
@@ -401,9 +476,9 @@ def drain(config, db):
                        (job['id'], name, version, 'running', str(attempt)))
             db.commit()
             report = revise(config, name, settings, source, version, rows, attempt, db)
-            db.execute('UPDATE revisions SET status=? WHERE checkpoint=? AND skill=?',
-                       (report['status'], job['id'], name))
-            db.commit()
+            revision = db.execute('SELECT id FROM revisions WHERE checkpoint=? AND skill=?',
+                                   (job['id'], name)).fetchone()['id']
+            record_revision_outcome(db, revision, report['status'], report)
         db.execute("UPDATE checkpoints SET status='done' WHERE id=?", (job['id'],))
         db.commit()
 
@@ -427,7 +502,7 @@ def work(config, *, lock_fd=None):
 
 
 def rollback_revision(config, revision):
-    from scripts.learning_promotion import rollback
+    from scripts.learning_promotion import recover_exchange, rollback
     with project_lock(config), connection(config) as db:
         row = db.execute("SELECT * FROM revisions WHERE id=? AND status='applied'", (revision,)).fetchone()
         if row is None or row['skill'] not in config['skills']:
@@ -437,9 +512,9 @@ def rollback_revision(config, revision):
         source = local_path(config['root'], config['skills'][row['skill']]['source'], directory=True)
         recovery = path.with_name('rollback.json')
         saved = read_json(recovery) if recovery.is_file() else {}
-        value = saved if saved.get('after_hash') == tree_hash(source) else rollback(
+        value = saved if saved and recover_exchange(source, saved, config['state']) else rollback(
             source, report['promotion'], config['state'], record_path=recovery)
         report.update(status='rolled_back', rollback=value)
-        write_json(path, report)
+        write_recovery_record(path, report)
         db.execute("UPDATE revisions SET status='rolled_back' WHERE id=?", (revision,))
         return value

@@ -10,6 +10,8 @@ import sys
 import tempfile
 from urllib.parse import unquote, urlsplit
 
+SUBPROCESS_TIMEOUT_SECONDS = 4
+
 
 def read_state(path):
     try:
@@ -55,7 +57,7 @@ def inventory(python, script, project):
         result = subprocess.run(
             [python, '-B', str(script), 'inventory', project],
             cwd=project, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            timeout=4, check=True, text=True,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS, check=True, text=True,
         )
         return json.loads(result.stdout)
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -67,7 +69,8 @@ def observe(python, script, payload):
         result = subprocess.run(
             [python, '-B', str(script), 'observe'],
             input=json.dumps(payload), text=True, cwd=payload['project'],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
             env=os.environ.copy(), check=False,
         )
         return result.returncode == 0
@@ -170,7 +173,14 @@ def main():
     diagnostic = 'No complete direct skill read could be verified in this Codex turn.'
 
     if event_name == 'UserPromptSubmit':
-        target_turn = state.get('last_assistant_turn')
+        prompt_turns = state.get('prompt_turns', [])
+        if not isinstance(prompt_turns, list):
+            prompt_turns = []
+        if turn in prompt_turns or state.get('pending_turn') == turn or state.get('last_assistant_turn') == turn:
+            return 0
+        # A newer prompt supersedes any unfinished turn; confirmation cannot
+        # be attributed to an older completed answer across that gap.
+        target_turn = None if state.get('pending_turn') else state.get('last_assistant_turn')
         accepted = observe(python, script, {
             'project': project,
             'harness': 'codex',
@@ -182,15 +192,22 @@ def main():
             'target_turn': target_turn if isinstance(target_turn, str) else None,
             'diagnostic': diagnostic if not target_turn else None,
         })
-        if accepted and state_path and state.get('pending_turn') != turn:
-            write_state(state_path, {**state, 'pending_turn': turn, 'versions': versions})
+        if accepted and state_path:
+            recent_turns = [item for item in prompt_turns if isinstance(item, str)] + [turn]
+            write_state(state_path, {
+                **state,
+                'pending_turn': turn,
+                'versions': versions,
+                'prompt_turns': recent_turns,
+            })
     elif event_name == 'Stop':
         text = event.get('last_assistant_message')
-        if not isinstance(text, str) or not text:
+        # Only accept a Stop for the prompt currently pending. Delayed or
+        # duplicate Stops must not replace a newer pending turn or its target.
+        if not isinstance(text, str) or not text or state.get('pending_turn') != turn:
             return 0
-        if state.get('pending_turn') == turn:
-            unchanged = [version for version in versions if version in state.get('versions', [])]
-            loaded = confirmed_reads(event.get('transcript_path'), session, turn, unchanged)
+        unchanged = [version for version in versions if version in state.get('versions', [])]
+        loaded = confirmed_reads(event.get('transcript_path'), session, turn, unchanged)
         accepted = observe(python, script, {
             'project': project,
             'harness': 'codex',
@@ -202,7 +219,13 @@ def main():
             'diagnostic': diagnostic if not loaded else None,
         })
         if accepted and state_path:
-            write_state(state_path, {'last_assistant_turn': turn})
+            prompt_turns = state.get('prompt_turns', [])
+            if not isinstance(prompt_turns, list):
+                prompt_turns = []
+            write_state(state_path, {
+                'last_assistant_turn': turn,
+                'prompt_turns': prompt_turns,
+            })
     return 0
 
 

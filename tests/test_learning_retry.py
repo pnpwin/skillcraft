@@ -1,0 +1,214 @@
+import json
+import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import unittest
+from unittest.mock import patch
+
+from scripts import learning, learning_worker
+from scripts.utils import tree_hash, write_json
+
+
+class LearningRetryTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name).resolve()
+        self.project = root / 'project'
+        self.home = root / 'home'
+        self.source = self.project / '.agents/skills/demo'
+        self.source.mkdir(parents=True)
+        self.markdown = self.source / 'SKILL.md'
+        self.markdown.write_text('---\nname: demo\ndescription: A demo skill.\n---\n\nOld behavior.\n')
+        self.configuration = {
+            'schema_version': 1, 'enabled': True, 'skills': {'demo': {
+                'source': '.agents/skills/demo', 'train': 'train.json', 'holdout': 'holdout.json',
+                'harnesses': {'codex': {'model': 'gpt-test'}}, 'repeats': 2, 'auto_apply': True,
+            }},
+        }
+        write_json(self.project / learning.CONFIG, self.configuration)
+        self.enterContext(patch.object(Path, 'home', return_value=self.home))
+        self.enterContext(patch.dict(os.environ, {learning.INTERNAL: '0'}))
+        self.config = learning.config_for(self.project, enrolling=True)
+
+    def seed(self):
+        self.enable()
+        self.write_cases()
+        with learning.connection(self.config) as db:
+            learning.queue(db, 'restore')
+            learning.record(db, 'seed-correction', 'demo', tree_hash(self.source), 'feedback', 'codex', 's', 't',
+                            'case:fail', 'fail', 'correction', 'Retain the date.', True)
+            learning.record(db, 'heldout', 'demo', tree_hash(self.source), 'feedback', 'codex', 's', 't2',
+                            'case:secret-case', 'secret-case', 'success', 'DO NOT SEND TO OPTIMIZER', False)
+
+    def enable(self):
+        self.config['state'].mkdir(parents=True, exist_ok=True)
+        (self.config['state'] / 'enabled').write_text(self.config['fingerprint'] + '\n')
+
+    def write_cases(self):
+        for name, case, hidden in [('train', 'fail', 'Training owner'),
+                                   ('holdout', 'secret-case', 'Protected unseen portion')]:
+            write_json(self.project / f'{name}.json', {'evals': [{
+                'id': case, 'prompt': hidden, 'expectations': ['Stable date'],
+                'checks': [{'text': 'Stable date', 'type': 'contains', 'file': '_response.txt', 'value': 'DATE'}],
+            }]})
+
+    def queue(self, witness):
+        with learning.connection(self.config) as db:
+            learning.queue(db, witness)
+
+    def timeout(self, prompt, out, model, **kwargs):
+        return {'status': 'timeout'}
+
+    def no_change(self, prompt, out, model, **kwargs):
+        write_json(out / 'response.txt', {'rationale': 'No justified change', 'changes': []})
+        return {'status': 'completed'}
+
+    def test_timeout_keeps_evidence_and_suppresses_same_input_without_new_signal(self):
+        self.seed()
+        with patch.object(learning_worker, 'run_model', side_effect=self.timeout) as model:
+            learning_worker.work(self.config)
+            self.queue('empty-retry-window')
+            learning_worker.work(self.config)
+
+        model.assert_called_once()
+        with learning.connection(self.config) as db:
+            training = db.execute("SELECT consumed FROM evidence WHERE kind='correction'").fetchone()
+            statuses = [row[0] for row in db.execute('SELECT status FROM revisions ORDER BY id')]
+        self.assertEqual(training['consumed'], 0)
+        self.assertEqual(statuses, ['blocked', 'retry_suppressed'])
+
+    def test_new_evidence_unlocks_retry_and_reuses_prior_evidence(self):
+        self.seed()
+        prompts = []
+
+        def no_change(prompt, out, model, **kwargs):
+            prompts.append(prompt)
+            write_json(out / 'response.txt', {'rationale': 'No justified change', 'changes': []})
+            return {'status': 'completed'}
+
+        with patch.object(learning_worker, 'run_model', side_effect=self.timeout) as model:
+            learning_worker.work(self.config)
+        model.assert_called_once()
+        with learning.connection(self.config) as db:
+            learning.record(db, 'new-signal', 'demo', tree_hash(self.source), 'feedback', 'codex', 's2', 't2',
+                            'case:new', None, 'correction', 'Preserve the new validated behavior.', True)
+            learning.queue(db, 'new-evidence-window')
+
+        with patch.object(learning_worker, 'run_model', side_effect=no_change) as model:
+            learning_worker.work(self.config)
+        model.assert_called_once()
+        self.assertEqual(len(prompts), 1)
+        self.assertIn('Retain the date.', prompts[0])
+        self.assertIn('Preserve the new validated behavior.', prompts[0])
+        with learning.connection(self.config) as db:
+            consumed = db.execute("SELECT COUNT(*) FROM evidence WHERE kind='correction' AND consumed=1").fetchone()[0]
+            status = db.execute('SELECT status FROM revisions ORDER BY id DESC LIMIT 1').fetchone()[0]
+        self.assertEqual(consumed, 2)
+        self.assertEqual(status, 'no_change')
+
+    def test_changed_model_and_runtime_override_unlock_same_evidence(self):
+        self.seed()
+        calls = []
+
+        def record_timeout(prompt, out, model, **kwargs):
+            calls.append((model, kwargs.get('harness'), os.environ.get('SKILLCRAFT_CODEX_HOME')))
+            return {'status': 'timeout'}
+
+        with patch.object(learning_worker, 'run_model', side_effect=record_timeout):
+            learning_worker.work(self.config)
+            self.queue('changed-model-window')
+            self.config['skills']['demo']['harnesses']['codex']['optimizer_model'] = 'gpt-new'
+            learning_worker.work(self.config)
+            self.queue('changed-runtime-window')
+            self.config['skills']['demo']['harnesses']['codex']['codex_home'] = str(self.home)
+            learning_worker.work(self.config)
+
+        self.assertEqual([call[0] for call in calls], ['gpt-test', 'gpt-new', 'gpt-new'])
+        self.assertEqual(calls[2][2], str(self.home))
+        with learning.connection(self.config) as db:
+            self.assertEqual(db.execute("SELECT consumed FROM evidence WHERE kind='correction'").fetchone()[0], 0)
+
+    def test_changed_inherited_runner_unlocks_same_evidence(self):
+        self.seed()
+        with (patch.dict(os.environ, {'SKILLCRAFT_CODEX': '/first-codex'}),
+              patch.object(learning_worker, 'run_model', side_effect=self.timeout) as model):
+            learning_worker.work(self.config)
+            self.queue('changed-inherited-runner')
+            os.environ['SKILLCRAFT_CODEX'] = '/second-codex'
+            learning_worker.work(self.config)
+        self.assertEqual(model.call_count, 2)
+
+    def test_final_report_write_failure_does_not_consume_evidence(self):
+        self.seed()
+        write_json_real = learning_worker.write_recovery_record
+
+        def fail_terminal_report(path, body):
+            if Path(path).name == 'report.json' and body.get('status') == 'no_change':
+                raise OSError('simulated final report write failure')
+            return write_json_real(path, body)
+
+        with (patch.object(learning_worker, 'run_model', side_effect=self.no_change),
+              patch.object(learning_worker, 'write_recovery_record', side_effect=fail_terminal_report)):
+            with self.assertRaisesRegex(OSError, 'final report write failure'):
+                learning_worker.work(self.config)
+
+        with learning.connection(self.config) as db:
+            revision = db.execute('SELECT status, path FROM revisions').fetchone()
+            consumed = db.execute("SELECT consumed FROM evidence WHERE kind='correction'").fetchone()[0]
+        report = json.loads((Path(revision['path']) / 'report.json').read_text())
+        self.assertEqual(revision['status'], 'running')
+        self.assertEqual(report['status'], 'optimizing')
+        self.assertEqual(consumed, 0)
+
+    def test_restart_reconciles_durable_terminal_report_and_evidence_atomically(self):
+        self.seed()
+        with patch.object(learning_worker, 'run_model', side_effect=self.no_change), \
+                patch.object(learning_worker, 'record_revision_outcome', side_effect=OSError('simulated DB interruption')):
+            with self.assertRaisesRegex(OSError, 'DB interruption'):
+                learning_worker.work(self.config)
+
+        with learning.connection(self.config) as db:
+            revision = db.execute('SELECT status, path FROM revisions').fetchone()
+            consumed = db.execute("SELECT consumed FROM evidence WHERE kind='correction'").fetchone()[0]
+        report = json.loads((Path(revision['path']) / 'report.json').read_text())
+        self.assertEqual((revision['status'], report['status'], consumed), ('running', 'no_change', 0))
+
+        learning_worker.work(self.config)
+        with learning.connection(self.config) as db:
+            revision_status = db.execute('SELECT status FROM revisions').fetchone()[0]
+            consumed = db.execute("SELECT consumed FROM evidence WHERE kind='correction'").fetchone()[0]
+        self.assertEqual((revision_status, consumed), ('no_change', 1))
+
+    def test_restart_recovers_interrupted_call_and_waits_for_new_evidence(self):
+        self.seed()
+        def interrupt(*args, **kwargs):
+            raise KeyboardInterrupt()
+
+        with patch.object(learning_worker, 'run_model', side_effect=interrupt) as model:
+            with self.assertRaises(KeyboardInterrupt):
+                learning_worker.work(self.config)
+            learning_worker.work(self.config)
+            self.queue('post-restart-empty-window')
+            learning_worker.work(self.config)
+
+        model.assert_called_once()
+        with learning.connection(self.config) as db:
+            statuses = [row[0] for row in db.execute('SELECT status FROM revisions ORDER BY id')]
+            consumed = db.execute("SELECT consumed FROM evidence WHERE kind='correction'").fetchone()[0]
+        self.assertEqual(statuses, ['interrupted', 'retry_suppressed'])
+        self.assertEqual(consumed, 0)
+
+    def test_consumed_successes_still_protect_their_versioned_cases(self):
+        self.enable()
+        version = tree_hash(self.source)
+        with learning.connection(self.config) as db:
+            learning.record(db, 'success-witness', 'demo', version, 'feedback', 'codex', 's', 't',
+                            'case:confirmed', 'confirmed', 'success', 'The verified behavior was correct.', True)
+            db.execute("UPDATE evidence SET consumed=1 WHERE kind='success'")
+            db.commit()
+            self.assertEqual(learning_worker.protected_success_cases(db, 'demo', version), {'confirmed'})
+
+
+if __name__ == '__main__':
+    unittest.main()

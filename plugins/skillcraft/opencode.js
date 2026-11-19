@@ -1,12 +1,11 @@
 import { readFile } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { Plugin, Skill } from '@opencode/plugin';
 import { parse } from 'yaml';
-import { messageText, selectTurn, verifiedSkills } from './opencode-learning.js';
+import { consumeWithReconnect, initialCursor, messageText, reconcileProjection, selectTurn, spawnBounded, verifiedSkills } from './opencode-learning.js';
 
 const skillID = Skill.ID.make('skillcraft');
 const skillPath = fileURLToPath(new URL('./skills/skillcraft/SKILL.md', import.meta.url));
@@ -36,78 +35,105 @@ async function enabled(project) {
   }
 }
 
-function observe(input) {
-  return new Promise((resolve) => {
-    const python = spawn(pythonExecutable(), ['-B', learningPath, 'observe'], {
-      cwd: input.project,
-      stdio: ['pipe', 'ignore', 'ignore'],
-      env: process.env,
-    });
-    python.once('error', () => resolve(false));
-    python.once('close', (code) => resolve(code === 0));
-    python.stdin.on('error', () => {});
-    python.stdin.end(JSON.stringify(input));
-  });
+export async function observe(input) {
+  const result = await spawnBounded(pythonExecutable(), ['-B', learningPath, 'observe'], {
+    cwd: input.project,
+    stdio: ['pipe', 'ignore', 'ignore'],
+    env: process.env,
+  }, { input: JSON.stringify(input) });
+  return result?.code === 0;
 }
 
-function inventory(project) {
-  return new Promise((resolveInventory) => {
-    const python = spawn(pythonExecutable(), ['-B', learningPath, 'inventory', project], {
-      cwd: project,
-      stdio: ['ignore', 'pipe', 'ignore'],
-      env: process.env,
-    });
-    let stdout = '';
-    python.stdout.setEncoding('utf8');
-    python.stdout.on('data', (chunk) => { stdout += chunk; });
-    python.once('error', () => resolveInventory(null));
-    python.once('close', (code) => {
-      if (code !== 0) return resolveInventory(null);
-      try {
-        const data = JSON.parse(stdout);
-        resolveInventory(Array.isArray(data) ? data : null);
-      } catch {
-        resolveInventory(null);
-      }
-    });
-  });
+export async function inventory(project) {
+  const result = await spawnBounded(pythonExecutable(), ['-B', learningPath, 'inventory', project], {
+    cwd: project,
+    stdio: ['ignore', 'pipe', 'ignore'],
+    env: process.env,
+  }, { captureStdout: true });
+  if (result?.code !== 0) return null;
+  try {
+    const data = JSON.parse(result.stdout);
+    return Array.isArray(data) ? data : null;
+  } catch {
+    return null;
+  }
 }
 
-async function captureIdle(ctx, sessionID, seen, baselines) {
+function sessionState(messages, includePending = false) {
+  return {
+    cursor: initialCursor(messages, includePending),
+    completed: new Set(),
+    pendingSeen: new Set(),
+    baseline: null,
+  };
+}
+
+function baselineForTurn(state, turn, messages) {
+  const baseline = state.baseline;
+  if (!Array.isArray(baseline?.inventory)) return null;
+  if (baseline.turnID === turn.user.id) return baseline;
+  if (baseline.turnID) {
+    const baselineIndex = messages.findIndex((message) => message.type === 'user' && message.id === baseline.turnID);
+    const turnIndex = messages.findIndex((message) => message.type === 'user' && message.id === turn.user.id);
+    if (baselineIndex >= 0 && turnIndex > baselineIndex) state.baseline = null;
+    return null;
+  }
+  if (baseline.afterUserID === undefined) return baseline;
+  const afterIndex = messages.findIndex((message) => message.type === 'user' && message.id === baseline.afterUserID);
+  const turnIndex = messages.findIndex((message) => message.type === 'user' && message.id === turn.user.id);
+  return afterIndex >= 0 && turnIndex > afterIndex ? baseline : null;
+}
+
+async function captureProjection(ctx, sessionID, state) {
   const session = await ctx.session.get({ sessionID });
   if (!session?.id || session.parentID || session.metadata?.skillcraft === true) return;
   const project = session.location.directory;
   if (!(await enabled(project))) return;
-  const before = baselines.get(sessionID);
-  const now = await inventory(project);
-  if (!now) return;
-  const baselineByPath = new Map((before || []).map((entry) => [entry.path, entry.snapshot_hash]));
-  const stable = now.filter((entry) => baselineByPath.get(entry.path) === entry.snapshot_hash);
   const messages = await ctx.session.context({ sessionID });
-  const selected = selectTurn(messages);
-  if (!selected) return;
-  const { user, final, targetTurn, segment } = selected;
-  const pair = `${user.id}/${final?.id ?? 'pending'}`;
-  if (seen.get(sessionID) === pair) return;
-  if (!final) {
-    const userRecorded = await observe({ project, harness: 'opencode', session: sessionID, turn: user.id, role: 'user', text: messageText(user), loaded: [], target_turn: targetTurn,
-      diagnostic: targetTurn ? 'The current OpenCode turn ended without a completed assistant message.' : 'No preceding completed assistant turn is available for feedback association.' });
-    if (userRecorded) seen.set(sessionID, pair);
-    return;
-  }
-  const skillMessages = segment.filter((message) => message.type === 'skill');
-  const catalog = await ctx.skill.list({ location: { directory: project } });
-  const loaded = await verifiedSkills(skillMessages, catalog.data, stable);
+  await reconcileProjection(messages, state, async (turn) => {
+    const bound = baselineForTurn(state, turn, messages);
+    const now = bound ? await inventory(project) : null;
+    const baselineByPath = new Map((bound?.inventory || []).map((entry) => [entry.path, entry.snapshot_hash]));
+    const stable = now ? now.filter((entry) => baselineByPath.get(entry.path) === entry.snapshot_hash) : [];
+    let loaded = [];
+    let diagnostic;
+    if (!bound || !now) {
+      diagnostic = 'No live skill inventory baseline was available for this OpenCode turn; captured without skill attribution.';
+    } else if (turn.final) {
+      const catalog = await ctx.skill.list({ location: { directory: project } });
+      loaded = await verifiedSkills(turn.segment.filter((message) => message.type === 'skill'), catalog.data, stable);
+      diagnostic = loaded.length ? undefined : stable.length < now.length
+        ? 'The enrolled skill package changed during the turn; message captured without skill attribution.'
+        : 'No readable native skill attachment matching the current installed skill body was confirmed in the persisted OpenCode session projection.';
+    }
+    const userRecorded = await observe({
+      project, harness: 'opencode', session: sessionID, turn: turn.user.id, role: 'user',
+      text: messageText(turn.user), loaded: [], target_turn: turn.targetTurn,
+      diagnostic: turn.targetTurn ? undefined : 'No immediately preceding completed assistant turn is available for feedback association.',
+    });
+    if (!userRecorded) return false;
+    if (!turn.final) {
+      if (bound) state.baseline = { ...bound, turnID: turn.user.id, afterUserID: undefined };
+      return true;
+    }
+    const assistantRecorded = await observe({
+      project, harness: 'opencode', session: sessionID, turn: turn.user.id, role: 'assistant',
+      text: messageText(turn.final), loaded, diagnostic,
+    });
+    if (assistantRecorded && bound && state.baseline === bound) state.baseline = null;
+    return assistantRecorded;
+  });
+}
 
-  const diagnostic = loaded.length ? undefined : !before
-    ? 'No approved skill snapshot was recorded at turn start; message captured without skill attribution.'
-    : stable.length < now.length
-      ? 'The enrolled skill package changed during the turn; message captured without skill attribution.'
-      : 'No readable native skill attachment matching the current installed skill body was confirmed in the persisted OpenCode session projection.';
-  const userRecorded = await observe({ project, harness: 'opencode', session: sessionID, turn: user.id, role: 'user', text: messageText(user), loaded: [], target_turn: targetTurn,
-    diagnostic: targetTurn ? undefined : 'No preceding completed assistant turn is available for feedback association.' });
-  const assistantRecorded = await observe({ project, harness: 'opencode', session: sessionID, turn: user.id, role: 'assistant', text: messageText(final), loaded, diagnostic });
-  if (userRecorded && assistantRecorded) seen.set(sessionID, pair);
+async function listSessions(ctx) {
+  const sessions = [];
+  let cursor;
+  do {
+    const page = await ctx.session.list({ directory: ctx.location.directory, limit: 100, ...(cursor ? { cursor } : {}) });
+    sessions.push(...(page.data || []));
+    cursor = page.cursor?.next;
+  } while (cursor);
+  return sessions;
 }
 
 export default Plugin.define({
@@ -132,30 +158,74 @@ export default Plugin.define({
       });
     });
     const abort = new AbortController();
-    const seen = new Map();
-    const baselines = new Map();
-    const events = ctx.event.subscribe({ types: ['session.status', 'session.idle'], signal: abort.signal });
-    void (async () => {
-      try {
-        for await (const event of events) {
-          if (event.type === 'session.status') {
-            const sessionID = event.data.sessionID;
-            const session = await ctx.session.get({ sessionID });
-            if (!session?.id || session.parentID || session.metadata?.skillcraft === true) continue;
-            const project = session.location.directory;
-            if (event.data.status.type === 'busy') {
-              baselines.set(sessionID, await enabled(project) ? await inventory(project) : null);
-            } else if (event.data.status.type === 'idle') {
-              await captureIdle(ctx, sessionID, seen, baselines).catch(() => {});
-            }
-            continue;
-          }
-          if (event.type === 'session.idle') await captureIdle(ctx, event.data.sessionID, seen, baselines).catch(() => {});
+    const sessions = new Map();
+    const inspectSession = async (sessionID) => {
+      const session = await ctx.session.get({ sessionID });
+      if (!session?.id || session.parentID || session.metadata?.skillcraft === true) return null;
+      return { session, messages: await ctx.session.context({ sessionID }) };
+    };
+    const reconcileAll = async () => {
+      const listed = await listSessions(ctx);
+      for (const session of listed) {
+        if (!session.id || session.parentID || session.metadata?.skillcraft === true) continue;
+        const projection = await inspectSession(session.id);
+        if (!projection) continue;
+        let state = sessions.get(session.id);
+        if (!state) {
+          // Establish a durable start anchor on first sight; never backfill history.
+          state = sessionState(projection.messages);
+          sessions.set(session.id, state);
+        } else {
+          await captureProjection(ctx, session.id, state);
         }
-      } catch {
-        // A stopped or disconnected event stream should not affect the host.
       }
-    })();
+    };
+    void consumeWithReconnect(
+      (signal) => ctx.event.subscribe({ types: ['session.status', 'session.idle'], signal }),
+      async (event) => {
+        if (event.type === 'session.status') {
+          const sessionID = event.data.sessionID;
+          const projection = await inspectSession(sessionID);
+          if (!projection) return;
+          const { session, messages } = projection;
+          const project = session.location.directory;
+          if (event.data.status.type === 'busy') {
+            let state = sessions.get(sessionID);
+            if (!state) {
+              state = sessionState(messages, true);
+              sessions.set(sessionID, state);
+            }
+            const current = selectTurn(messages);
+            const enrolled = await enabled(project) ? await inventory(project) : null;
+            const latestUser = messages.findLast((message) => message.type === 'user');
+            state.baseline = {
+              inventory: Array.isArray(enrolled) ? enrolled : null,
+              turnID: current && !current.final ? current.user.id : undefined,
+              afterUserID: current && !current.final ? undefined : latestUser?.id,
+            };
+          } else if (event.data.status.type === 'idle') {
+            let state = sessions.get(sessionID);
+            if (!state) {
+              state = sessionState(messages);
+              sessions.set(sessionID, state);
+            }
+            await captureProjection(ctx, sessionID, state);
+          }
+          return;
+        }
+        if (event.type === 'session.idle') {
+          const sessionID = event.data.sessionID;
+          if (!sessions.has(sessionID)) {
+            const projection = await inspectSession(sessionID);
+            if (!projection) return;
+            sessions.set(sessionID, sessionState(projection.messages));
+          }
+          await captureProjection(ctx, sessionID, sessions.get(sessionID));
+        }
+      },
+      abort.signal,
+      { onConnected: reconcileAll },
+    );
     return () => abort.abort();
   },
 });

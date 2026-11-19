@@ -1,6 +1,7 @@
 import json
 import importlib.util
 import os
+import shutil
 from collections import defaultdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -45,9 +46,9 @@ class LearningTest(unittest.TestCase):
         self.config['state'].mkdir(parents=True, exist_ok=True)
         (self.config['state'] / 'enabled').write_text(self.config['fingerprint'] + '\n')
 
-    def message(self, session, turn, role, text='', *, binds=False, harness='codex'):
-        loaded = [{'path': str(self.markdown), 'hash': digest(self.markdown)}] if binds else []
-        return learning.observe(self.project, harness, session, turn, role, text, loaded)
+    def message(self, session, turn, role, text='', *, binds=False, harness='codex', target=None):
+        loaded = learning.source_inventory(self.config) if binds else []
+        return learning.observe(self.project, harness, session, turn, role, text, loaded, target_turn=target)
 
     def test_message_threshold_dedup_and_opt_in(self):
         self.assertFalse(self.message('s', 'pre', 'user'))
@@ -75,7 +76,7 @@ class LearningTest(unittest.TestCase):
                                        ('b', 'opencode', 'Это не работает'),
                                        ('c', 'opencode', 'Исправь: неверный срок')]:
             self.message(session, 'old', 'assistant', binds=True, harness=harness)
-            self.message(session, 'next', 'user', text, harness=harness)
+            self.message(session, 'next', 'user', text, harness=harness, target='old')
         self.message('no_skill', '1', 'assistant')
         self.message('no_skill', '2', 'user', 'Всё работает')
         with learning.connection(self.config) as db:
@@ -95,12 +96,20 @@ class LearningTest(unittest.TestCase):
         for session in ('a', 'b', 'c'):
             self.message(session, 'old', 'user', 'Verify the empty result.')
             self.message(session, 'old', 'assistant', binds=True)
-            self.message(session, 'next', 'user', 'Всё работает')
+            self.message(session, 'next', 'user', 'Всё работает', target='old')
         with learning.connection(self.config) as db:
             rows = db.execute('SELECT * FROM evidence').fetchall()
         self.assertEqual(len(rows), 3)
         self.assertEqual(len({row['independent'] for row in rows}), 1)
         self.assertFalse(learning_worker.unique_batch(rows))
+
+    def test_feedback_without_a_proven_target_does_not_use_an_older_answer(self):
+        self.enable()
+        self.message('s', 'earlier', 'assistant', binds=True)
+        self.message('s', 'next', 'user', 'Всё работает')
+        with learning.connection(self.config) as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM messages").fetchone()[0], 2)
+            self.assertIsNone(db.execute("SELECT id FROM evidence").fetchone())
 
     def test_codex_rollout_proves_only_complete_read_in_requested_turn(self):
         path = self.project / 'rollout.jsonl'
@@ -162,6 +171,87 @@ class LearningTest(unittest.TestCase):
         write_json(manifest, data)
         self.assertFalse(learning.notify_feedback(workspace, feedback))
 
+    def test_selected_review_import_uses_the_sealed_selected_grade(self):
+        from scripts.generate_review import find_runs, save_feedback
+        from scripts.grading_store import reserve_attempt, seal_attempt
+
+        self.enable()
+        workspace, snapshot = self.fake_eval()
+        relative = 'eval-fail/with_skill/run-001'
+        run = workspace / relative
+        (run / 'outputs').mkdir()
+        (workspace / 'pilot' / relative / 'outputs').mkdir(parents=True)
+        write_json(run / 'messages.json', [])
+        chosen, attempt = reserve_attempt(run, {}, self.project / 'regrade', None, None)
+        grade = json.loads((run / 'grading.json').read_text())
+        grade['expectations'][0]['passed'] = True
+        write_json(run / 'grading.json', grade)
+        grade['expectations'][0]['passed'] = False
+        write_json(chosen / 'grading.json', grade)
+        seal_attempt(chosen, attempt, grade)
+        selection = {'schema_version': 1, 'source_workspace': str(workspace), 'rule': 'Verify regrade',
+                     'runs': {relative: {'selected': str(chosen)}}}
+        write_json(self.project / 'selection.json', selection)
+        views = find_runs(workspace, selection)
+        self.assertEqual([view['id'] for view in views], [f'r1@{attempt["attempt_id"]}'])
+        feedback = self.project / 'feedback.json'
+        save_feedback(feedback, {'schema_version': 1, 'status': 'complete', 'reviews': [{
+            'run_id': views[0]['id'], 'snapshot_hash': snapshot, 'reviewed': True,
+            'feedback': 'Preserve the due date.', 'verdict': 'correction',
+        }]}, views)
+        self.assertTrue(learning.notify_feedback(workspace, feedback, selection=selection))
+        self.assertFalse(learning.notify_feedback(workspace, feedback, selection=selection))
+        with learning.connection(self.config) as db:
+            signal = db.execute('SELECT kind,reproducible FROM evidence').fetchone()
+        self.assertEqual(tuple(signal), ('correction', 1))
+
+    def test_ab_import_rejects_a_modified_sealed_grade(self):
+        from scripts.grading_store import reserve_attempt, seal_attempt
+
+        self.enable()
+        workspace, _ = self.fake_eval()
+        run = workspace / 'eval-fail/with_skill/run-001'
+        grade_file = run / 'grading.json'
+        grade = json.loads(grade_file.read_text())
+        grade_file.unlink()
+        destination, attempt = reserve_attempt(run, {}, None, None, None)
+        write_json(grade_file, grade)
+        seal_attempt(destination, attempt, grade)
+        grade['expectations'][0]['passed'] = True
+        write_json(grade_file, grade)
+        with self.assertRaisesRegex(ValueError, 'grading result was modified'):
+            learning.notify_eval(workspace)
+        with learning.connection(self.config) as db:
+            self.assertIsNone(db.execute('SELECT id FROM evidence').fetchone())
+
+    def test_direct_import_rejects_a_truthy_string_reviewed_flag(self):
+        self.enable()
+        workspace, snapshot = self.fake_eval()
+        feedback = workspace / 'feedback.json'
+        write_json(feedback, {'schema_version': 1, 'status': 'complete', 'reviews': [{
+            'run_id': 'r1', 'snapshot_hash': snapshot, 'reviewed': 'false',
+            'feedback': 'Preserve the due date.', 'verdict': 'correction',
+        }]})
+        with self.assertRaisesRegex(ValueError, 'reviewed flag'):
+            learning.notify_feedback(workspace, feedback)
+        self.wake.assert_not_called()
+
+    def test_new_ab_runs_can_queue_after_the_first_import_checkpoint(self):
+        self.enable()
+        workspace, _ = self.fake_eval()
+        self.assertTrue(learning.notify_eval(workspace))
+        with learning.connection(self.config) as db:
+            db.execute("UPDATE checkpoints SET status='done'")
+        run = workspace / 'eval-fail/with_skill/run-002'
+        shutil.copytree(run.with_name('run-001'), run)
+        data = json.loads((run / 'run.json').read_text())
+        write_json(run / 'run.json', {**data, 'run_id': 'r2'})
+        self.assertTrue(learning.notify_eval(workspace))
+        self.assertFalse(learning.notify_eval(workspace))
+        with learning.connection(self.config) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM evidence').fetchone()[0], 2)
+            self.assertEqual(db.execute("SELECT count(*) FROM checkpoints WHERE status='pending'").fetchone()[0], 1)
+
     def write_cases(self):
         for name, case, hidden in [('train', 'fail', 'Training owner'), ('holdout', 'secret-case', 'Protected unseen portion')]:
             write_json(self.project / f'{name}.json', {'evals': [{
@@ -198,7 +288,29 @@ class LearningTest(unittest.TestCase):
                         'expectations': [{'text': 'Stable date', 'source': 'deterministic',
                                           'passed': arm == 'with_skill' or case == 'secret-case'}],
                     })
-        return {'errors': 0, 'validation_errors': []}
+        return {'errors': 0, 'validation_errors': [], 'deltas': {
+            arm: {'excluded_pairs': [], 'paired_pass_rate': {'n': 2 * repeats}}
+            for arm in ('previous_skill', 'without_skill')
+        }}
+
+    def test_incompatible_quality_pairs_cannot_activate_a_candidate(self):
+        self.seed_worker()
+        version = tree_hash(self.source)
+
+        def incompatible(*args, **kwargs):
+            result = self.fake_quality(*args, **kwargs)
+            result['deltas']['previous_skill']['excluded_pairs'] = ['fixture mismatch']
+            return result
+
+        with (patch.object(learning_worker, 'run_model', side_effect=self.fake_proposal),
+              patch.object(learning_worker, 'run_quality', side_effect=incompatible)):
+            learning_worker.work(self.config)
+        with learning.connection(self.config) as db:
+            revision = db.execute('SELECT * FROM revisions').fetchone()
+        report = json.loads((Path(revision['path']) / 'report.json').read_text())
+        self.assertEqual(report['status'], 'blocked')
+        self.assertIn('incompatible pairs', report['reason'])
+        self.assertEqual(tree_hash(self.source), version)
 
     def test_qualified_text_change_applies_and_rolls_back_after_worker_restart(self):
         self.seed_worker()
@@ -210,7 +322,7 @@ class LearningTest(unittest.TestCase):
 
         with (patch.object(learning_worker, 'run_model', side_effect=self.fake_proposal) as model,
               patch.object(learning_worker, 'run_quality', side_effect=self.fake_quality)):
-            with patch.object(learning_worker, 'write_json', side_effect=stop_after_swap):
+            with patch.object(learning_worker, 'write_recovery_record', side_effect=stop_after_swap):
                 with self.assertRaisesRegex(OSError, 'interruption'):
                     learning_worker.work(self.config)
             learning_worker.work(self.config)

@@ -6,7 +6,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts.learning_promotion import _tree_hash, promote, rollback, verify_code
+from scripts import learning_promotion
+from scripts.learning_promotion import _tree_hash, promote, recover_exchange, rollback, tree_modes, verify_code
 
 
 class LearningPromotion(unittest.TestCase):
@@ -159,6 +160,87 @@ class LearningPromotion(unittest.TestCase):
             (source / 'SKILL.md').write_bytes(b'changed')
             with self.assertRaisesRegex(ValueError, 'rollback_hash_mismatch'):
                 rollback(source, record, root / 'state')
+
+    def test_source_edit_during_candidate_staging_is_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source = self.make_tree(root / 'source', {'SKILL.md': b'original'})
+            candidate = self.make_tree(root / 'candidate', {'SKILL.md': b'qualified'})
+            original_snapshot = learning_promotion._snapshot
+
+            def edit_during_staging(path, destination):
+                result = original_snapshot(path, destination)
+                if destination.parent == root:
+                    (source / 'SKILL.md').write_bytes(b'live edit')
+                return result
+
+            with patch.object(learning_promotion, '_snapshot', side_effect=edit_during_staging), \
+                    patch.object(learning_promotion, '_atomic_exchange') as exchange:
+                with self.assertRaisesRegex(ValueError, 'source changed before exchange'):
+                    promote(source, candidate, _tree_hash(source), root / 'state')
+            exchange.assert_not_called()
+            self.assertEqual((source / 'SKILL.md').read_bytes(), b'live edit')
+
+    def test_edit_at_exchange_and_after_worker_stop_is_restored(self):
+        for interrupted in (False, True):
+            with self.subTest(interrupted=interrupted), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                source = self.make_tree(root / 'source', {'SKILL.md': b'original'})
+                candidate = self.make_tree(root / 'candidate', {'SKILL.md': b'qualified'})
+                record_path = root / 'state/promotion.json'
+                real_exchange = learning_promotion._atomic_exchange
+
+                def edit_at_exchange(first, second):
+                    if (first / 'SKILL.md').read_bytes() == b'original':
+                        (first / 'SKILL.md').write_bytes(b'last-moment edit')
+                        real_exchange(first, second)
+                        if interrupted:
+                            raise InterruptedError('worker stopped after directory exchange')
+                    else:
+                        real_exchange(first, second)
+
+                with patch.object(learning_promotion, '_atomic_exchange', side_effect=edit_at_exchange):
+                    failure = InterruptedError if interrupted else ValueError
+                    with self.assertRaises(failure):
+                        promote(source, candidate, _tree_hash(source), root / 'state', record_path=record_path)
+                if interrupted:
+                    with self.assertRaisesRegex(ValueError, 'concurrent edit was restored'):
+                        recover_exchange(source, json.loads(record_path.read_text()), root / 'state')
+                self.assertEqual((source / 'SKILL.md').read_bytes(), b'last-moment edit')
+
+    def test_mode_only_edit_since_qualification_prevents_activation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source = self.make_tree(root / 'source', {'SKILL.md': b'original', 'runner.py': b'print(1)'})
+            candidate = self.make_tree(root / 'candidate', {'SKILL.md': b'qualified', 'runner.py': b'print(1)'})
+            before, modes = _tree_hash(source), tree_modes(source)
+            (source / 'runner.py').chmod(0o755)
+            self.assertEqual(_tree_hash(source), before)
+            with self.assertRaisesRegex(ValueError, 'source_mode_mismatch'):
+                promote(source, candidate, before, root / 'state', expected_source_modes=modes)
+            self.assertEqual(stat.S_IMODE((source / 'runner.py').stat().st_mode), 0o755)
+
+    def test_post_exchange_sync_failure_keeps_a_verified_rollback_route(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source = self.make_tree(root / 'source', {'SKILL.md': b'original'})
+            candidate = self.make_tree(root / 'candidate', {'SKILL.md': b'qualified'})
+            original_sync = os.fsync
+
+            def fail_after_exchange(fd):
+                if (source / 'SKILL.md').read_bytes() == b'qualified':
+                    raise OSError('injected directory sync failure')
+                return original_sync(fd)
+
+            before = _tree_hash(source)
+            record_path = root / 'state/promotion.json'
+            with patch.object(learning_promotion.os, 'fsync', side_effect=fail_after_exchange):
+                record = promote(source, candidate, before, root / 'state', record_path=record_path)
+            self.assertEqual(record['durability'], 'unknown')
+            self.assertEqual(_tree_hash(source), _tree_hash(candidate))
+            self.assertTrue(recover_exchange(source, json.loads(record_path.read_text()), root / 'state'))
+            rollback(source, record, root / 'state')
+            self.assertEqual(_tree_hash(source), before)
 
 
 if __name__ == '__main__':

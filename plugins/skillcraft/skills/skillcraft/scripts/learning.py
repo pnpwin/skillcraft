@@ -181,7 +181,7 @@ def binding(config, loaded):
             if isinstance(entry, dict) and Path(entry.get('path') or '.').resolve() == markdown:
                 if entry.get('hash') == digest(markdown):
                     version = tree_hash(source)
-                    if entry.get('snapshot_hash', version) == version:
+                    if entry.get('snapshot_hash') == version:
                         bindings[name] = version
                 break
     return bindings
@@ -230,13 +230,13 @@ def observe(project, harness, session, turn, role, text, loaded, *, target_turn=
             (harness, session, turn, role, json.dumps(labels), sanitize(diagnostic) if diagnostic else None,
              case_key, excerpt),
         ).rowcount
-        if inserted and role == 'user':
+        if inserted and role == 'user' and target_turn:
             kind = classify(text)
             if kind:
                 prior = db.execute(
                     'SELECT turn,bindings,excerpt FROM messages WHERE harness=? AND session=? AND role=\'assistant\' '
-                    'AND (? IS NULL OR turn=?) ORDER BY seq DESC LIMIT 1',
-                    (harness, session, target_turn, target_turn),
+                    'AND turn=?',
+                    (harness, session, target_turn),
                 ).fetchone()
                 associated = json.loads(prior['bindings']) if prior else {}
                 if len(associated) > 1:
@@ -332,11 +332,7 @@ def independence(meta):
     return f'group:{group}' if group is not None else f'case:{meta["eval_id"]}'
 
 
-def graded_checks(path, *, judge=False):
-    grade_path = path / 'grading.json'
-    if not grade_path.is_file():
-        return None
-    grade = read_json(grade_path)
+def graded_checks(grade, *, judge=False):
     checks = grade.get('expectations', [])
     if grade.get('status') != 'completed' or not grade.get('evaluation_complete') or not checks:
         return None
@@ -351,6 +347,8 @@ def reproducible_failure(checks):
 
 
 def notify_eval(workspace, *, project=None):
+    from scripts.grading_store import read_grading
+
     workspace = Path(workspace).resolve()
     context = eval_context(workspace, project)
     if not context:
@@ -365,7 +363,8 @@ def notify_eval(workspace, *, project=None):
         for path, run, meta in observed_runs(workspace, variants):
             if run.get('installed_hash') != meta.get('snapshot_hash'):
                 continue
-            checks = graded_checks(path, judge=bool(manifest.get('judge_model')))
+            grade, _, provenance = read_grading(path)
+            checks = graded_checks(grade, judge=bool((provenance or manifest).get('judge_model')))
             if not checks:
                 continue
             case_id = meta['eval_id']
@@ -376,22 +375,38 @@ def notify_eval(workspace, *, project=None):
                             str(workspace), run['run_id'], independence(meta), case_id, kind, note,
                             reproducible_failure(checks))
         if added:
-            queue(db, 'ab:' + str(workspace))
+            last_id = db.execute('SELECT MAX(id) FROM evidence').fetchone()[0]
+            queue(db, f'ab:{workspace}:{last_id}')
     if added:
         wake(config)
     return added
 
 
-def notify_feedback(workspace, feedback_path, *, project=None):
+def notify_feedback(workspace, feedback_path, *, project=None, selection=None):
+    from scripts.generate_review import validate_feedback_entries
+    from scripts.grading_store import load_selection, read_grading
+
     workspace = Path(workspace).resolve()
     context = eval_context(workspace, project)
     if not context:
         return False
     config, manifest, name, version, variants = context
     feedback = read_json(feedback_path)
-    if feedback.get('status') != 'complete' or feedback.get('schema_version') != 1:
+    if not isinstance(feedback, dict) or feedback.get('status') != 'complete' or feedback.get('schema_version') != 1:
         return False
-    runs = {run['run_id']: (path, run, meta) for path, run, meta in observed_runs(workspace, variants, include_pilot=True)}
+    validate_feedback_entries(feedback)
+    selected = load_selection(workspace, selection)
+    runs = {}
+    for path, run, meta in observed_runs(workspace, variants, include_pilot=selected is None):
+        view_id = run['run_id']
+        attempt = None
+        if selected is not None:
+            attempt = selected['runs'][path.relative_to(workspace).as_posix()]['selected']
+        grade, _, provenance = read_grading(path, attempt)
+        if selected is not None:
+            view_id = f'{view_id}@{provenance["attempt_id"] if provenance else "legacy"}'
+        checks = graded_checks(grade, judge=bool((provenance or manifest).get('judge_model')))
+        runs[view_id] = (run, meta, checks)
     added = False
     with connection(config) as db:
         for entry in feedback['reviews']:
@@ -400,15 +415,14 @@ def notify_feedback(workspace, feedback_path, *, project=None):
             note = entry.get('feedback', '')
             if kind not in VERDICTS or not entry.get('reviewed') or not match:
                 continue
-            path, run, meta = match
+            run, meta, checks = match
             if entry.get('snapshot_hash') != meta.get('snapshot_hash') or run.get('installed_hash') != meta.get('snapshot_hash'):
                 continue
             if kind == 'correction' and not note.strip():
                 continue
             case_id = meta['eval_id']
-            checks = graded_checks(path, judge=bool(manifest.get('judge_model')))
             reproducible = kind == 'correction' and reproducible_failure(checks)
-            added |= record(db, f'feedback:{run["run_id"]}:{name}:{kind}:{sanitize(note)}', name, version, 'feedback',
+            added |= record(db, f'feedback:{entry["run_id"]}:{name}:{kind}:{sanitize(note)}', name, version, 'feedback',
                             manifest['harness'], str(workspace), run['run_id'], independence(meta), case_id,
                             kind, note or f'Explicit reviewer verdict: {kind}', reproducible)
         if added:
@@ -433,13 +447,16 @@ def main(argv=None):
     ingest.add_argument('workspace', type=Path)
     ingest.add_argument('--project', type=Path)
     ingest.add_argument('--feedback', type=Path)
+    ingest.add_argument('--selection', type=Path, help='Grading selection used for the reviewed report')
     args = cli.parse_args(argv)
     try:
         if args.command == 'observe':
             observe(**json.load(sys.stdin))
             return 0
         if args.command == 'ingest':
-            changed = (notify_feedback(args.workspace, args.feedback, project=args.project) if args.feedback
+            if args.selection and not args.feedback:
+                raise ValueError('--selection requires --feedback')
+            changed = (notify_feedback(args.workspace, args.feedback, project=args.project, selection=args.selection) if args.feedback
                        else notify_eval(args.workspace, project=args.project))
             print(json.dumps({'new_evidence': changed}))
             return 0

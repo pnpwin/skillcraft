@@ -46,6 +46,19 @@ def _tree_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
+def tree_modes(root: Path) -> str:
+    """Fingerprint paths and permissions separately from the package content hash."""
+    digest = hashlib.sha256()
+    for path in [root, *sorted(root.rglob("*"))]:
+        mode = stat.S_IMODE(path.lstat().st_mode)
+        digest.update(f"{path.relative_to(root).as_posix()}\0{mode:o}\0".encode())
+    return digest.hexdigest()
+
+
+def _matches_tree(path: Path, expected_hash: str, expected_modes: str | None = None) -> bool:
+    return _tree_hash(path) == expected_hash and (expected_modes is None or tree_modes(path) == expected_modes)
+
+
 def _changed_files(original: Path, candidate: Path) -> list[str]:
     """Return changed relative paths, rejecting non-regular filesystem entries."""
     original, candidate = Path(original), Path(candidate)
@@ -143,8 +156,8 @@ def _reject_symlink(path: Path, label: str) -> None:
         raise ValueError(f"{label} must not be a symlink: {path}")
 
 
-def _atomic_exchange(first: Path, second: Path) -> None:
-    """Exchange two directory names atomically, with no copy/delete fallback."""
+def _atomic_exchange(first: Path, second: Path) -> bool:
+    """Exchange directory names and report whether the rename was synced."""
     first, second = Path(first), Path(second)
     if os.stat(first).st_dev != os.stat(second).st_dev:
         raise RuntimeError("atomic_exchange_unavailable: paths are on different filesystems")
@@ -175,11 +188,15 @@ def _atomic_exchange(first: Path, second: Path) -> None:
         if result != 0:
             code = ctypes.get_errno()
             raise RuntimeError(f"atomic_exchange_failed: {os.strerror(code)}")
+        durable = True
         for parent_fd in {first_parent, second_parent}:
             try:
                 os.fsync(parent_fd)
-            except OSError as error:
-                raise RuntimeError("atomic_exchange_durability_unknown: directory fsync failed") from error
+            except OSError:
+                # The exchange already succeeded. The caller must verify both
+                # trees and retain a rollback route even if durability is unknown.
+                durable = False
+        return durable
     finally:
         os.close(first_parent)
         os.close(second_parent)
@@ -229,17 +246,16 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
-def _write_record(record_path: Path | None, record: dict) -> None:
-    """Atomically persist the intended operation before its directory exchange."""
+def write_recovery_record(record_path: Path | None, record: dict) -> None:
+    """Atomically write and sync a learning recovery record."""
     if record_path is None:
         return
     destination = Path(record_path).absolute()
     destination.parent.mkdir(parents=True, exist_ok=True)
     _reject_symlink(destination, "record")
+    payload = (json.dumps(record, ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
     fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
     try:
-        os.fchmod(fd, 0o600)
-        payload = (json.dumps(record, ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
         with os.fdopen(fd, "wb") as handle:
             handle.write(payload)
             handle.flush()
@@ -254,9 +270,48 @@ def _write_record(record_path: Path | None, record: dict) -> None:
         raise
 
 
+def _verify_exchange(source: Path, stage: Path, record: dict) -> None:
+    try:
+        displaced_matches = _matches_tree(stage, record["before_hash"], record.get("before_modes"))
+    except (OSError, ValueError):
+        displaced_matches = False
+    if not displaced_matches:
+        # Preserve either tree if an editor also touched the newly active copy.
+        if not _matches_tree(source, record["after_hash"], record.get("after_modes")):
+            raise RuntimeError(f"promotion_conflict: both trees changed; displaced tree is at {stage}")
+        durable = _atomic_exchange(source, stage)
+        detail = " (directory sync failed)" if durable is False else ""
+        raise ValueError("source_hash_mismatch: a concurrent edit was restored after exchange" + detail)
+    if not _matches_tree(source, record["after_hash"], record.get("after_modes")):
+        raise RuntimeError("promotion_integrity_error: promoted content hash differs")
+
+
+def recover_exchange(source: Path, record: dict, state: Path) -> bool:
+    """Reconcile a recorded operation if its candidate is currently active."""
+    source = Path(source).resolve(strict=True)
+    stage = Path(record["exchange_stage"])
+    if (record["source"] != str(source) or stage.parent != source.parent
+            or not stage.name.startswith(f".{source.name}.promotion-")):
+        raise ValueError("promotion_record_mismatch: record does not belong to this source")
+    descriptor = _lock(state)
+    try:
+        if not _matches_tree(source, record["after_hash"], record.get("after_modes")):
+            return False
+        _verify_exchange(source, stage, record)
+        try:
+            _fsync_directory(source.parent)
+        except OSError:
+            record["durability"] = "unknown"
+        return True
+    finally:
+        os.close(descriptor)
+
+
 def _promote_locked(source: Path, candidate: Path, expected_hash: str, state: Path,
                     expected_candidate_hash: str | None = None,
-                    record_path: Path | None = None) -> dict:
+                    record_path: Path | None = None, *,
+                    expected_source_modes: str | None = None,
+                    expected_candidate_modes: str | None = None) -> dict:
     source, candidate, state = Path(source), Path(candidate), Path(state)
     for path, name in ((source, "source"), (candidate, "candidate")):
         _reject_symlink(path, name)
@@ -271,50 +326,56 @@ def _promote_locked(source: Path, candidate: Path, expected_hash: str, state: Pa
     before_hash = _tree_hash(source)
     if before_hash != expected_hash:
         raise ValueError("source_hash_mismatch: source changed since it was inspected")
+    before_modes = tree_modes(source)
+    candidate_modes = tree_modes(candidate)
+    if expected_source_modes is not None and before_modes != expected_source_modes:
+        raise ValueError("source_mode_mismatch: permissions changed since verification")
+    if expected_candidate_modes is not None and candidate_modes != expected_candidate_modes:
+        raise ValueError("candidate_mode_mismatch: permissions changed since verification")
     snapshots = state / "snapshots"
     snapshots.mkdir(parents=True, exist_ok=True)
     suffix = f"{int(time.time())}-{uuid.uuid4().hex}"
     backup = snapshots / f"before-{before_hash}-{suffix}"
     candidate_snapshot = snapshots / f"candidate-{candidate_hash}-{suffix}"
     backup_hash = _snapshot(source, backup)
-    try:
-        copied_candidate_hash = _snapshot(candidate, candidate_snapshot)
-        if copied_candidate_hash != candidate_hash:
-            raise ValueError("candidate_hash_mismatch: candidate changed while snapshotting")
-        if _tree_hash(source) != before_hash:
-            raise ValueError("source_hash_mismatch: source changed while snapshotting")
-        if _tree_hash(candidate) != candidate_hash:
-            raise ValueError("candidate_hash_mismatch: candidate changed while snapshotting")
-        _fsync_directory(snapshots)
-        stage = source.parent / f".{source.name}.promotion-{uuid.uuid4().hex}"
-        staged_hash = _snapshot(candidate, stage)
-        if staged_hash != candidate_hash:
-            raise ValueError("candidate_hash_mismatch: staged copy differs from verified candidate")
-        if _tree_hash(candidate) != candidate_hash:
-            raise ValueError("candidate_hash_mismatch: candidate changed while staging")
-        record = {"source": str(source.resolve()), "before_hash": before_hash,
-                  "after_hash": candidate_hash, "backup": str(backup.resolve()),
-                  "backup_hash": backup_hash, "candidate_snapshot": str(candidate_snapshot.resolve()),
-                  "candidate_hash": candidate_hash, "exchange_stage": str(stage),
-                  "timestamp": time.time()}
-        _write_record(record_path, record)
-        _atomic_exchange(source, stage)
-    except BaseException:
-        # Keep complete snapshots for diagnosis; never delete or rewrite input trees.
-        raise
-    if _tree_hash(source) != candidate_hash:
-        raise RuntimeError("promotion_integrity_error: promoted content hash differs")
+    if backup_hash != before_hash or tree_modes(backup) != before_modes:
+        raise ValueError("source_hash_mismatch: backup differs from the verified source")
+    if _snapshot(candidate, candidate_snapshot) != candidate_hash or tree_modes(candidate_snapshot) != candidate_modes:
+        raise ValueError("candidate_hash_mismatch: candidate changed while snapshotting")
+    _fsync_directory(snapshots)
+    stage = source.parent / f".{source.name}.promotion-{uuid.uuid4().hex}"
+    if _snapshot(candidate, stage) != candidate_hash or not _matches_tree(candidate, candidate_hash, candidate_modes):
+        raise ValueError("candidate_hash_mismatch: candidate changed while staging")
+    record = {"source": str(source), "before_hash": before_hash,
+              "after_hash": candidate_hash, "before_modes": before_modes, "after_modes": candidate_modes,
+              "backup": str(backup.resolve()),
+              "backup_hash": backup_hash, "candidate_snapshot": str(candidate_snapshot.resolve()),
+              "candidate_hash": candidate_hash, "exchange_stage": str(stage),
+              "timestamp": time.time()}
+    write_recovery_record(record_path, record)
+    if not _matches_tree(stage, candidate_hash, candidate_modes):
+        raise ValueError("candidate_hash_mismatch: staged copy changed before exchange")
+    if not _matches_tree(source, before_hash, before_modes):
+        raise ValueError("source_hash_mismatch: source changed before exchange")
+    durable = _atomic_exchange(source, stage)
+    _verify_exchange(source, stage, record)
+    if durable is False:
+        record["durability"] = "unknown"
     return record
 
 
 def promote(source: Path, candidate: Path, expected_hash: str, state: Path, *,
             expected_candidate_hash: str | None = None,
-            record_path: Path | None = None) -> dict:
+            record_path: Path | None = None,
+            expected_source_modes: str | None = None,
+            expected_candidate_modes: str | None = None) -> dict:
     """Atomically exchange snapshots if source still matches its expected hash."""
     source, candidate, state = Path(source).absolute(), Path(candidate).absolute(), Path(state).absolute()
     descriptor = _lock(state)
     try:
-        return _promote_locked(source, candidate, expected_hash, state, expected_candidate_hash, record_path)
+        return _promote_locked(source, candidate, expected_hash, state, expected_candidate_hash, record_path,
+                               expected_source_modes=expected_source_modes,
+                               expected_candidate_modes=expected_candidate_modes)
     finally:
         os.close(descriptor)
 
@@ -327,13 +388,13 @@ def rollback(source: Path, record: dict, state: Path, *, record_path: Path | Non
         if str(source.resolve()) != record.get("source"):
             raise ValueError("rollback_source_mismatch: record belongs to another source")
         _reject_symlink(source, "source")
-        current_hash = _tree_hash(source)
-        if current_hash != record.get("after_hash"):
+        if not _matches_tree(source, record.get("after_hash"), record.get("after_modes")):
             raise ValueError("rollback_hash_mismatch: source changed after promotion")
         backup = Path(record.get("backup", ""))
         _reject_symlink(backup, "backup")
         backup_hash = _tree_hash(backup)
-        if backup_hash != record.get("backup_hash"):
+        if backup_hash != record.get("backup_hash") or (
+                record.get("before_modes") is not None and tree_modes(backup) != record["before_modes"]):
             raise ValueError("rollback_backup_mismatch: backup snapshot changed")
         temporary = source.parent / f".{source.name}.rollback-{uuid.uuid4().hex}"
         shutil.copytree(backup, temporary, symlinks=False, copy_function=shutil.copy2)
@@ -341,6 +402,8 @@ def rollback(source: Path, record: dict, state: Path, *, record_path: Path | Non
         if restored_hash != backup_hash:
             raise ValueError("rollback_backup_mismatch: copied snapshot changed")
         return _promote_locked(source, temporary, record.get("after_hash", ""), state,
-                               restored_hash, record_path)
+                               restored_hash, record_path,
+                               expected_source_modes=record.get("after_modes"),
+                               expected_candidate_modes=record.get("before_modes"))
     finally:
         os.close(descriptor)

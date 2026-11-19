@@ -109,13 +109,17 @@ the candidate with a blocked report.
 Use the same interpreter and script with `status "$PWD"` to list checkpoint
 counts and revision IDs. Revision directories contain the proposed diff,
 A/B reports, usage when available, and the promotion or rejection reason.
-The source hash must still match the tested version at activation. A
-supported same-filesystem atomic exchange is required for auto-apply.
+The source content and permissions must still match the tested version at
+activation. The worker checks the displaced tree after exchange so a
+concurrent edit can be restored. A supported same-filesystem atomic exchange
+is required for auto-apply.
 
 Use `rollback "$PWD" REVISION_ID` to restore a recorded backup. Rollback
 checks the currently installed hash before switching directories. To import
 an existing run by hand use `ingest WORKSPACE --project "$PWD"`, with
-`--feedback FILE` for an already generated review file. Repeat imports are
-idempotent. A worker picks up pending checkpoints the next time a hook or
-`work "$PWD"` starts it. An interrupted model attempt is recorded rather
-than silently sending the same request again.
+`--feedback FILE` for an already generated review file. If the review was
+generated with a grading selection, also pass the same `--selection FILE`.
+Repeat imports are idempotent. A worker picks up pending checkpoints the next
+time a hook or `work "$PWD"` starts it. Failed and interrupted optimizer
+attempts keep their evidence. A later checkpoint can retry when new evidence
+or changed optimizer settings produce a different request.
