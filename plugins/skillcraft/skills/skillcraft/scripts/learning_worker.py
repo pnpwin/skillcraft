@@ -11,10 +11,12 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 
 from scripts.compliance import require_standard
 from scripts.harness import model_ref
+from scripts.approved_binary import stage as stage_binary
 from scripts.learning import (CONFIG, INTERNAL, _reject_out_of_project_fixtures, approval_still_current,
                               connection, dataset_snapshot, local_path,
                               prompt_key, require_model_approval, sanitize, wake)
@@ -89,10 +91,11 @@ def families(rows):
     return result
 
 
-def configured_runs(config, name, settings, source, attempt, approved):
+def configured_runs(config, name, settings, source, attempt, approved, runtime_dir):
     options = settings.get('harnesses')
     if not isinstance(options, dict) or not options or set(options) - {'codex', 'opencode'}:
         raise ValueError('Configure models for at least one supported harness')
+    options = {harness: dict(value) if isinstance(value, dict) else value for harness, value in options.items()}
     for harness, value in options.items():
         if not isinstance(value, dict):
             raise ValueError('Harness settings must be an object')
@@ -173,6 +176,13 @@ def configured_runs(config, name, settings, source, attempt, approved):
     eval_body = json.dumps({'evals': rows}, ensure_ascii=False, indent=2, allow_nan=False) + '\n'
     evals_hash = hashlib.sha256(eval_body.encode('utf-8')).hexdigest()
     write_json(evals, {'evals': rows})
+    codex = options.get('codex', {})
+    if 'binary' in codex:
+        approved_binary = approved.get(name, {}).get('binary')
+        if not isinstance(approved_binary, dict):
+            raise ValueError('Explicit Codex binary requires owner approval; re-enable learning')
+        launch_path = stage_binary(approved_binary, Path(runtime_dir) / 'codex')
+        codex['binary'] = str(launch_path)
     repeats, timeout = settings.get('repeats', 3), settings.get('timeout', 180)
     if type(repeats) is not int or repeats < 1 or type(timeout) not in {int, float} or timeout <= 0:
         raise ValueError('Expected positive repeats and timeout')
@@ -448,9 +458,12 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
     started = time.monotonic()
     report = {'skill': name, 'source': str(source), 'before': version, 'evidence': [row['id'] for row in rows],
               'status': 'blocked', 'validations': {}}
+    runtime_dir = None
     try:
         from scripts.learning_promotion import promote, tree_modes, verify_code
         approved = require_model_approval(config)
+        if 'binary' in settings.get('harnesses', {}).get('codex', {}):
+            runtime_dir = tempfile.TemporaryDirectory(prefix='skillcraft-codex-', dir=config['state'])
 
         original = attempt / 'original' / name
         original.parent.mkdir()
@@ -463,8 +476,10 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
         if tree_modes(original) != source_modes or tree_modes(source) != source_modes:
             raise ValueError('The opted-in skill permissions changed while taking the snapshot')
         report['source_modes'] = source_modes
-        options, (train, holdout), evals, evals_hash, repeats, timeout, excluded, frozen_hashes = configured_runs(
-            config, name, settings, source, attempt, approved)
+        (options, (train, holdout), evals, evals_hash, repeats, timeout, excluded,
+         frozen_hashes) = configured_runs(
+            config, name, settings, source, attempt, approved,
+            runtime_dir.name if runtime_dir is not None else None)
         validation_hash = validation_fingerprint(config, settings, approved.get(name))
         frozen_rows = train + holdout
         if validation_fingerprint(config, settings, approved.get(name)) != validation_hash:
@@ -516,10 +531,13 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
         optimizer = next(iter(options))
         optimizer_settings = options[optimizer]
         optimizer_model = optimizer_settings.get('optimizer_model', optimizer_settings['model'])
-        runtime_overrides = {
-            env: optimizer_settings.get(key, os.environ.get(env))
-            for key, env in RUNNER_ENV[optimizer].items()
-        }
+        configured_optimizer = settings.get('harnesses', {}).get(optimizer, {})
+        runtime_overrides = {}
+        for key, env in RUNNER_ENV[optimizer].items():
+            if optimizer == 'codex' and key == 'binary' and key in configured_optimizer:
+                runtime_overrides[env] = approved.get(name, {}).get('binary')
+            else:
+                runtime_overrides[env] = optimizer_settings.get(key, os.environ.get(env))
         input_hash = fingerprint({
             'prompt': prompt, 'harness': optimizer, 'model': optimizer_model,
             'timeout': timeout, 'runtime_overrides': runtime_overrides,
@@ -630,6 +648,8 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
         report['reason'] = sanitize(str(error))
         return report
     finally:
+        if runtime_dir is not None:
+            runtime_dir.cleanup()
         report['seconds'] = round(time.monotonic() - started, 3)
         write_recovery_record(attempt / 'report.json', report)
 
@@ -699,10 +719,8 @@ def enqueue_changed_validation_retries(config, db):
         source = local_path(config['root'], settings['source'], directory=True)
         version = tree_hash(source)
         try:
-            approved = require_model_approval(config)
-            if not approval_still_current(config, approved):
-                continue
-            current_validation = validation_fingerprint(config, settings, approved.get(name))
+            approval = require_model_approval(config)
+            current_validation = validation_fingerprint(config, settings, approval.get(name))
         except (OSError, KeyError, TypeError, ValueError):
             continue
         revisions = db.execute(

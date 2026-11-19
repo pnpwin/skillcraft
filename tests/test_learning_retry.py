@@ -165,6 +165,99 @@ class LearningRetryTest(unittest.TestCase):
             learning_worker.work(self.config)
         self.assertEqual(model.call_count, 2)
 
+    def test_explicit_codex_binary_is_bound_and_staged_after_enable(self):
+        binary = self.project / 'fake-codex'
+        binary.write_bytes(b'\xcf\xfa\xed\xfe harmless approved executable')
+        binary.chmod(0o755)
+        self.configuration['skills']['demo']['harnesses']['codex']['binary'] = str(binary)
+        self.seed()
+        approved_bytes = binary.read_bytes()
+        calls = []
+
+        def inspect_snapshot(*args, **kwargs):
+            staged = Path(os.environ['SKILLCRAFT_CODEX'])
+            self.assertNotEqual(staged, binary)
+            self.assertEqual(staged.read_bytes(), approved_bytes)
+            calls.append(staged)
+            return {'status': 'timeout'}
+
+        with patch.object(learning_worker, 'run_model', side_effect=inspect_snapshot) as model:
+            learning_worker.work(self.config)
+            self.queue('same-binary-retry')
+            learning_worker.work(self.config)
+        model.assert_called_once()
+        self.assertEqual(len(calls), 1)
+
+    def test_same_path_binary_reapproval_changes_optimizer_retry_identity(self):
+        binary = self.project / 'fake-codex'
+        binary.write_bytes(b'\xcf\xfa\xed\xfe approved executable revision one')
+        binary.chmod(0o755)
+        self.configuration['skills']['demo']['harnesses']['codex']['binary'] = str(binary)
+        self.seed()
+        with patch.object(learning_worker, 'run_model', side_effect=self.timeout) as model:
+            learning_worker.work(self.config)
+            self.queue('same-path-binary-reapproval')
+            binary.write_bytes(b'\xcf\xfa\xed\xfe approved executable revision two')
+            self.enable()
+            learning_worker.work(self.config)
+        self.assertEqual(model.call_count, 2)
+        with learning.connection(self.config) as db:
+            fingerprints = [json.loads((Path(row['path']) / 'report.json').read_text())
+                            ['optimizer']['input_hash']
+                            for row in db.execute('SELECT path FROM revisions ORDER BY id')]
+        self.assertEqual(len(fingerprints), 2)
+        self.assertNotEqual(*fingerprints)
+
+    def test_replaced_explicit_codex_binary_stops_before_optimizer(self):
+        binary = self.project / 'fake-codex'
+        binary.write_bytes(b'\xcf\xfa\xed\xfe harmless approved executable')
+        binary.chmod(0o755)
+        self.configuration['skills']['demo']['harnesses']['codex']['binary'] = str(binary)
+        self.seed()
+        binary.write_bytes(b'replacement after owner enable')
+        with patch.object(learning_worker, 'run_model') as model:
+            learning_worker.work(self.config)
+        model.assert_not_called()
+
+    def test_explicit_binary_snapshot_is_used_for_ab_and_activation(self):
+        binary = self.project / 'fake-codex'
+        binary.write_bytes(b'\xcf\xfa\xed\xfe harmless approved executable')
+        binary.chmod(0o755)
+        self.configuration['skills']['demo']['harnesses']['codex']['binary'] = str(binary)
+        self.seed()
+        launched = []
+
+        def quality(*args, **kwargs):
+            path = Path(os.environ['SKILLCRAFT_CODEX'])
+            self.assertNotEqual(path, binary)
+            self.assertEqual(path.read_bytes(), b'\xcf\xfa\xed\xfe harmless approved executable')
+            launched.append(path)
+            return self.quality(*args, **kwargs)
+
+        with (patch.object(learning_worker, 'run_model', side_effect=self.proposal),
+              patch.object(learning_worker, 'run_quality', side_effect=quality)):
+            learning_worker.work(self.config)
+        self.assertEqual(len(launched), 1)
+        self.assertIn('Preserve the supplied date.', self.markdown.read_text())
+
+    def test_explicit_binary_change_during_ab_blocks_activation(self):
+        binary = self.project / 'fake-codex'
+        binary.write_bytes(b'\xcf\xfa\xed\xfe harmless approved executable')
+        binary.chmod(0o755)
+        self.configuration['skills']['demo']['harnesses']['codex']['binary'] = str(binary)
+        self.seed()
+        original = self.markdown.read_text()
+
+        def change_during_quality(*args, **kwargs):
+            result = self.quality(*args, **kwargs)
+            binary.write_bytes(b'changed after optimizer approval')
+            return result
+
+        with (patch.object(learning_worker, 'run_model', side_effect=self.proposal),
+              patch.object(learning_worker, 'run_quality', side_effect=change_during_quality)):
+            learning_worker.work(self.config)
+        self.assertEqual(self.markdown.read_text(), original)
+
     def test_final_report_write_failure_does_not_consume_evidence(self):
         self.seed()
         write_json_real = learning_worker.write_recovery_record

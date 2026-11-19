@@ -48,7 +48,16 @@ runner guides. The first configured runtime supplies the optimizer. Add an
 independent `judge_model` where deterministic checks do not cover the rubric.
 For background runs, set Codex's optional `codex_home` and `binary` paths
 or OpenCode's optional `server` URL in the corresponding runtime settings.
-Keep credentials in the authorized runtime profile or process environment.
+If `codex.binary` is configured, enable records its executable identity and
+content. The worker snapshots those approved bytes into a private temporary
+directory and launches that copy. Run `enable` again after updating the
+configured executable or app bundle. SkillCraft supports native executables
+and Codex packages with a `codex-package.json` manifest using layout version 1.
+The snapshot keeps the packaged executable, helpers, and resources together.
+For an unrecognized launcher, configure the path to the native executable.
+Leave `binary` unset to use the owner process's `SKILLCRAFT_CODEX` or normal
+`PATH` discovery. Keep credentials in the authorized runtime profile or
+process environment.
 
 Approve the exact local configuration to start collecting. Enabling also
 records the train/holdout dataset bytes and each in-project fixture identity

@@ -191,32 +191,34 @@ def dataset_snapshot(path):
 
 def approval_inputs(config):
     """Hash approved datasets and in-project fixtures only on explicit enable."""
+    from scripts.approved_binary import describe
     from scripts.inputs import input_specs
     root = config['root'].resolve()
     result = {}
     for name, settings in config['skills'].items():
-        if not all(key in settings for key in ('train', 'holdout')):
-            continue
         approved = {'datasets': {}, 'fixtures': []}
-        source = local_path(root, settings['source'], directory=True)
-        for split in ('train', 'holdout'):
-            path = local_path(root, settings[split])
-            raw, rows = dataset_snapshot(path)
-            approved['datasets'][split] = {
-                'path': path.relative_to(root).as_posix(), 'sha256': sha256(raw).hexdigest(),
-            }
-            for row in rows:
-                _reject_out_of_project_fixtures(row.get('files', []), source, root)
-                for fixture in input_specs(row.get('files', []), source):
-                    fixture_path = Path(fixture['source']).resolve(strict=True)
-                    if not fixture_path.is_relative_to(root):
-                        raise ValueError(f'Fixture source must be inside the approved project: {fixture_path}')
-                    approved['fixtures'].append({
-                        'split': split, 'case_id': row['id'], 'destination': fixture['destination'],
-                        'path': fixture_path.relative_to(root).as_posix(), 'sha256': digest(fixture_path),
-                    })
+        if all(key in settings for key in ('train', 'holdout')):
+            source = local_path(root, settings['source'], directory=True)
+            for split in ('train', 'holdout'):
+                path = local_path(root, settings[split])
+                raw, rows = dataset_snapshot(path)
+                approved['datasets'][split] = {
+                    'path': path.relative_to(root).as_posix(), 'sha256': sha256(raw).hexdigest(),
+                }
+                for row in rows:
+                    _reject_out_of_project_fixtures(row.get('files', []), source, root)
+                    for fixture in input_specs(row.get('files', []), source):
+                        fixture_path = Path(fixture['source']).resolve(strict=True)
+                        approved['fixtures'].append({
+                            'split': split, 'case_id': row['id'], 'destination': fixture['destination'],
+                            'path': fixture_path.relative_to(root).as_posix(), 'sha256': digest(fixture_path),
+                        })
         approved['fixtures'].sort(key=lambda x: (x['split'], x['case_id'], x['destination'], x['path']))
-        result[name] = approved
+        codex = settings.get('harnesses', {}).get('codex', {})
+        if 'binary' in codex:
+            approved['binary'] = describe(codex['binary'])
+        if approved['datasets'] or 'binary' in approved:
+            result[name] = approved
     return result
 
 
@@ -240,21 +242,38 @@ def require_model_approval(config):
     if not isinstance(approval, dict):
         raise ValueError('Model learning requires re-enable with approved train, holdout, and fixtures')
     for name, settings in config['skills'].items():
-        if all(key in settings for key in ('train', 'holdout')) and name not in approval:
+        stored = approval.get(name)
+        needs_datasets = all(key in settings for key in ('train', 'holdout'))
+        needs_binary = 'binary' in settings.get('harnesses', {}).get('codex', {})
+        if ((needs_datasets and (not isinstance(stored, dict)
+                                 or set(stored.get('datasets', {})) != {'train', 'holdout'}))
+                or (needs_binary and (not isinstance(stored, dict) or not stored.get('binary')))):
             raise ValueError('Model learning requires re-enable with approved train, holdout, and fixtures')
     return approval
 
 
 def approval_still_current(config, approval):
     """Check only identities the owner approved; never hash newly referenced fixtures."""
+    from scripts.approved_binary import describe
     from scripts.inputs import input_specs
     root = config['root'].resolve()
     for name, settings in config['skills'].items():
-        if not all(key in settings for key in ('train', 'holdout')):
+        codex = settings.get('harnesses', {}).get('codex', {})
+        needs_binary = 'binary' in codex
+        needs_datasets = all(key in settings for key in ('train', 'holdout'))
+        if not needs_binary and not needs_datasets:
             continue
         expected = approval.get(name)
         if not isinstance(expected, dict):
             return False
+        if needs_binary:
+            try:
+                if describe(codex['binary']) != expected.get('binary'):
+                    return False
+            except (OSError, TypeError, ValueError):
+                return False
+        if not all(key in settings for key in ('train', 'holdout')):
+            continue
         source = local_path(root, settings['source'], directory=True)
         fixtures = {(item['split'], item['case_id'], item['destination']): item
                     for item in expected.get('fixtures', [])}
