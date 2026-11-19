@@ -86,12 +86,13 @@ signal with an unknown skill or version stays diagnostic. Repeated A/B
 samples from one case or one explicit paraphrase group count as one source
 of evidence.
 
-Codex uses `UserPromptSubmit` and `Stop`. A supported local rollout can prove
-a completed read of the whole `SKILL.md` in that turn. Its bytes and the
-package fingerprint must match the source observed at both hooks. Missing
-rollouts, unsupported records, partial reads, and changed files leave the
-turn unbound. OpenCode follows execution and inbox events, then verifies
-the skill body in persisted attachments or successful native skill tool
+Codex uses `UserPromptSubmit` and `Stop`. A supported local rollout can bind
+a successful command in that turn when it identifies the enrolled `SKILL.md`
+and returns its exact bytes. This also covers command wrappers that preserve
+the path and complete output. The package fingerprint must match the source
+observed at both hooks. Missing rollouts, unsupported records, partial reads,
+and changed files leave the turn unbound. OpenCode follows execution and inbox
+events, then verifies the skill body in persisted attachments or successful native skill tool
 results against the enrolled version observed at the start of the turn.
 
 The worker uses three independent observations or one correction backed by

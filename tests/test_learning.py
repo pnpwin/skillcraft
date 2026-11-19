@@ -247,6 +247,31 @@ class LearningTest(unittest.TestCase):
         path.write_text(json.dumps(record) + '\n')
         self.assertEqual(codex_capture.confirmed_reads(str(path), 'native-session', 'native-turn', versions), [])
 
+    def test_codex_rollout_binds_wrapped_output_by_exact_path_and_bytes(self):
+        rollout = self.project / 'rollout.jsonl'
+        versions = learning.source_inventory(self.config)
+        contents = self.markdown.read_text()
+        relative = self.markdown.relative_to(self.project)
+        for parsed, args, output, expected in (
+            ([{'type': 'unknown', 'cmd': f"rtk read '{relative}'"}], [], contents, versions),
+            ([{'type': 'unknown', 'cmd': f"custom-wrapper show './{relative}'"}], [], contents, versions),
+            ([], ['wrapper', 'show', str(self.markdown)], contents, versions),
+            ([{'type': 'unknown', 'cmd': f"wrapper show '{relative}'"}], [], contents.rstrip(), []),
+            ([{'type': 'unknown', 'cmd': f"wrapper other/SKILL.md # {relative}"}], [], contents, []),
+            ([{'type': 'read', 'path': 'other/SKILL.md'}], ['wrapper', str(relative)], contents, []),
+        ):
+            with self.subTest(parsed=parsed, args=args, output_length=len(output)):
+                record = {'type': 'event_msg', 'payload': {
+                    'type': 'item_completed', 'thread_id': 'native-session', 'turn_id': 'native-turn',
+                    'item': {'type': 'CommandExecution', 'status': 'completed', 'exit_code': 0,
+                             'cwd': self.project.as_uri(), 'aggregated_output': output,
+                             'command': args, 'parsed_cmd': parsed},
+                }}
+                rollout.write_text(json.dumps(record) + '\n')
+                self.assertEqual(
+                    codex_capture.confirmed_reads(str(rollout), 'native-session', 'native-turn', versions), expected,
+                )
+
     def fake_eval(self):
         workspace = self.project / 'iteration'
         snapshot = learning.snapshot_hash(self.source)
