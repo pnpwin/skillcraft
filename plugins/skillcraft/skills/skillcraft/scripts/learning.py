@@ -104,7 +104,7 @@ def local_path(root, value, *, directory=False):
     return path
 
 
-def config_for(project, *, enrolling=False, trusted_internal=False):
+def config_for(project, *, enrolling=False, trusted_internal=False, hermes_home=None):
     if os.environ.get(INTERNAL) == '1' and not trusted_internal:
         return None
     path = Path(project).resolve()
@@ -151,7 +151,9 @@ def config_for(project, *, enrolling=False, trusted_internal=False):
                 raise ValueError(f'Invalid source for {name}')
             if source == Path(__file__).resolve().parents[1]:
                 raise ValueError('The running SkillCraft installation cannot be its own update target')
-        state = Path.home() / '.local/share/skillcraft/learning' / sha256(str(root).encode()).hexdigest()
+        state_root = (hermes_home / 'skillcraft/learning' if hermes_home is not None
+                      else Path.home() / '.local/share/skillcraft/learning')
+        state = state_root / sha256(str(root).encode()).hexdigest()
         marker = state / 'enabled'
         approval = None
         if not enrolling:
@@ -355,7 +357,7 @@ def binding(config, loaded):
     return bindings
 
 
-def source_inventory(config):
+def source_inventory(config, *, hermes=False):
     versions = []
     if 'sessions' not in config['sources']:
         return versions
@@ -363,7 +365,14 @@ def source_inventory(config):
         try:
             source = local_path(config['root'], settings['source'], directory=True)
             markdown = source / 'SKILL.md'
-            versions.append({'path': str(markdown), 'hash': digest(markdown), 'snapshot_hash': tree_hash(source)})
+            content = markdown.read_bytes()
+            version = {'path': str(markdown), 'hash': sha256(content).hexdigest(),
+                       'snapshot_hash': tree_hash(source)}
+            if hermes:
+                # Hermes decodes SKILL.md with utf-8-sig and universal newlines.
+                decoded = content.decode('utf-8-sig').replace('\r\n', '\n').replace('\r', '\n')
+                version['content_hash'] = sha256(decoded.encode()).hexdigest()
+            versions.append(version)
         except (OSError, ValueError):
             # A source being edited can still be observed as an unbound turn.
             continue
@@ -380,11 +389,13 @@ def record(db, witness, skill, version, origin, harness, session, turn, independ
     ).rowcount != 0
 
 
-def observe(project, harness, session, turn, role, text, loaded, *, target_turn=None, diagnostic=None):
-    config = config_for(project)
+def observe(project, harness, session, turn, role, text, loaded, *, target_turn=None,
+            diagnostic=None, hermes_home=None):
+    config = config_for(project, hermes_home=hermes_home)
     if not config or 'sessions' not in config['sources']:
         return False
-    if harness not in {'codex', 'opencode'} or role not in {'user', 'assistant'}:
+    allowed = {'hermes'} if hermes_home is not None else {'codex', 'opencode'}
+    if harness not in allowed or role not in {'user', 'assistant'}:
         raise ValueError('Invalid message origin')
     if not all(isinstance(x, str) and x for x in (session, turn)) or not isinstance(text, str):
         raise ValueError('Messages need durable session and turn identities')
@@ -438,11 +449,12 @@ def observe(project, harness, session, turn, role, text, loaded, *, target_turn=
                     record(db, witness, name, version, 'session', harness, session, prior['turn'],
                            prior_case['independent'] if prior_case else family,
                            case_id, kind, note, bool(reproducible))
-        if inserted:
+        if inserted and hermes_home is None:
             count = db.execute('SELECT COUNT(*) FROM messages').fetchone()[0]
             if count % MESSAGE_INTERVAL == 0:
                 queue(db, f'messages:{count}')
-        pending = db.execute('SELECT 1 FROM checkpoints WHERE status != \'done\' LIMIT 1').fetchone()
+        pending = hermes_home is None and db.execute(
+            "SELECT 1 FROM checkpoints WHERE status != 'done' LIMIT 1").fetchone()
     if pending:
         wake(config)
     return bool(inserted)
@@ -602,6 +614,7 @@ def notify_feedback(workspace, feedback_path, *, project=None, selection=None):
 
 def main(argv=None):
     cli = argparse.ArgumentParser(description=__doc__)
+    cli.add_argument('--hermes-home', type=Path, help=argparse.SUPPRESS)
     sub = cli.add_subparsers(dest='command', required=True)
     sub.add_parser('observe', help='Read one native message envelope from stdin')
     for verb in ('enable', 'work', 'status', 'rollback', 'inventory'):
@@ -620,8 +633,14 @@ def main(argv=None):
     ingest.add_argument('--selection', type=Path, help='Grading selection used for the reviewed report')
     args = cli.parse_args(argv)
     try:
+        home = args.hermes_home
+        if home is not None:
+            if not home.is_absolute() or args.command not in {'enable', 'inventory', 'observe', 'status'}:
+                raise ValueError('Hermes supports journal collection only and requires an absolute profile path')
         if args.command == 'observe':
-            observe(**json.load(sys.stdin))
+            inserted = observe(**json.load(sys.stdin), hermes_home=home)
+            if home is not None:
+                print(json.dumps({'inserted': inserted}))
             return 0
         if args.command == 'ingest':
             if args.selection and not args.feedback:
@@ -630,23 +649,27 @@ def main(argv=None):
                        else notify_eval(args.workspace, project=args.project))
             print(json.dumps({'new_evidence': changed}))
             return 0
-        config = config_for(args.project, enrolling=args.command == 'enable')
+        config = config_for(args.project, enrolling=args.command == 'enable', hermes_home=home)
         if not config:
             raise ValueError('Project learning is not enabled')
+        if home is not None and 'sessions' not in config['sources']:
+            raise ValueError('Hermes requires sessions in the learning sources')
         if args.command == 'enable':
             if args.project.resolve() != config['root']:
                 raise ValueError('Enable learning from the project root')
             config['state'].mkdir(parents=True, exist_ok=True, mode=0o700)
             from tempfile import NamedTemporaryFile
             with NamedTemporaryFile('w', encoding='utf-8', dir=config['state'], delete=False) as marker:
-                json.dump(approval_record(config), marker, ensure_ascii=False)
+                approval = (approval_record(config) if home is None
+                            else {'config_sha256': config['fingerprint']})
+                json.dump(approval, marker, ensure_ascii=False)
                 marker.write('\n')
                 marker.flush()
                 os.fsync(marker.fileno())
             Path(marker.name).replace(config['state'] / 'enabled')
             print(json.dumps({'enabled': str(config['root']), 'journal': str(config['state'])}))
         elif args.command == 'inventory':
-            print(json.dumps(source_inventory(config), ensure_ascii=False))
+            print(json.dumps(source_inventory(config, hermes=home is not None), ensure_ascii=False))
         elif args.command == 'work':
             from scripts.learning_worker import work
             if args.retry_blocked:
