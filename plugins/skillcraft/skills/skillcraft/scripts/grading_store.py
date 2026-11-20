@@ -35,6 +35,13 @@ def execution_identity(run_dir):
             'files': hashes, 'sha256': value_hash(hashes)}
 
 
+def matches_execution(recorded, current, *, portable=False):
+    if portable and isinstance(recorded, dict):
+        # An inline Hermes grading travels with the evidence it graded.
+        current = {**current, 'source_root': recorded.get('source_root')}
+    return recorded == current
+
+
 def task_fields(row):
     return {'prompt': row.get('prompt'), 'files': row.get('files', []), 'expected_output': row.get('expected_output'),
             'preparation': row.get('preparation', [])}
@@ -72,7 +79,9 @@ def reserve_attempt(run_dir, row, output, judge_model, judge_profile):
             path = root / name
             if not path.resolve().is_relative_to(root) or digest(path) != expected:
                 raise ValueError('Recorded execution evidence changed; cannot regrade')
-        if (root / 'grading-manifest.json').exists() and read_json(root / 'grading-manifest.json')['execution'] != identity:
+        original_manifest = root / 'grading-manifest.json'
+        if original_manifest.exists() and not matches_execution(read_json(original_manifest)['execution'], identity,
+                                                                portable=execution.get('harness') == 'hermes'):
             raise ValueError('Execution changed since its original grading; cannot regrade')
     if output:
         destination.mkdir(parents=True, exist_ok=False)
@@ -109,7 +118,8 @@ def read_grading(run_dir, attempt=None, *, allow_incomplete=False):
     if destination != root and manifest is None:
         raise ValueError('Selected grading attempt has no provenance manifest')
     if manifest:
-        if manifest['execution'] != execution_identity(root):
+        portable = destination == root and read_json(root / 'run.json').get('harness') == 'hermes'
+        if not matches_execution(manifest['execution'], execution_identity(root), portable=portable):
             raise ValueError('Selected grading belongs to changed/different execution evidence')
         if manifest.get('status') == 'in_progress':
             if allow_incomplete:
