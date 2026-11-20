@@ -1,8 +1,11 @@
 from pathlib import Path
+import os
+import stat
 import subprocess
 import shutil
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 import tests
@@ -18,7 +21,7 @@ class HermesRunnerTest(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.root = Path(directory.name)
+        self.root = Path(directory.name).resolve()
         self.profile = self.root / 'profile'
         self.request = {'run_id': 'run', 'model': model_ref('openai-codex:example', 'hermes')}
         self.base = {'run_id': 'run', 'session_id': 'native-session', 'turn_id': 'native-turn',
@@ -171,10 +174,71 @@ class HermesRunnerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'changed/different execution evidence'):
             read_grading(folder)
 
+    def test_private_run_rejects_unsafe_and_symlink_ancestors(self):
+        unsafe = self.root / 'shared'
+        unsafe.mkdir()
+        unsafe.chmod(0o777)
+        with self.assertRaisesRegex(ValueError, 'Unsafe Hermes directory'):
+            hermes_runner.create_run_directory(unsafe / 'nested')
+        self.assertFalse((unsafe / 'nested').exists())
+
+        alias = self.root / 'alias'
+        alias.symlink_to(self.root, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'Unsafe Hermes directory'):
+            hermes_runner.create_run_directory(alias / 'nested')
+        foreign = self.root / 'foreign'
+        foreign.mkdir()
+        lstat = Path.lstat
+
+        def foreign_owner(path):
+            info = lstat(path)
+            if path == foreign:
+                return SimpleNamespace(st_mode=info.st_mode, st_uid=os.geteuid() + 1)
+            return info
+
+        from unittest.mock import patch
+        with patch.object(Path, 'lstat', foreign_owner):
+            with self.assertRaisesRegex(ValueError, 'Unsafe Hermes directory'):
+                hermes_runner.create_run_directory(foreign / 'nested')
+        self.assertFalse((foreign / 'nested').exists())
+
+        shared = self.root / 'sticky'
+        shared.mkdir()
+        shared.chmod(0o1777)
+        run = hermes_runner.create_run_directory(shared)
+        for folder in (run, run.parent):
+            self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700)
+            self.assertEqual(folder.stat().st_uid, os.geteuid())
+        self.assertEqual(run.parent.parent, shared)
+
+    def test_profile_auth_is_private_before_atomic_publish(self):
+        from unittest.mock import patch
+        home = self.profile
+        home.mkdir(mode=0o700)
+        unrelated = self.root / 'unrelated'
+        unrelated.write_text('unrelated')
+        destination = home / 'auth.json'
+        destination.symlink_to(unrelated)
+        replace = os.replace
+
+        def check_mode(source, target):
+            self.assertEqual(Path(source).parent, home)
+            self.assertEqual(stat.S_IMODE(Path(source).stat().st_mode), 0o600)
+            self.assertTrue(destination.is_symlink())
+            replace(source, target)
+
+        with patch.object(os, 'replace', side_effect=check_mode) as publish:
+            hermes_runner.write_profile_auth(home, {'test': 'synthetic'})
+        publish.assert_called_once()
+        self.assertEqual(unrelated.read_text(), 'unrelated')
+        self.assertFalse(destination.is_symlink())
+        self.assertEqual(read_json(destination), {'test': 'synthetic'})
+        self.assertEqual(list(home.iterdir()), [destination])
+
     def test_profile_copies_only_selected_model_settings_and_auth(self):
         source = self.root / 'source'
         source.mkdir()
-        self.profile.mkdir()
+        self.profile.mkdir(mode=0o700)
         write_json(source / 'config.yaml', {'agent': {'reasoning_effort': 'medium', 'max_turns': 100},
                                             'plugins': {'enabled': ['other']}})
         write_json(source / 'auth.json', {'version': 1, 'providers': {

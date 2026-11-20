@@ -24,6 +24,54 @@ def read_lines(path):
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+def secure_directory(path, *, create=False):
+    """Validate each ancestor in order before entering or creating its child."""
+    directory = Path(os.path.abspath(path))
+    owners = {0, os.geteuid()}
+    for current in (*reversed(directory.parents), directory):
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            if not create:
+                raise
+            current.mkdir(mode=0o700, exist_ok=True)
+            info = current.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in owners
+                or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX)):
+            raise ValueError(f'Unsafe Hermes directory: {current}')
+    return directory
+
+
+def require_private(path):
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise ValueError(f'Hermes requires an owner-only directory: {path}')
+
+
+def create_run_directory(override):
+    default = '/private/tmp' if sys.platform == 'darwin' else tempfile.gettempdir()
+    parent = secure_directory(override if override is not None else default, create=override is not None)
+    root = Path(tempfile.mkdtemp(prefix='skillcraft-hermes-', dir=parent))
+    require_private(root)
+    directory = Path(tempfile.mkdtemp(prefix='skill-eval-', dir=root))
+    require_private(directory)
+    return directory
+
+
+def write_profile_auth(home, auth):
+    home = secure_directory(home)
+    require_private(home)
+    # mkstemp uses exclusive creation, O_NOFOLLOW where supported, and mode 0600.
+    fd, name = tempfile.mkstemp(prefix='.auth-', dir=home)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as output:
+            os.fchmod(output.fileno(), 0o600)
+            json.dump(auth, output)
+        os.replace(name, home / 'auth.json')
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
 def regular_artifacts(root):
     root = Path(root)
     entries = {}
@@ -154,8 +202,7 @@ def provider_config(source, home, provider):
                 if isinstance((value := auth.get(key)), dict) and provider in value}
         if not data:
             raise ValueError('The selected Hermes profile has no ChatGPT sign-in')
-        write_json(home / 'auth.json', {'version': auth.get('version', 1), **data, 'active_provider': provider})
-        (home / 'auth.json').chmod(0o600)
+        write_profile_auth(home, {'version': auth.get('version', 1), **data, 'active_provider': provider})
         # Hermes refreshes rotating OAuth credentials. Each run reads from the source
         # profile and keeps any updates in its disposable copy.
         return [], settings
@@ -247,6 +294,9 @@ def run(request):
     started = time.monotonic()
     if platform.system() != 'Darwin' or not Path(worker.SANDBOX).is_file():
         raise ValueError('Hermes bounded-file evaluation needs macOS /usr/bin/sandbox-exec')
+    secure_directory(directory)
+    require_private(directory.parent)
+    require_private(directory)
     launcher = binary()
     block = worker.sha(worker.native_block(request).encode()) if request.get('skill_path') else None
     write_json(output / 'request.json', {**request, 'preload_block_sha256': block})
