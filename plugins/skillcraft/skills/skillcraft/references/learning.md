@@ -91,8 +91,8 @@ hermes skillcraft status "$PWD"
 ```
 
 Open a local chat in the project and ask Hermes to use `skill_view` to read the
-enrolled skill. After checking the answer, confirm or correct it in the next
-message. Hermes records evidence when the successful tool result identifies the
+enrolled skill. After checking the answer, reply `I verified it works.` or
+provide a correction in the next message. Hermes records evidence when the successful tool result identifies the
 enrolled `SKILL.md` with its complete contents and the version matches through
 the final reply. Use a fresh chat to verify a read if Hermes has already cached
 the tool result. A reference-page read or an unchanged-result stub is

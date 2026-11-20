@@ -1,0 +1,16 @@
+{
+  "evals": [
+    {
+      "id": "meeting-csv",
+      "prompt": "Read inputs/notes.md with the file tool. Create outputs/actions.csv with the CSV header owner,action,due. Include only assigned action items, in note order, with the original values. If the session preloaded a skill with a bundled CSV converter for this task, run that converter using the terminal to create the file. Confirm where you saved it.",
+      "files": [{"source": "evals/notes.md", "destination": "notes.md"}],
+      "expectations": ["The CSV matches the two assigned actions"],
+      "checks": [{
+        "text": "The CSV matches the two assigned actions",
+        "type": "equals",
+        "file": "actions.csv",
+        "value": "owner,action,due\nIra,Review release notes,Friday\nSam,Schedule handoff,Monday"
+      }]
+    }
+  ]
+}

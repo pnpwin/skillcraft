@@ -1229,7 +1229,7 @@
       if (data.schema_version === 1) {
         const fmt = s => !s || s.mean == null ? 'unknown' : s.mean.toFixed(3) + (s.stddev == null ? '' : ' ± ' + s.stddev.toFixed(3)) + ' (n=' + s.n + ')';
         const metadata = data.metadata || {};
-        const harness = metadata.harness === 'codex' ? 'Codex' : 'OpenCode';
+        const harness = ({ codex: 'Codex', hermes: 'Hermes', opencode: 'OpenCode' })[metadata.harness] || 'OpenCode';
         const version = metadata.runtime?.[metadata.harness];
         let html = '<h2>' + harness + (version ? ' ' + escapeHtml(version) : '') + ' benchmark</h2>';
         if (metadata.requested_harness === 'chatgpt') html += '<p>Local Codex evaluation selected with --harness chatgpt.</p>';

@@ -18,6 +18,8 @@ from scripts.reporting import print_report
 def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previous=None, timeout=180, profile=None, judge_model=None, judge_profile=None, historical_baseline=None, pilot_ids=None, stop_threshold=2, harness='opencode'):
     skill, workspace = Path(skill).resolve(), Path(workspace).resolve()
     model_ref(model, harness)
+    if harness == 'hermes' and (judge_model or judge_profile):
+        raise ValueError('Hermes file evaluation uses deterministic graders')
     if judge_model:
         model_ref(judge_model, harness)
     if repeats < 1 or workers < 1 or stop_threshold < 1:
@@ -85,6 +87,9 @@ def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previou
                                preparation=row.get('preparation'), harness=harness)
             write_json(target / 'eval_metadata.json', {'eval_id': row['id'], **row, 'configuration': config,
                        'snapshot_hash': manifest['configurations'][config]['snapshot_hash']})
+            if harness == 'hermes' and result['status'] != 'completed':
+                return {'complete': False, 'run': result, 'stage': 'executor',
+                        'status': result['status'], 'error': result.get('error')}
             stage = 'grading'
             from scripts.grade import grade_run
             grade = grade_run(target, row, judge_model=judge_model, timeout=timeout, judge_profile=judge_profile, harness=harness)
@@ -156,7 +161,7 @@ def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previou
     report = aggregate(workspace)
     report['compliance'] = manifest['compliance']
     write_json(workspace / 'benchmark.json', report)
-    if not manifest['learning_internal']:
+    if not manifest['learning_internal'] and runtime != 'hermes':
         try:
             from scripts.learning import notify_eval
             notify_eval(workspace)

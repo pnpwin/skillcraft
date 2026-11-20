@@ -63,8 +63,14 @@ class HermesLearningTest(unittest.TestCase):
 
     def finish(self, turn):
         text = 'Minutes recorded.'
+        reply = {'role': 'assistant', 'content': text, 'message_uid': f'reply-{turn}'}
         self.emit('post_llm_call', turn, assistant_response=text,
-                  conversation_history=[{'role': 'assistant', 'content': text}])
+                  conversation_history=[reply])
+        return reply
+
+    def feedback(self, turn, prior):
+        text = 'I verified it works.'
+        self.start(turn, text, conversation_history=[prior, {'role': 'user', 'content': text}])
 
     def test_registered_skill_and_confirmed_success_are_deduplicated(self):
         name, path = self.context.register_skill.call_args.args
@@ -163,11 +169,13 @@ class HermesLearningTest(unittest.TestCase):
     def test_many_hermes_observations_only_use_the_profile_journal(self):
         self.command('enable')
         cfg = learning.config_for(self.project, hermes_home=self.home)
-        versions = learning.source_inventory(cfg)
-        for i in range(10):
-            for role, text in [('user', 'Подтверждаю: всё правильно.'), ('assistant', 'Minutes recorded.')]:
-                learning.observe(self.project, 'hermes', 's', str(i), role, text, versions,
-                                 target_turn=str(i - 1), hermes_home=self.home)
+        self.start('0')
+        self.view('0')
+        reply = self.finish('0')
+        for i in range(1, 10):
+            self.feedback(str(i), reply)
+            self.view(str(i))
+            reply = self.finish(str(i))
         status = self.command('status')
         self.assertEqual(status['messages'], 20)
         self.assertEqual(status['evidence'], {'success': 9})
@@ -176,3 +184,25 @@ class HermesLearningTest(unittest.TestCase):
         self.assertFalse((cfg['state'] / 'worker.lock').exists())
         other = learning.config_for(self.project, enrolling=True)
         self.assertFalse(other['state'].exists())
+
+    def test_restart_recovers_verified_reply_across_project_subdirectories(self):
+        self.command('enable')
+        self.start('one')
+        self.view('one')
+        reply = self.finish('one')
+        self.hooks['pre_llm_call'].__self__.sessions.clear()
+        self.context.session_cwd.return_value = str(self.source.parent)
+        self.feedback('two', reply)
+        self.feedback('two', reply)
+        self.assertEqual(self.command('status')['evidence'], {'success': 1})
+
+    def test_restart_cannot_skip_interrupted_turn_or_guess_missing_native_id(self):
+        self.command('enable')
+        self.start('one')
+        self.view('one')
+        reply = self.finish('one')
+        self.hooks['pre_llm_call'].__self__.sessions.clear()
+        self.feedback('two', {'role': 'assistant', 'content': reply['content']})
+        self.hooks['pre_llm_call'].__self__.sessions.clear()
+        self.feedback('three', reply)
+        self.assertEqual(self.command('status')['evidence'], {})

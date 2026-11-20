@@ -36,6 +36,25 @@ def run_learning(home, verb, *args, payload=None):
     return json.loads(result.stdout)
 
 
+def final_reply(message):
+    return (isinstance(message, dict) and message.get('role') == 'assistant'
+            and not message.get('tool_calls') and message.get('phase') != 'commentary')
+
+
+def prior_reply_uid(history, prompt):
+    if not history or not isinstance(history[-1], dict):
+        return None
+    last = history[-1]
+    if last.get('role') == 'user':
+        if last.get('content') != prompt or len(history) < 2:
+            return None
+        last = history[-2]
+    if final_reply(last):
+        uid = last.get('message_uid')
+        return uid if isinstance(uid, str) and uid else None
+    return None
+
+
 @dataclass
 class Turn:
     id: str
@@ -60,15 +79,15 @@ class Learning:
             return None
         return (self.get_home().resolve(), session_id)
 
-    def record(self, key, turn_id, project, role, text, *, loaded=(), target=None):
+    def record(self, key, turn_id, project, role, text, *, loaded=(), target=None, uid=None):
         return run_learning(key[0], 'observe', payload={
             'harness': 'hermes', 'session': key[1], 'turn': turn_id,
             'project': str(project), 'role': role, 'text': text,
-            'target_turn': target, 'loaded': list(loaded),
+            'target_turn': target, 'loaded': list(loaded), 'hermes_uid': uid,
         })['inserted']
 
     def start(self, *, session_id=None, turn_id=None, user_message=None,
-              parent_session_id=None, **kwargs):
+              parent_session_id=None, conversation_history=None, **kwargs):
         key = self.key(session_id, turn_id)
         if not key or parent_session_id:
             return
@@ -86,15 +105,18 @@ class Learning:
                 self.sessions.pop(key, None)
                 return
             try:
-                versions = run_learning(key[0], 'inventory', str(project))
-                target = prior.id if prior and prior.finished and prior.project == project else None
-                if not self.record(key, turn_id, project, 'user', user_message, target=target):
+                enrollment = run_learning(key[0], 'inventory', str(project))
+                project = Path(enrollment['root'])
+                uid = prior_reply_uid(conversation_history, user_message)
+                target = (prior.id if conversation_history is None and prior and prior.finished
+                          and prior.project == project else None)
+                if not self.record(key, turn_id, project, 'user', user_message, target=target, uid=uid):
                     return
             except (OSError, RuntimeError, ValueError, KeyError):
                 self.sessions.pop(key, None)
                 LOG.debug('Could not record the Hermes prompt in SkillCraft', exc_info=True)
                 return
-            self.sessions[key] = Turn(turn_id, project, {v['path']: v for v in versions})
+            self.sessions[key] = Turn(turn_id, project, {v['path']: v for v in enrollment['versions']})
             self.sessions.move_to_end(key)
             if len(self.sessions) > MAX_SESSIONS:
                 self.sessions.popitem(last=False)
@@ -133,15 +155,16 @@ class Learning:
         if not conversation_history:
             return
         last = conversation_history[-1]
-        if (not isinstance(last, dict) or last.get('role') != 'assistant' or last.get('tool_calls')
-                or last.get('phase') == 'commentary' or last.get('content') != assistant_response):
+        if not final_reply(last) or last.get('content') != assistant_response:
             return
         with self.lock:
             turn = self.sessions.get(key)
             if not turn or turn.id != turn_id or turn.finished:
                 return
             try:
+                uid = last.get('message_uid')
                 turn.finished = self.record(key, turn.id, turn.project, 'assistant', assistant_response,
-                                            loaded=turn.loaded.values())
+                                            loaded=turn.loaded.values(),
+                                            uid=uid if isinstance(uid, str) and uid else None)
             except (OSError, RuntimeError, ValueError, KeyError):
                 LOG.debug('Could not record the Hermes reply in SkillCraft', exc_info=True)

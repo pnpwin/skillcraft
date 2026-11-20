@@ -35,6 +35,12 @@ def aggregate(workspace, *, selection=None, output=None):
         for p in sorted(workspace.glob(f'eval-*/{configuration}/run-*/run.json')):
             run = read_json(p)
             parent = p.parent
+            if run.get('harness') == 'hermes' and run.get('status') == 'completed':
+                from scripts.hermes_runner import verify_saved_run
+                try:
+                    verify_saved_run(parent, run)
+                except (OSError, ValueError, KeyError, TypeError) as error:
+                    run.update(status='artifact_error', error=str(error))
             key = parent.relative_to(workspace).as_posix()
             spec = selected['runs'][key] if selected else {'selected': 'legacy', 'history': []}
             grading, grading_root, provenance = read_grading(parent, spec['selected'], allow_incomplete=selected is None)
@@ -68,7 +74,7 @@ def aggregate(workspace, *, selection=None, output=None):
                     'judge_attempts': len(seen_attempts),
                     'all_judge_tokens': sum(attempt_usage) if attempt_usage and all(x is not None for x in attempt_usage) else None,
                     'all_judge_cost': sum(attempt_cost) if attempt_cost and all(x is not None for x in attempt_cost) else None,
-                   'model': run.get('model'), 'agent': run.get('agent'), 'fixtures': run.get('fixtures'),
+                   'model': run.get('model'), 'response_models': run.get('response_models'), 'agent': run.get('agent'), 'fixtures': run.get('fixtures'),
                    'critique_status': critique.get('status', 'not_run'),
                     'status': run['status'], 'grading_status': grading.get('status', 'missing'),
                     'error': run.get('error'), 'grading_error': grading.get('error'), 'failure_stage': grading.get('failure_stage'),

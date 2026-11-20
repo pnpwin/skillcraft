@@ -21,6 +21,7 @@ HARNESS_RUNNER_FILES = {
     'opencode': [f'scripts/opencode-runner/{path}' for path in (
         'src/main.ts', 'src/connection.ts', 'src/events.ts', 'package-lock.json')],
     'codex': ['scripts/codex_runner.py'],
+    'hermes': ['scripts/hermes_runner.py', 'scripts/hermes_worker.py'],
 }
 
 
@@ -98,6 +99,8 @@ def checked_run(path, skill, *, probe=False, harness=None):
     if run['runner_hash'] != runner_hash(selected):
         return result('FAIL', 'runner_changed', 'Runner contract changed; rerun compatibility'), run
     required = {'request.json', 'profile.json', 'profile-source.json', 'messages.json', 'response.txt', 'environment.json'}
+    if selected == 'hermes':
+        required.update({'hermes-proof.json', 'hermes-requests.json', 'events.jsonl'})
     if not required.issubset(run['evidence_hashes']):
         return result('ERROR', 'incomplete_evidence', 'Required execution evidence is missing'), run
     for name in required:
@@ -148,6 +151,12 @@ def checked_run(path, skill, *, probe=False, harness=None):
             if not any(m.get('type') == 'user' and m.get('id') == run.get('prompt_id')
                        and any(s.get('id') == request['skill_id'] for s in m.get('skills', [])) for m in messages):
                 return result('ERROR', 'attachment_missing', 'Native attachment is absent from durable messages'), run
+        elif selected == 'hermes':
+            from scripts.hermes_runner import verify_saved_run
+            try:
+                verify_saved_run(path, run)
+            except (ValueError, OSError, KeyError, TypeError) as error:
+                return result('ERROR', 'hermes_proof', str(error)), run
         else:
             if 'codex_attachment.json' not in run['evidence_hashes']:
                 return result('ERROR', 'incomplete_attachment_evidence', 'Codex attachment proof is missing'), run
@@ -164,10 +173,11 @@ def checked_run(path, skill, *, probe=False, harness=None):
                     or skill_proof.get('sha256') != request['skill_sha256']):
                 return result('ERROR', 'attachment_missing', 'Explicit Codex skill attachment is not durably proven'), run
     identity = environment_identity(run)
+    scope = {'opencode': 'Discovery, native attachment and completed representative execution',
+             'codex': 'Explicit Codex skill input, durable user item and completed representative execution',
+             'hermes': 'Isolated catalog, verified native skill preload and completed file execution'}
     return result('PASS', evidence=[str(path / 'run.json')], environment=identity,
-                  scope=('Discovery, native attachment and completed representative execution; quality is separate'
-                         if selected == 'opencode' else
-                         'Explicit Codex skill input, durable user item and completed representative execution; quality is separate'),
+                  scope=scope[selected],
                   harness=selected), run
 
 
@@ -206,6 +216,7 @@ def assess(skill, run_dir=None, *, probe_dir=None, require_fresh=False, harness=
             'agent_skills': standard,
             'opencode': runtime if selected == 'opencode' else result('NOT_RUN', 'not_selected', 'OpenCode was not selected'),
             'codex': runtime if selected == 'codex' else result('NOT_RUN', 'not_selected', 'Codex was not selected'),
+            'hermes': runtime if selected == 'hermes' else result('NOT_RUN', 'not_selected', 'Hermes was not selected'),
             'selected_runtime': selected,
             'accepted': standard['status'] == runtime['status'] == 'PASS',
             'recommendations': standard.get('recommendations', [])}
@@ -227,6 +238,9 @@ def accept_current(skill, run_dir, workspace, *, harness=None):
     workspace = Path(workspace).resolve()
     workspace.mkdir(parents=True, exist_ok=False)
     check = assess(skill, run_dir, harness=harness)
+    if check['accepted'] and check['selected_runtime'] == 'hermes':
+        check['hermes'] = result('NOT_RUN', 'fresh_pair_required', 'Refresh Hermes with a new file-quality pair', harness='hermes')
+        check['accepted'] = False
     if check['accepted']:
         from scripts.runtime import run_model
         try:

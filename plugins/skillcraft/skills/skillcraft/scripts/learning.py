@@ -180,7 +180,7 @@ def config_for(project, *, enrolling=False, trusted_internal=False, hermes_home=
                 if marker_raw.strip() != fingerprint:
                     return None
         return {'root': root, 'state': state, 'skills': skills, 'sources': sources,
-                'fingerprint': fingerprint, 'approval': approval}
+                'fingerprint': fingerprint, 'approval': approval, 'hermes': hermes_home is not None}
     return None
 
 
@@ -316,6 +316,10 @@ def connection(config):
     with closing(sqlite3.connect(state / 'journal.sqlite', timeout=10)) as db:
         db.row_factory = sqlite3.Row
         db.executescript(SCHEMA)
+        if config.get('hermes'):
+            db.execute("""CREATE TABLE IF NOT EXISTS hermes_replies (
+                session TEXT NOT NULL, turn TEXT NOT NULL, uid TEXT NOT NULL,
+                PRIMARY KEY (session, turn), UNIQUE (session, uid))""")
         with db:
             yield db
 
@@ -390,7 +394,7 @@ def record(db, witness, skill, version, origin, harness, session, turn, independ
 
 
 def observe(project, harness, session, turn, role, text, loaded, *, target_turn=None,
-            diagnostic=None, hermes_home=None):
+            diagnostic=None, hermes_home=None, hermes_uid=None):
     config = config_for(project, hermes_home=hermes_home)
     if not config or 'sessions' not in config['sources']:
         return False
@@ -403,12 +407,26 @@ def observe(project, harness, session, turn, role, text, loaded, *, target_turn=
     case_key = prompt_key(text) if role == 'user' else None
     excerpt = sanitize(text)[:500] if role == 'assistant' and labels else None
     with connection(config) as db:
+        uid = sha256(hermes_uid.encode()).hexdigest() if hermes_home and isinstance(hermes_uid, str) and hermes_uid else None
+        if uid and role == 'user':
+            db.execute('BEGIN IMMEDIATE')
+            latest = db.execute(
+                "SELECT turn,role FROM messages WHERE harness='hermes' AND session=? ORDER BY seq DESC LIMIT 1",
+                (session,),
+            ).fetchone()
+            prior = db.execute('SELECT turn FROM hermes_replies WHERE session=? AND uid=?',
+                               (session, uid)).fetchone()
+            target_turn = (prior['turn'] if latest and prior and latest['role'] == 'assistant'
+                           and latest['turn'] == prior['turn'] else None)
         inserted = db.execute(
             'INSERT OR IGNORE INTO messages(harness,session,turn,role,bindings,diagnostic,case_key,excerpt) '
             'VALUES (?,?,?,?,?,?,?,?)',
             (harness, session, turn, role, json.dumps(labels), sanitize(diagnostic) if diagnostic else None,
              case_key, excerpt),
         ).rowcount
+        if inserted and uid and role == 'assistant' and labels:
+            db.execute('INSERT OR IGNORE INTO hermes_replies(session,turn,uid) VALUES (?,?,?)',
+                       (session, turn, uid))
         if inserted and role == 'user' and target_turn:
             kind = classify(text)
             if kind:
@@ -669,7 +687,9 @@ def main(argv=None):
             Path(marker.name).replace(config['state'] / 'enabled')
             print(json.dumps({'enabled': str(config['root']), 'journal': str(config['state'])}))
         elif args.command == 'inventory':
-            print(json.dumps(source_inventory(config, hermes=home is not None), ensure_ascii=False))
+            versions = source_inventory(config, hermes=home is not None)
+            print(json.dumps({'root': str(config['root']), 'versions': versions} if home else versions,
+                             ensure_ascii=False))
         elif args.command == 'work':
             from scripts.learning_worker import work
             if args.retry_blocked:
