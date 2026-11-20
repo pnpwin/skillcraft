@@ -91,10 +91,13 @@ def run_model(prompt, output, model, *, mode='quality', skill=None, skill_id=Non
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     # Outside the project: no inherited candidate, reviewer artifacts or AGENTS.md.
-    default_temp = Path('/private/tmp') if harness == 'hermes' and sys.platform == 'darwin' else Path(tempfile.gettempdir())
-    temp_root = Path(os.environ.get('SKILLCRAFT_TEMP', default_temp / 'skillcraft'))
-    temp_root.mkdir(parents=True, exist_ok=True)
-    directory = Path(tempfile.mkdtemp(prefix='skill-eval-', dir=temp_root)).resolve()
+    if harness == 'hermes':
+        from scripts.hermes_runner import create_run_directory
+        directory = create_run_directory(os.environ.get('SKILLCRAFT_TEMP'))
+    else:
+        temp_root = Path(os.environ.get('SKILLCRAFT_TEMP', Path(tempfile.gettempdir()) / 'skillcraft'))
+        temp_root.mkdir(parents=True, exist_ok=True)
+        directory = Path(tempfile.mkdtemp(prefix='skill-eval-', dir=temp_root)).resolve()
     for name in ['inputs', 'outputs']:
         (directory / name).mkdir()
     if harness == 'codex':
