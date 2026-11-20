@@ -1,4 +1,4 @@
-# SkillCraft for Codex and OpenCode
+# SkillCraft for Codex, OpenCode v2 and Hermes Agent
 
 Create, evaluate, and refine agent skills through measured iterations.
 
