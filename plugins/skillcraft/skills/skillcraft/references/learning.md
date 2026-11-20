@@ -99,8 +99,21 @@ the tool result. A reference-page read or an unchanged-result stub is
 insufficient on its own.
 
 The Hermes journal lives under `$HERMES_HOME/skillcraft/learning/` in that
-profile. Hermes collects evidence only. Run evaluation and automatic revisions
-from a configured Codex or OpenCode project.
+profile. To include its evidence in optimization, enable regular SkillCraft
+Learning for the same project in Codex or OpenCode, then import explicitly from
+the project root. Set `HERMES_PROFILE_HOME` to the source profile directory
+(`$HOME/.hermes` for the default profile on a standard installation).
+
+```sh
+"$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/learning.py" \
+  import-hermes "$PWD" --from-profile "$HERMES_PROFILE_HOME"
+```
+
+Both enrollments must match the current project configuration. The command
+reports imported, duplicate, and skipped entries. Import preserves the recorded
+version, checks it against the current skill, and queues optimization only for
+new evidence. A chat correction is an observation and follows the existing
+evaluation and promotion requirements.
 
 ## Collection and promotion
 

@@ -630,6 +630,70 @@ def notify_feedback(workspace, feedback_path, *, project=None, selection=None):
     return added
 
 
+def import_hermes(project, profile):
+    """Import current-version conversation evidence from an enrolled Hermes profile."""
+    project = Path(project).resolve()
+    profile = Path(profile).expanduser().resolve(strict=True)
+    target = config_for(project)
+    source = config_for(project, hermes_home=profile)
+    if not target or not source or target['root'] != project or 'sessions' not in target['sources']:
+        raise ValueError('Enable session learning in both SkillCraft and the selected Hermes profile for this project')
+
+    journal = source['state'] / 'journal.sqlite'
+    if journal.resolve() != journal:
+        raise ValueError('The Hermes journal must be inside the selected profile')
+    counts = {'imported': 0, 'duplicates': 0, 'skipped': 0}
+    if not journal.exists():
+        return counts
+    if not journal.is_file():
+        raise ValueError('The Hermes journal must be a regular file')
+
+    versions = {name: tree_hash(local_path(project, settings['source'], directory=True))
+                for name, settings in target['skills'].items()}
+    imported = sha256()
+    with closing(sqlite3.connect(journal.as_uri() + '?mode=ro', uri=True, timeout=10)) as hermes:
+        hermes.row_factory = sqlite3.Row
+        rows = hermes.execute("""
+            SELECT e.*, a.bindings FROM evidence e
+            LEFT JOIN messages a
+              ON a.harness=e.harness AND a.session=e.session AND a.turn=e.turn AND a.role='assistant'
+            WHERE e.harness='hermes' AND e.origin='session'
+            ORDER BY e.id
+        """)
+        with connection(target) as db:
+            for entry in rows:
+                try:
+                    witness = json.loads(entry['witness'])
+                    bound = json.loads(entry['bindings'] or '{}')
+                except (TypeError, ValueError):
+                    counts['skipped'] += 1
+                    continue
+                name, version, kind = entry['skill'], entry['version'], entry['kind']
+                if (versions.get(name) != version or not isinstance(bound, dict) or bound.get(name) != version
+                        or kind not in VERDICTS or not isinstance(witness, list) or len(witness) != 6
+                        or not isinstance(witness[2], str) or not witness[2]
+                        or witness != ['hermes', entry['session'], witness[2], entry['turn'], name, kind]
+                        or not hermes.execute("SELECT 1 FROM messages WHERE harness='hermes' "
+                                              "AND session=? AND turn=? AND role='user'",
+                                              (entry['session'], witness[2])).fetchone()):
+                    counts['skipped'] += 1
+                    continue
+                # The native session/turn witness survives profile moves and copies.
+                identity = sha256(json.dumps(witness, separators=(',', ':')).encode()).hexdigest()
+                if record(db, f'hermes-import:{identity}', name, version, 'session', 'hermes',
+                          entry['session'], entry['turn'], entry['independent'], entry['case_id'],
+                          kind, entry['note']):
+                    counts['imported'] += 1
+                    imported.update(identity.encode())
+                else:
+                    counts['duplicates'] += 1
+            if counts['imported']:
+                queue(db, 'hermes-import:' + imported.hexdigest())
+    if counts['imported']:
+        wake(target)
+    return counts
+
+
 def main(argv=None):
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument('--hermes-home', type=Path, help=argparse.SUPPRESS)
@@ -644,6 +708,9 @@ def main(argv=None):
             parser.add_argument('--lock-fd', type=int, help=argparse.SUPPRESS)
             parser.add_argument('--retry-blocked', action='store_true',
                                 help='Queue one durable validation-only retry for saved blocked proposals')
+    hermes_import = sub.add_parser('import-hermes', help='Import verified conversations from an enrolled Hermes profile')
+    hermes_import.add_argument('project', type=Path)
+    hermes_import.add_argument('--from-profile', type=Path, required=True, help='Hermes profile home directory')
     ingest = sub.add_parser('ingest', help='Import a completed A/B or an explicit feedback file')
     ingest.add_argument('workspace', type=Path)
     ingest.add_argument('--project', type=Path)
@@ -659,6 +726,9 @@ def main(argv=None):
             inserted = observe(**json.load(sys.stdin), hermes_home=home)
             if home is not None:
                 print(json.dumps({'inserted': inserted}))
+            return 0
+        if args.command == 'import-hermes':
+            print(json.dumps(import_hermes(args.project, args.from_profile)))
             return 0
         if args.command == 'ingest':
             if args.selection and not args.feedback:
