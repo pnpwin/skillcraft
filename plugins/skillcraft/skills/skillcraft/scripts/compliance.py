@@ -131,12 +131,15 @@ def checked_run(path, skill, *, probe=False, harness=None):
         return result('ERROR', 'execution_error', 'Runtime did not complete', execution_status=run['status']), run
     if run['installed_hash'] != skill_hash(skill):
         return result('FAIL', 'artifact_changed', 'Evidence belongs to a different skill snapshot'), run
-    installed = Path(request['skill_path']).parent
+    installed = Path(request['skill_path'])
     candidate = run['environment']['candidate']
-    if skill_hash(installed) != run['installed_hash'] or digest(installed / 'SKILL.md') != request['skill_sha256']:
+    if selected == 'hermes':
+        if digest(Path(skill) / 'SKILL.md') != request['skill_sha256']:
+            return result('FAIL', 'artifact_changed', 'Skill contents do not match the preload evidence'), run
+    elif skill_hash(installed.parent) != run['installed_hash'] or digest(installed) != request['skill_sha256']:
         return result('FAIL', 'installed_changed', 'Installed snapshot no longer matches the evidence'), run
     if (candidate['id'] != Path(skill).resolve().name or candidate['id'] != request['skill_id']
-            or Path(candidate['path']) != installed / 'SKILL.md'):
+            or Path(candidate['path']) != installed):
         return result('FAIL', 'discovery_mismatch', 'Registry identity/path does not match the candidate'), run
     version = environment.get('server_version')
     if not isinstance(version, str) or not version.strip():

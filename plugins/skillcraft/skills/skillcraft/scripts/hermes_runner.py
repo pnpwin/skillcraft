@@ -39,10 +39,14 @@ def regular_artifacts(root):
     return entries
 
 
-def check_requests(rows, request, session, home):
+def check_requests(rows, request, session, home, *, block):
     requests, responses = {}, {}
     skill = [request['skill_id']] if request.get('skill_path') else []
-    block = worker.sha(worker.native_block(request).encode()) if skill else None
+    if skill:
+        if not isinstance(block, str) or not re.fullmatch(r'[a-f0-9]{64}', block):
+            raise ValueError('Missing or invalid expected skill preload hash')
+    elif block is not None:
+        raise ValueError('A baseline must not have an expected skill preload hash')
     for row in rows:
         if row.get('error'):
             raise ValueError(f"Hermes provider request refused: {row['error']}")
@@ -81,9 +85,17 @@ def verify_saved_run(path, run):
             raise ValueError(f'Hermes evidence hash mismatch: {name}')
     request = read_json(path / 'request.json')
     proof = read_json(path / 'hermes-proof.json')
+    schema = proof.get('schema_version')
+    if schema == 1:
+        # The original runner recorded its validated preload hash in the proof.
+        block = proof['block_sha256']
+    elif schema == 2:
+        block = request['preload_block_sha256']
+    else:
+        raise ValueError('Unsupported Hermes proof schema')
     native, _ = native_events(read_lines(path / 'events.jsonl'))
     observed = check_requests(read_json(path / 'hermes-requests.json'), request,
-                              native['session_id'], run['profile_home'])
+                              native['session_id'], run['profile_home'], block=block)
     output_files = regular_artifacts(path / 'outputs')
     if (output_files.pop('_response.txt', None) != digest(path / 'response.txt')
             or request['run_id'] != run['run_id'] or request['model'] != run['model']
@@ -236,6 +248,8 @@ def run(request):
     if platform.system() != 'Darwin' or not Path(worker.SANDBOX).is_file():
         raise ValueError('Hermes bounded-file evaluation needs macOS /usr/bin/sandbox-exec')
     launcher = binary()
+    block = worker.sha(worker.native_block(request).encode()) if request.get('skill_path') else None
+    write_json(output / 'request.json', {**request, 'preload_block_sha256': block})
     source = Path(os.environ.get('SKILLCRAFT_HERMES_HOME', os.environ.get('HERMES_HOME', '~/.hermes'))).expanduser().resolve()
     provider, model = request['model']['provider'], request['model']['id']
     (directory / '.tool-tmp').mkdir(mode=0o700)
@@ -299,8 +313,8 @@ def run(request):
             session = final['session_id']
             receipts = read_lines(home / 'requests.jsonl')
             write_json(output / 'hermes-requests.json', receipts)
-            proof = check_requests(receipts, request, session, home)
-            proof.update(schema_version=1, run_id=request['run_id'], session_id=session, profile=str(home),
+            proof = check_requests(receipts, request, session, home, block=block)
+            proof.update(schema_version=2, run_id=request['run_id'], session_id=session, profile=str(home),
                          sandbox=sandbox, outputs=regular_artifacts(directory / 'outputs'))
             write_json(output / 'hermes-proof.json', proof)
             environment = {'server_version': match[1], 'candidate': {'id': request['skill_id'], 'path': request['skill_path']}
