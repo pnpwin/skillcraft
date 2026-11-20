@@ -1,8 +1,8 @@
 ---
 name: skillcraft
-description: Create and improve Agent Skills for Codex (including local chats in the ChatGPT desktop app) and OpenCode. Use when the user wants to turn a recurring workflow into a skill, revise skill instructions, compare versions with A/B tests, review a skill benchmark, or improve when a skill is picked.
+description: Create and improve Agent Skills for Codex (including local chats in the ChatGPT desktop app) and OpenCode, with file-based A/B for Hermes on macOS. Use when the user wants to turn a recurring workflow into a skill, revise skill instructions, compare versions with A/B tests, review a skill benchmark, or improve when a skill is picked.
 license: Apache-2.0
-compatibility: Evaluations require Python 3.11+, a configured model, and the Codex App Server or OpenCode V2 APIs used by SkillCraft. The OpenCode runner also requires Node.js 22+ and shared absolute filesystem paths.
+compatibility: Evaluations require Python 3.11+, a configured model, and the Codex App Server or OpenCode V2 APIs used by SkillCraft. The OpenCode runner also requires Node.js 22+ and shared absolute filesystem paths. Hermes file A/B requires the local Hermes Chat CLI on macOS and sandbox-exec.
 ---
 
 # SkillCraft
@@ -50,6 +50,7 @@ npm --prefix "$SKILLCRAFT/scripts/opencode-runner" ci  # OpenCode
 Use the `SKILLCRAFT_VENV` interpreter for all Python commands. Scripts detect the
 harness from the calling session, including local Codex chats in the ChatGPT
 desktop app. In a terminal or CI, pass `--harness codex` or `--harness opencode`.
+For file-based quality A/B in a local Hermes session on macOS, pass `--harness hermes`.
 `--harness chatgpt` is an alias for the Codex runner. Read `references/codex-runner.md` or
 `references/opencode-runner.md` before configuring models, authentication or
 permissions.
@@ -139,6 +140,12 @@ new skill compare `without_skill` against `with_skill`; for revisions also pass
   --skill "$CANDIDATE" --evals "$QUALITY_EVALS" --workspace "$ITERATION" \
   --model "$EXECUTOR_MODEL" --judge-model "$JUDGE_MODEL" --repeats 3 --workers 2
 ```
+
+For Hermes, use `--model openai-codex:MODEL` and a rubric covered entirely by
+deterministic file checks. Omit judge arguments. The runner requires the local
+Hermes Chat CLI, a signed-in profile and macOS `sandbox-exec`. Use
+`SKILLCRAFT_HERMES_HOME` to select a source profile. The baseline catalog and
+candidate preload are checked against native requests before grading.
 
 The runner creates fresh sessions and independent fixtures. `with_skill` uses a
 native API attachment; this measures quality after loading, not natural selection.

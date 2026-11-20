@@ -32,7 +32,7 @@ def rules(skill_id=None):
 
 def add_runtime_args(parser):
     add_harness_arg(parser)
-    parser.add_argument('--model', required=True, help='Codex model[#effort] or OpenCode provider/model[#variant]')
+    parser.add_argument('--model', required=True, help='Codex model[#effort], OpenCode provider/model[#variant], or Hermes provider:model')
     parser.add_argument('--timeout', type=float, default=180)
     parser.add_argument('--profile', type=Path, help='Custom permissions JSON; runs are marked uncontrolled')
 
@@ -42,6 +42,11 @@ def profile_settings(profile, skill_id=None, *, harness='opencode'):
         if profile:
             raise ValueError('Codex uses the bounded profile. Custom profiles are available in OpenCode.')
         return {'name': 'codex-bounded-files', 'controlled': True, 'permissions': [],
+                'allow_delegation': False, 'cli_tools': []}
+    if runtime_harness(harness) == 'hermes':
+        if profile:
+            raise ValueError('Hermes evaluates with its built-in macOS file profile')
+        return {'name': 'hermes-bounded-files', 'controlled': True, 'permissions': [],
                 'allow_delegation': False, 'cli_tools': []}
     custom = read_json(profile) if profile else {}
     unknown = set(custom) - {'permissions', 'inherit_bounded_files', 'allow_delegation', 'steps', 'name', 'cli_tools'}
@@ -78,13 +83,16 @@ def run_model(prompt, output, model, *, mode='quality', skill=None, skill_id=Non
     model_config = model_ref(model, harness)
     selection = harness_metadata(harness)
     harness = selection['harness']
+    if harness == 'hermes' and (mode != 'quality' or operation != 'run' or bool(skill) != attach or preparation):
+        raise ValueError('Hermes supports paired file-quality runs with native preload')
     settings = profile_settings(profile, safe_id(skill_id or Path(skill).name) if skill else None, harness=harness)
     if timeout <= 0:
         raise ValueError('timeout must be positive')
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     # Outside the project: no inherited candidate, reviewer artifacts or AGENTS.md.
-    temp_root = Path(os.environ.get('SKILLCRAFT_TEMP', Path(tempfile.gettempdir()) / 'skillcraft'))
+    default_temp = Path('/private/tmp') if harness == 'hermes' and sys.platform == 'darwin' else Path(tempfile.gettempdir())
+    temp_root = Path(os.environ.get('SKILLCRAFT_TEMP', default_temp / 'skillcraft'))
     temp_root.mkdir(parents=True, exist_ok=True)
     directory = Path(tempfile.mkdtemp(prefix='skill-eval-', dir=temp_root)).resolve()
     for name in ['inputs', 'outputs']:
@@ -145,7 +153,7 @@ def run_model(prompt, output, model, *, mode='quality', skill=None, skill_id=Non
         'allow_delegation': settings['allow_delegation'],
         **({'skill_path': str(installed / 'SKILL.md'), 'skill_sha256': digest(installed / 'SKILL.md')} if installed else {}),
     }
-    if harness == 'codex':
+    if harness in {'codex', 'hermes'}:
         request['instructions'] = system
         if output_schema is not None:
             request['output_schema'] = output_schema
@@ -153,7 +161,9 @@ def run_model(prompt, output, model, *, mode='quality', skill=None, skill_id=Non
     write_json(output / 'fixtures.json', fixture_hashes)
     write_json(output / 'profile.json', settings)
     write_json(output / 'profile-source.json', read_json(profile) if profile else None)
-    if harness == 'codex':
+    if harness == 'hermes':
+        command = [sys.executable, '-B', '-m', 'scripts.hermes_runner', str(output / 'request.json')]
+    elif harness == 'codex':
         command = [sys.executable, '-B', '-m', 'scripts.codex_runner', str(output / 'request.json')]
     else:
         command = [str(ROOT / 'scripts/opencode-runner' / 'node_modules' / '.bin' / 'tsx'), str(ROOT / 'scripts/opencode-runner' / 'src' / 'main.ts'), str(output / 'request.json')]
@@ -178,6 +188,13 @@ def run_model(prompt, output, model, *, mode='quality', skill=None, skill_id=Non
                    'error': stderr.strip() or f'Exit {proc.returncode}', 'run_id': request['run_id']})
     artifact_error = None
     try:
+        if harness == 'hermes':
+            from scripts.hermes_runner import regular_artifacts
+            artifacts = regular_artifacts(directory / 'outputs')
+            if '_response.txt' in artifacts:
+                raise ValueError('Hermes used the reserved _response.txt output name')
+            if (output / 'hermes-proof.json').exists() and artifacts != read_json(output / 'hermes-proof.json')['outputs']:
+                raise ValueError('Hermes output changed after evaluation')
         copy_tree(directory / 'outputs', output / 'outputs')
     except (OSError, ValueError) as e:
         artifact_error = str(e)
@@ -218,8 +235,14 @@ def run_model(prompt, output, model, *, mode='quality', skill=None, skill_id=Non
     result['evidence_hashes'] = {name: digest(output / name) for name in
         ['request.json', 'profile.json', 'profile-source.json', 'messages.json', 'response.txt', 'environment.json',
          'evidence/manifest.json', 'cli-state.json', 'input-manifest.json', 'preparation.json',
-         'codex_attachment.json', 'events.jsonl', 'telemetry.json', 'timing.json', 'usage.json']
+         'codex_attachment.json', 'hermes-proof.json', 'hermes-requests.json', 'events.jsonl', 'telemetry.json', 'timing.json', 'usage.json']
         if (output / name).is_file()}
+    if harness == 'hermes' and result['status'] == 'completed':
+        from scripts.hermes_runner import verify_saved_run
+        try:
+            verify_saved_run(output, result)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            result.update(status='artifact_error', error=str(error))
     write_json(output / 'run.json', result)
     if installed:
         from scripts.compliance import assess

@@ -5,8 +5,8 @@ from pathlib import Path
 from scripts.utils import parse_model
 
 
-HARNESSES = ('codex', 'opencode')
-HARNESS_CHOICES = ('codex', 'chatgpt', 'opencode')
+HARNESSES = ('codex', 'opencode', 'hermes')
+HARNESS_CHOICES = ('codex', 'chatgpt', 'opencode', 'hermes')
 SKILL_ROOT = Path('.agents') / 'skills'
 
 
@@ -20,7 +20,7 @@ def resolve_harness(override=None, *, environ=None):
     opencode = env.get('OPENCODE') == '1' and bool(env.get('OPENCODE_SESSION_ID'))
     if codex == opencode:
         reason = 'Both Codex and OpenCode session signals are present' if codex else 'No harness session signal was found'
-        raise ValueError(f'{reason}. Specify --harness codex, chatgpt, or opencode.')
+        raise ValueError(f'{reason}. Specify --harness codex, chatgpt, opencode, or hermes.')
     return 'codex' if codex else 'opencode'
 
 
@@ -42,6 +42,11 @@ def model_ref(value, harness):
     harness = runtime_harness(harness)
     if harness == 'opencode':
         return parse_model(value)
+    if harness == 'hermes':
+        provider, separator, name = value.partition(':')
+        if not separator or not provider or not name or any(c.isspace() for c in value):
+            raise ValueError('Hermes model must be provider:model')
+        return {'provider': provider, 'id': name}
     if harness != 'codex':
         raise ValueError(f'Unsupported harness: {harness}')
     name, separator, effort = value.partition('#')

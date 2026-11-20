@@ -112,6 +112,35 @@ server with a clean config and a configured model. The interactive Git plugin
 registers SkillCraft in its locations, including locations that would otherwise
 be a clean baseline. Codex evaluations start their own isolated App Server.
 
+### File A/B in Hermes on macOS
+
+The Hermes runner uses a private local gateway, a fresh profile for each arm,
+and macOS `/usr/bin/sandbox-exec` for file and terminal tools. Use a local Hermes
+installation with the native chat JSON stream and terminal-provider APIs. Set
+`SKILLCRAFT_HERMES_HOME` to the signed-in Hermes profile if it differs from
+`HERMES_HOME` or `~/.hermes`. `SKILLCRAFT_HERMES_BIN` can select another local CLI.
+
+Run from a local terminal with a selected ChatGPT model and deterministic file
+checks. Replace `MODEL` with a model available to the Hermes profile.
+
+```sh
+fixture="$PWD/tests/fixtures/hermes-file-ab/meeting-actions"
+workspace=/path/to/new/hermes-ab-workspace
+"$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/run_quality_eval.py" \
+  --harness hermes --model openai-codex:MODEL --skill "$fixture" \
+  --evals "$fixture/evals/evals.json" --workspace "$workspace"
+"$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/generate_review.py" \
+  "$workspace" --static "$workspace/review.html"
+```
+
+Each completed run records the observed catalog and a hash of the native
+preload in `hermes-proof.json`. Commands can read the fixtures and candidate
+snapshot and write inside `outputs/` and the tool scratch directory. The
+gateway uses the selected profile's ChatGPT sign-in for model traffic. Check
+the proof, artifacts and report before using the quality results.
+
+### Package a skill
+
 Run `compliance.py` on representative native-attachment evidence for each target.
 To package SkillCraft, pass the Codex and OpenCode run directories with two
 `--run` arguments to `package_skill.py`. Both runs must certify the same hashes.
