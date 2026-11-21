@@ -12,9 +12,11 @@ model-step counting where the installed Codex exposes it. The marketplace
 package uses the Codex compatibility manifest for hook discovery.
 [Codex hook trust](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks)
 Completed quality evaluations and validated HTML feedback feed the same journal.
-A review mark alone records that a run was seen. Set an explicit success,
-failure, or correction verdict to use human feedback as evidence. For a
-correction, include the changed behavior in the comment.
+For a run with the skill loaded, set an explicit success, failure, or correction
+verdict to use feedback as evidence. For a correction, include the changed
+behavior in the comment. A completed review saves nonempty remarks on
+`without_skill` runs as baseline feedback tied to the original run and case.
+Baseline remarks carry no skill verdict and do not schedule revision work.
 For live feedback, open the full URL printed by the review server. Its
 fragment carries the session capability for reading and submitting feedback.
 
@@ -285,10 +287,12 @@ checks the currently installed hash before switching directories. To import
 an existing run by hand use `ingest WORKSPACE --project "$PWD"`, with
 `--feedback FILE` for an already generated review file. If the review was
 generated with a grading selection, also pass the same `--selection FILE`.
-Repeat imports are idempotent. A worker picks up pending checkpoints the next
-time a hook or `work "$PWD"` starts it. Failed and interrupted optimizer
-attempts keep their evidence. A later checkpoint can retry when new evidence
-or changed optimizer settings produce a different request.
+Repeat imports are idempotent. Feedback imports report `new_evidence` and
+`new_baseline_feedback`. The `status` command shows the number of baseline
+remarks in the journal. A worker picks up pending checkpoints the next time
+a hook or `work "$PWD"` starts it. Failed and interrupted optimizer attempts
+keep their evidence. A later checkpoint can retry when new evidence or changed
+optimizer settings produce a different request.
 
 When a proposal is saved but code or A/B verification is blocked, fixing the
 owner-controlled tests, evaluator settings, or validation runtime and running
