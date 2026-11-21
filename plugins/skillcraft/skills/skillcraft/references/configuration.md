@@ -3,6 +3,7 @@
 Compact reference for user-facing SkillCraft settings. The [Learning guide](learning.md),
 [Codex runner guide](codex-runner.md), [OpenCode runner guide](opencode-runner.md),
 and [schema guide](schemas.md) explain workflows and contracts in more detail.
+The [workflow diagrams](workflows.md) show where key options change execution.
 
 ## Learning configuration
 

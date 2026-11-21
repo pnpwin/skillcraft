@@ -8,7 +8,7 @@ import { parse } from 'yaml';
 import {
   completedModelSteps, consumeWithReconnect, initialCursor, learningEventPhase, learningEventTypes, messageText,
   reconcileProjection, selectTurn, spawnBounded, turnsAfter, verifiedSkills,
-} from './opencode-learning.js';
+} from './src/opencode/learning.js';
 
 const skillID = Skill.ID.make('skillcraft');
 const skillPath = fileURLToPath(new URL('./skills/skillcraft/SKILL.md', import.meta.url));

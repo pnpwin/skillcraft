@@ -2,6 +2,8 @@ import argparse
 from contextlib import redirect_stdout
 from io import StringIO
 import json
+import importlib.util
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -11,7 +13,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from plugins import skillcraft
-from plugins.skillcraft import hermes_learning
+from plugins.skillcraft.src.hermes import hermes_learning
 
 
 class HermesEnableCliTest(unittest.TestCase):
@@ -37,6 +39,31 @@ class HermesEnableCliTest(unittest.TestCase):
         with redirect_stdout(output), patch.dict('sys.modules', hermes_constants=self.constants):
             skillcraft.journal_command(args)
         return json.loads(output.getvalue())
+
+    def test_standalone_plugin_copy_loads_as_package_and_resolves_assets(self):
+        plugin = Path(self.temp.name).resolve() / 'checkout/plugins/skillcraft'
+        source = Path(skillcraft.__file__).resolve().parent
+        shutil.copytree(source, plugin, ignore=shutil.ignore_patterns('node_modules', '__pycache__'))
+        name = '_skillcraft_standalone_test'
+        spec = importlib.util.spec_from_file_location(
+            name, plugin / '__init__.py', submodule_search_locations=[str(plugin)])
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        self.addCleanup(lambda: [sys.modules.pop(key, None) for key in list(sys.modules)
+                                 if key == name or key.startswith(name + '.')])
+        spec.loader.exec_module(module)
+        context = Mock()
+        with patch.dict('sys.modules', hermes_constants=self.constants):
+            module.register(context)
+        self.assertEqual(context.register_skill.call_args.args[1],
+                         plugin / 'skills/skillcraft/SKILL.md')
+        self.assertEqual({call.args[0] for call in context.register_hook.call_args_list},
+                         {'pre_llm_call', 'post_tool_call', 'post_api_request', 'post_llm_call'})
+        adapter = sys.modules[name + '.src.hermes.hermes_learning']
+        self.assertTrue(adapter.SCRIPT.is_file())
+        self.assertEqual(adapter.SCRIPT, plugin / 'skills/skillcraft/scripts/learning.py')
+        with self.assertRaisesRegex(RuntimeError, 'Project learning is not enabled'):
+            adapter.run_learning(self.home, 'status', str(self.project))
 
     def test_enable_forwards_linked_root_approval_options_and_json(self):
         result = {'enabled': str(self.project), 'journal': '/journal'}

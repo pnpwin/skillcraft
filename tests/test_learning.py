@@ -14,7 +14,7 @@ from tests import REPO
 
 
 capture_spec = importlib.util.spec_from_file_location(
-    'codex_learning_capture', REPO / 'plugins/skillcraft/hooks/learning_capture.py')
+    'codex_learning_capture', REPO / 'plugins/skillcraft/src/codex/learning_capture.py')
 codex_capture = importlib.util.module_from_spec(capture_spec)
 capture_spec.loader.exec_module(codex_capture)
 

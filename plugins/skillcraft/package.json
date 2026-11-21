@@ -9,8 +9,9 @@
   },
   "files": [
     "opencode.js",
-    "opencode-learning.js",
+    "src/opencode/",
     "hooks/",
+    "src/codex/learning_capture.py",
     "skills/",
     "!skills/**/node_modules/**",
     "!skills/**/.venv/**",
