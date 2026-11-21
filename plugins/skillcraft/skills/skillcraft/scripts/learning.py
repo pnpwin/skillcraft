@@ -20,6 +20,7 @@ from scripts.utils import EXCLUDED, digest, read_json, safe_id, tree_hash
 
 CONFIG = Path('.skillcraft/learning.json')
 INTERNAL = 'SKILLCRAFT_LEARNING_INTERNAL'
+PROJECT_MARKERS = ('.git', '.arc', '.hg', '.svn', 'AGENTS.md')
 MESSAGE_INTERVAL = 15
 MODEL_STEP_INTERVAL = 15
 VERDICTS = {'success', 'failure', 'correction'}
@@ -98,12 +99,17 @@ def classify(text):
                  if pattern.match(text)), None)
 
 
-def local_path(root, value, *, directory=False):
+def relative_path(value):
     if not isinstance(value, str) or not value or '\\' in value:
         raise ValueError('Local paths must be nonempty, project-relative strings')
     parts = PurePosixPath(value)
     if parts.is_absolute() or '..' in parts.parts or '.git' in parts.parts or not parts.parts:
         raise ValueError(f'Path escapes project: {value}')
+    return parts
+
+
+def local_path(root, value, *, directory=False):
+    parts = relative_path(value)
     path = root
     for part in parts.parts:
         path = path / part
@@ -112,6 +118,68 @@ def local_path(root, value, *, directory=False):
     if directory and not path.is_dir():
         raise ValueError(f'Missing skill directory: {value}')
     return path
+
+
+def selected_skills(root, raw, scope, selection):
+    overrides = raw.get('skills', {})
+    if selection not in ('explicit', 'all') or not isinstance(overrides, dict):
+        raise ValueError('Expected selection explicit or all and a skills object')
+    for name, settings in overrides.items():
+        if name != safe_id(name) or not isinstance(settings, dict):
+            raise ValueError('Expected a skill ID and settings object')
+    if selection == 'explicit':
+        if not overrides:
+            raise ValueError('Learning requires explicitly selected skills')
+        if 'exclude' in raw or 'defaults' in raw:
+            raise ValueError('exclude and defaults require selection all')
+        for name, settings in overrides.items():
+            source = local_path(root, settings.get('source'), directory=True)
+            if source.name != name or not (source / 'SKILL.md').is_file() or (source / 'SKILL.md').is_symlink():
+                raise ValueError(f'Invalid source for {name}')
+            if source == Path(__file__).resolve().parents[1]:
+                raise ValueError('The running SkillCraft installation cannot be its own update target')
+        return overrides
+
+    from scripts.learning_selection import discover_local_skills
+
+    exclude = raw.get('exclude', [])
+    if not isinstance(exclude, list) or any(not isinstance(name, str) or name != safe_id(name) for name in exclude):
+        raise ValueError('exclude must contain exact skill IDs')
+    defaults = raw.get('defaults', {})
+    if not isinstance(defaults, dict) or 'source' in defaults:
+        raise ValueError('defaults must be a skills settings object without a source')
+    pins = {name: relative_path(settings['source']).as_posix() for name, settings in overrides.items()
+            if 'source' in settings}
+    result = {}
+    excluded = set(exclude)
+    running_skill = Path(__file__).resolve().parents[1]
+    for name, paths in discover_local_skills(root, scope=scope).items():
+        if name in excluded:
+            continue
+        override = overrides.get(name, {})
+        source = pins.get(name)
+        if source is None and len(paths) == 1:
+            source = paths[0]
+        if source not in paths or root / source == running_skill:
+            continue
+        settings = {**defaults, **override, 'source': source}
+        for field in ('train', 'holdout'):
+            if field in defaults and field not in override:
+                pattern = defaults[field]
+                if not isinstance(pattern, str):
+                    raise ValueError(f'defaults.{field} must be a project-relative path')
+                settings[field] = pattern.replace('{skill}', name)
+        result[name] = settings
+    return result
+
+
+def has_project_boundary(directory, home):
+    for parent in (directory, *directory.parents):
+        if parent == home:
+            return False
+        if any((parent / marker).exists() or (parent / marker).is_symlink() for marker in PROJECT_MARKERS):
+            return True
+    return False
 
 
 def config_for(project, *, enrolling=False, trusted_internal=False, hermes_home=None):
@@ -147,20 +215,17 @@ def config_for(project, *, enrolling=False, trusted_internal=False, hermes_home=
             raise ValueError('Expected learning config schema_version 1')
         if raw.get('enabled') is not True:
             return None
+        scope = raw.get('scope', 'project')
+        if scope not in ('project', 'home'):
+            raise ValueError('Learning scope must be project or home')
+        if scope == 'home':
+            if root != Path.home().resolve():
+                raise ValueError('Home learning must be configured in the home directory')
+            if has_project_boundary(path, root):
+                return None
         sources = raw.get('sources', ['sessions', 'evals'])
         if not isinstance(sources, list) or any(x not in {'sessions', 'evals'} for x in sources):
             raise ValueError('Learning sources must be sessions and/or evals')
-        skills = raw.get('skills')
-        if not isinstance(skills, dict) or not skills:
-            raise ValueError('Learning requires explicitly selected skills')
-        for name, settings in skills.items():
-            if name != safe_id(name) or not isinstance(settings, dict):
-                raise ValueError('Expected a skill ID and settings object')
-            source = local_path(root, settings.get('source'), directory=True)
-            if source.name != name or not (source / 'SKILL.md').is_file() or (source / 'SKILL.md').is_symlink():
-                raise ValueError(f'Invalid source for {name}')
-            if source == Path(__file__).resolve().parents[1]:
-                raise ValueError('The running SkillCraft installation cannot be its own update target')
         state_root = (hermes_home / 'skillcraft/learning' if hermes_home is not None
                       else Path.home() / '.local/share/skillcraft/learning')
         state = state_root / sha256(str(root).encode()).hexdigest()
@@ -191,7 +256,10 @@ def config_for(project, *, enrolling=False, trusted_internal=False, hermes_home=
             else:
                 if marker_raw.strip() != fingerprint:
                     return None
+        selection = raw.get('selection', 'explicit')
+        skills = selected_skills(root, raw, scope, selection)
         return {'root': root, 'state': state, 'skills': skills, 'sources': sources,
+                'scope': scope, 'selection': selection,
                 'fingerprint': fingerprint, 'approval': approval, 'hermes': hermes_home is not None,
                 'auto_import': auto_import}
     return None
@@ -209,13 +277,16 @@ def approval_inputs(config):
     from scripts.approved_binary import describe
     from scripts.inputs import input_specs
     root = config['root'].resolve()
+    automatic = config.get('selection') == 'all'
     result = {}
     for name, settings in config['skills'].items():
         approved = {'datasets': {}, 'fixtures': []}
         if all(key in settings for key in ('train', 'holdout')):
             source = local_path(root, settings['source'], directory=True)
-            for split in ('train', 'holdout'):
-                path = local_path(root, settings[split])
+            datasets = {split: local_path(root, settings[split]) for split in ('train', 'holdout')}
+            if automatic and not all(path.exists() for path in datasets.values()):
+                continue
+            for split, path in datasets.items():
                 raw, rows = dataset_snapshot(path)
                 approved['datasets'][split] = {
                     'path': path.relative_to(root).as_posix(), 'sha256': sha256(raw).hexdigest(),
@@ -233,6 +304,8 @@ def approval_inputs(config):
         if 'binary' in codex:
             approved['binary'] = describe(codex['binary'])
         if approved['datasets'] or 'binary' in approved:
+            if automatic:
+                approved['source'] = settings['source']
             result[name] = approved
     return result
 
@@ -252,34 +325,48 @@ def approval_record(config):
     return {'config_sha256': config['fingerprint'], 'validation': approval_inputs(config)}
 
 
-def require_model_approval(config):
+def require_model_approval(config, *, name=None):
     approval = config.get('approval')
     if not isinstance(approval, dict):
         raise ValueError('Model learning requires re-enable with approved train, holdout, and fixtures')
-    for name, settings in config['skills'].items():
-        stored = approval.get(name)
+    automatic = config.get('selection') == 'all'
+    skills = config['skills']
+    if automatic and name is not None:
+        if name not in skills:
+            raise ValueError('Skill is no longer selected')
+        skills = {name: skills[name]}
+    for skill, settings in skills.items():
+        stored = approval.get(skill)
         needs_datasets = all(key in settings for key in ('train', 'holdout'))
         needs_binary = 'binary' in settings.get('harnesses', {}).get('codex', {})
         if ((needs_datasets and (not isinstance(stored, dict)
                                  or set(stored.get('datasets', {})) != {'train', 'holdout'}))
                 or (needs_binary and (not isinstance(stored, dict) or not stored.get('binary')))):
             raise ValueError('Model learning requires re-enable with approved train, holdout, and fixtures')
+        if automatic and (needs_datasets or needs_binary) and stored.get('source') != settings['source']:
+            raise ValueError('The selected skill source changed; re-enable learning')
     return approval
 
 
-def approval_still_current(config, approval):
+def approval_still_current(config, approval, *, name=None):
     """Check only identities the owner approved; never hash newly referenced fixtures."""
     from scripts.approved_binary import describe
     from scripts.inputs import input_specs
     root = config['root'].resolve()
-    for name, settings in config['skills'].items():
+    automatic = config.get('selection') == 'all'
+    skills = config['skills']
+    if automatic and name is not None:
+        if name not in skills:
+            return False
+        skills = {name: skills[name]}
+    for skill, settings in skills.items():
         codex = settings.get('harnesses', {}).get('codex', {})
         needs_binary = 'binary' in codex
         needs_datasets = all(key in settings for key in ('train', 'holdout'))
         if not needs_binary and not needs_datasets:
             continue
-        expected = approval.get(name)
-        if not isinstance(expected, dict):
+        expected = approval.get(skill)
+        if not isinstance(expected, dict) or (automatic and expected.get('source') != settings['source']):
             return False
         if needs_binary:
             try:
@@ -369,17 +456,23 @@ def wake(config):
 
 
 def binding(config, loaded):
+    if not loaded:
+        return {}
     bindings = {}
     for name, opts in config['skills'].items():
-        source = local_path(config['root'], opts['source'], directory=True)
-        markdown = source / 'SKILL.md'
-        for entry in loaded:
-            if isinstance(entry, dict) and Path(entry.get('path') or '.').resolve() == markdown:
-                if entry.get('hash') == digest(markdown):
-                    version = tree_hash(source)
-                    if entry.get('snapshot_hash') == version:
-                        bindings[name] = version
-                break
+        try:
+            source = local_path(config['root'], opts['source'], directory=True)
+            markdown = source / 'SKILL.md'
+            for entry in loaded:
+                if isinstance(entry, dict) and Path(entry.get('path') or '.').resolve() == markdown:
+                    if entry.get('hash') == digest(markdown):
+                        version = tree_hash(source)
+                        if entry.get('snapshot_hash') == version:
+                            bindings[name] = version
+                    break
+        except (OSError, ValueError):
+            if config.get('selection') != 'all':
+                raise
     return bindings
 
 
@@ -403,6 +496,22 @@ def source_inventory(config, *, hermes=False):
             # A source being edited can still be observed as an unbound turn.
             continue
     return versions
+
+
+def selected_version(config, name, versions):
+    if name in versions:
+        return versions[name]
+    settings = config['skills'].get(name)
+    version = None
+    if settings:
+        try:
+            source = local_path(config['root'], settings['source'], directory=True)
+            version = tree_hash(source)
+        except (OSError, ValueError):
+            if config.get('selection') != 'all':
+                raise
+    versions[name] = version
+    return version
 
 
 def record(db, witness, skill, version, origin, harness, session, turn, independent, case_id, kind, note,
@@ -708,8 +817,7 @@ def import_hermes(project, profile, *, completed_session=None, automatic=False):
     if not journal.is_file():
         raise ValueError('The Hermes journal must be a regular file')
 
-    versions = {name: tree_hash(local_path(project, settings['source'], directory=True))
-                for name, settings in target['skills'].items()}
+    versions = {}
     imported = sha256()
     checkpoint = False
     with closing(sqlite3.connect(journal.as_uri() + '?mode=ro', uri=True, timeout=10)) as hermes:
@@ -731,7 +839,8 @@ def import_hermes(project, profile, *, completed_session=None, automatic=False):
                     counts['skipped'] += 1
                     continue
                 name, version, kind = entry['skill'], entry['version'], entry['kind']
-                if (versions.get(name) != version or not isinstance(bound, dict) or bound.get(name) != version
+                if (selected_version(target, name, versions) != version
+                        or not isinstance(bound, dict) or bound.get(name) != version
                         or kind not in VERDICTS or not isinstance(witness, list) or len(witness) != 6
                         or not isinstance(witness[2], str) or not witness[2]
                         or witness != ['hermes', entry['session'], witness[2], entry['turn'], name, kind]):
@@ -814,8 +923,7 @@ def recover_hermes(project, profile, *, session, items):
     journal = source['state'] / 'journal.sqlite'
     if journal.resolve() != journal or not journal.is_file():
         raise ValueError('History recovery requires verified observations in this Hermes profile journal')
-    versions = {name: tree_hash(local_path(project, settings['source'], directory=True))
-                for name, settings in source['skills'].items()}
+    versions = {}
     with connection(source) as db:
         db.execute('BEGIN IMMEDIATE')
         for item in items:
@@ -842,7 +950,7 @@ def recover_hermes(project, profile, *, session, items):
             """, (session, target, uid)).fetchone()
             bound = json.loads(prior['bindings']) if prior else {}
             if not isinstance(bound, dict) or not bound or any(
-                versions.get(name) != version for name, version in bound.items()
+                selected_version(source, name, versions) != version for name, version in bound.items()
             ):
                 counts['skipped'] += 1
                 continue
@@ -971,6 +1079,9 @@ def main(argv=None):
         else:
             with connection(config) as db:
                 print(json.dumps({
+                    'scope': config['scope'],
+                    'selection': config['selection'],
+                    'skills': sorted(config['skills']),
                     'messages': db.execute('SELECT COUNT(*) FROM messages').fetchone()[0],
                     'model_steps': db.execute('SELECT COALESCE(SUM(steps),0) FROM model_steps').fetchone()[0],
                     **({'auto_import': config['auto_import']} if home is not None else {}),

@@ -454,6 +454,69 @@ def failed_optimizer_input_seen(db, name, version, input_hash, attempt):
     return False
 
 
+def automatic_selection(config):
+    return config.get('selection') == 'all'
+
+
+def model_eligible(config, name, settings):
+    """Automatic discovery is observational until this skill has approved inputs."""
+    if not automatic_selection(config):
+        return True
+    if not all(key in settings for key in ('train', 'holdout')):
+        return False
+    if not complete_harness_settings(settings):
+        return False
+    try:
+        approved = require_model_approval(config, name=name)
+        return approval_still_current(config, approved, name=name)
+    except (OSError, KeyError, TypeError, ValueError, RuntimeError):
+        # Eligibility is per skill. A stale or malformed approval must not stop
+        # other discovered skills from using their independently approved data.
+        return False
+
+
+def complete_harness_settings(settings):
+    """Avoid queueing revisions that cannot make a valid approved model request."""
+    options = settings.get('harnesses')
+    if (not isinstance(options, dict) or not options
+            or set(options) - {'codex', 'opencode', 'hermes'}):
+        return False
+    try:
+        for harness, value in options.items():
+            if not isinstance(value, dict) or 'model' not in value:
+                return False
+            for key in ('model', 'optimizer_model', 'judge_model'):
+                if key in value:
+                    model_ref(value[key], harness)
+            for key in RUNNER_ENV[harness].keys() & value.keys():
+                if not isinstance(value[key], str) or not value[key]:
+                    return False
+                if key in {'codex_home', 'binary', 'home'} and not Path(value[key]).expanduser().is_absolute():
+                    return False
+        optimizer = settings.get('optimizer')
+        if optimizer is not None:
+            if (not isinstance(optimizer, dict) or optimizer.get('harness') != 'hermes'
+                    or set(optimizer) - {'harness', 'model', 'home'} or 'model' not in optimizer):
+                return False
+            model_ref(optimizer['model'], 'hermes')
+            if 'home' in optimizer and (
+                    not isinstance(optimizer['home'], str)
+                    or not Path(optimizer['home']).expanduser().is_absolute()):
+                return False
+    except (KeyError, TypeError, ValueError):
+        return False
+    return True
+
+
+def source_matches_report(source, report):
+    """Bind lifecycle operations to the exact skill directory that was captured."""
+    captured = report.get('source')
+    try:
+        return Path(captured).resolve(strict=True) == Path(source).resolve(strict=True)
+    except (OSError, TypeError, ValueError):
+        return False
+
+
 def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_only=False, manual_retry=False):
     attempt.mkdir(parents=True, exist_ok=False)
     started = time.monotonic()
@@ -462,7 +525,7 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
     runtime_dir = None
     try:
         from scripts.learning_promotion import promote, tree_modes, verify_code
-        approved = require_model_approval(config)
+        approved = require_model_approval(config, name=name)
         if 'binary' in settings.get('harnesses', {}).get('codex', {}):
             runtime_dir = tempfile.TemporaryDirectory(prefix='skillcraft-codex-', dir=config['state'])
 
@@ -658,7 +721,8 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
             current = config_for(config['root'], trusted_internal=True)
             if (not current or current['fingerprint'] != config['fingerprint']
                     or current.get('approval') != approved
-                    or not approval_still_current(current, approved)):
+                    or not approval_still_current(current, approved, name=name)
+                    or not source_matches_report(source, report)):
                 raise ValueError('Owner configuration changed during qualification')
             report['promotion'] = promote(source, candidate, version, config['state'],
                                           expected_candidate_hash=candidate_hash,
@@ -740,10 +804,12 @@ def enqueue_changed_validation_retries(config, db):
     if db.execute("SELECT 1 FROM checkpoints WHERE status != 'done' LIMIT 1").fetchone():
         return
     for name, settings in config['skills'].items():
-        source = local_path(config['root'], settings['source'], directory=True)
-        version = tree_hash(source)
         try:
-            approval = require_model_approval(config)
+            if not model_eligible(config, name, settings):
+                continue
+            source = local_path(config['root'], settings['source'], directory=True)
+            version = tree_hash(source)
+            approval = require_model_approval(config, name=name)
             current_validation = validation_fingerprint(config, settings, approval.get(name))
         except (OSError, KeyError, TypeError, ValueError):
             continue
@@ -781,14 +847,33 @@ def drain(config, db):
             prior = db.execute('SELECT * FROM revisions WHERE checkpoint=? AND skill=?', (job['id'], name)).fetchone()
             if prior:
                 if prior['status'] == 'running':
-                    source = local_path(config['root'], settings['source'], directory=True)
-                    status = recover_attempt(Path(prior['path']), source, config['state'])
                     report_path = Path(prior['path']) / 'report.json'
                     report = read_json(report_path) if report_path.is_file() else {}
+                    try:
+                        source = local_path(config['root'], settings['source'], directory=True)
+                        if automatic_selection(config) and not source_matches_report(source, report):
+                            status = 'blocked'
+                            report.update(status=status, reason='Discovered skill source changed during this revision')
+                            write_recovery_record(report_path, report)
+                        else:
+                            status = recover_attempt(Path(prior['path']), source, config['state'])
+                    except (OSError, KeyError, TypeError, ValueError, RuntimeError) as error:
+                        if not automatic_selection(config):
+                            raise
+                        status = 'blocked'
+                        report.update(status=status, reason=sanitize(str(error)))
+                        write_recovery_record(report_path, report)
                     record_revision_outcome(db, prior['id'], status, report)
                 continue
-            source = local_path(config['root'], settings['source'], directory=True)
-            version = tree_hash(source)
+            if not model_eligible(config, name, settings):
+                continue
+            try:
+                source = local_path(config['root'], settings['source'], directory=True)
+                version = tree_hash(source)
+            except (OSError, KeyError, TypeError, ValueError, RuntimeError):
+                if automatic_selection(config):
+                    continue
+                raise
             rows = db.execute('SELECT * FROM evidence WHERE skill=? AND version=? AND consumed=0 ORDER BY id',
                               (name, version)).fetchall()
             if not unique_batch(rows):
@@ -841,6 +926,8 @@ def rollback_revision(config, revision):
         path = Path(row['path']) / 'report.json'
         report = read_json(path)
         source = local_path(config['root'], config['skills'][row['skill']]['source'], directory=True)
+        if automatic_selection(config) and not source_matches_report(source, report):
+            raise ValueError('Discovered skill source changed since this revision was applied')
         recovery = path.with_name('rollback.json')
         saved = read_json(recovery) if recovery.is_file() else {}
         value = saved if saved and recover_exchange(source, saved, config['state']) else rollback(
