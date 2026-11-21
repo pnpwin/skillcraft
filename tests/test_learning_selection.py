@@ -1,8 +1,9 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
-from scripts.learning_selection import discover_local_skills
+from scripts.learning_selection import discover_local_skills, linked_skill_target
 
 
 def _skill(directory: Path, *, name: str | None = None, body: str = "private body") -> None:
@@ -123,3 +124,154 @@ class LearningSelectionTest(unittest.TestCase):
         self.assertEqual(discover_local_skills(self.root, scope="project"), {})
         self.assertEqual(discover_local_skills(self.root, scope="home"), {})
         self.assertEqual(discover_local_skills(self.root, scope="unknown"), {})
+
+    def test_linked_skill_is_admitted_only_from_explicit_source_root(self) -> None:
+        approved = self.root / "checkout/skills"
+        _skill(approved / "linked-helper", name="linked-helper")
+        sibling = self.root / "checkout-other/skills"
+        _skill(sibling / "sibling-helper", name="sibling-helper")
+        aliases = self.root / ".agents/skills"
+        aliases.mkdir(parents=True)
+        (aliases / "linked-helper").symlink_to(approved / "linked-helper", target_is_directory=True)
+        (aliases / "sibling-helper").symlink_to(sibling / "sibling-helper", target_is_directory=True)
+
+        self.assertEqual(discover_local_skills(self.root, scope="project"), {})
+        self.assertEqual(discover_local_skills(
+            self.root, scope="project", linked_skill_roots=(approved.resolve(),)
+        ), {"linked-helper": [".agents/skills/linked-helper"]})
+        self.assertEqual(linked_skill_target(aliases / "linked-helper", (approved.resolve(),)),
+                         (approved / "linked-helper").resolve())
+        self.assertIsNone(linked_skill_target(aliases / "sibling-helper", (approved.resolve(),)))
+
+    def test_linked_target_must_be_strictly_inside_root_and_alias_id_must_match(self) -> None:
+        approved = self.root / "sources"
+        _skill(approved / "canonical", name="canonical")
+        _skill(approved / "other", name="other")
+        aliases = self.root / ".codex/skills"
+        aliases.mkdir(parents=True)
+        (aliases / "renamed").symlink_to(approved / "canonical", target_is_directory=True)
+        (aliases / "canonical").symlink_to(approved, target_is_directory=True)
+
+        self.assertIsNone(linked_skill_target(aliases / "renamed", (approved.resolve(),)))
+        self.assertIsNone(linked_skill_target(aliases / "canonical", (approved.resolve(),)))
+
+    def test_linked_target_rejects_broken_escaped_and_retargeted_links(self) -> None:
+        approved = self.root / "approved"
+        outside = self.root / "outside"
+        _skill(approved / "helper", name="helper")
+        _skill(outside / "helper", name="helper")
+        aliases = self.root / ".agents/skills"
+        aliases.mkdir(parents=True)
+        broken = aliases / "helper"
+        broken.symlink_to(approved / "missing", target_is_directory=True)
+        self.assertIsNone(linked_skill_target(broken, (approved.resolve(),)))
+        broken.unlink()
+        broken.symlink_to(outside / "helper", target_is_directory=True)
+        self.assertIsNone(linked_skill_target(broken, (approved.resolve(),)))
+        broken.unlink()
+        broken.symlink_to(approved / "helper", target_is_directory=True)
+        self.assertEqual(linked_skill_target(broken, (approved.resolve(),)), (approved / "helper").resolve())
+        broken.unlink()
+        broken.symlink_to(outside / "helper", target_is_directory=True)
+        self.assertIsNone(linked_skill_target(broken, (approved.resolve(),)))
+
+    def test_linked_target_rejects_canonical_managed_ancestry_and_nested_repo(self) -> None:
+        managed_root = self.root / "plugins" / "approved"
+        _skill(managed_root / "managed", name="managed")
+        nested_root = self.root / "approved-nested"
+        _skill(nested_root / "repo-skill", name="repo-skill")
+        (nested_root / "repo-skill/.git").mkdir()
+        aliases = self.root / ".agents/skills"
+        aliases.mkdir(parents=True)
+        (aliases / "managed").symlink_to(managed_root / "managed", target_is_directory=True)
+        (aliases / "repo-skill").symlink_to(nested_root / "repo-skill", target_is_directory=True)
+
+        self.assertIsNone(linked_skill_target(aliases / "managed", (managed_root.resolve(),)))
+        self.assertIsNone(linked_skill_target(aliases / "repo-skill", (nested_root.resolve(),)))
+
+    def test_linked_target_rechecks_plugin_and_hermes_metadata(self) -> None:
+        approved = self.root / "sources"
+        plugin = approved / "plugin-source" / "helper"
+        _skill(plugin, name="helper")
+        (plugin.parent / "plugin.json").write_text("{}", encoding="utf-8")
+        bundled_root = self.root / ".hermes/skills"
+        bundled = bundled_root / "research/bundled"
+        _skill(bundled, name="bundled")
+        (bundled_root / ".bundled_manifest").write_text("bundled:deadbeef\n", encoding="utf-8")
+        hub_root = bundled_root
+        hub = hub_root / "research/hub-managed"
+        _skill(hub, name="hub-managed")
+        lock = hub_root / ".hub/lock.json"
+        lock.parent.mkdir(parents=True)
+        lock.write_text('{"installed":{"pkg":{"install_path":"research/hub-managed"}}}',
+                        encoding="utf-8")
+        aliases = self.root / ".agents/skills"
+        aliases.mkdir(parents=True)
+        for name, target in (("helper", plugin), ("bundled", bundled), ("hub-managed", hub)):
+            (aliases / name).symlink_to(target, target_is_directory=True)
+
+        self.assertIsNone(linked_skill_target(aliases / "helper", (approved.resolve(),)))
+        self.assertIsNone(linked_skill_target(aliases / "bundled", (self.root.resolve(),)))
+        self.assertIsNone(linked_skill_target(aliases / "hub-managed", (self.root.resolve(),)))
+
+    def test_hermes_alias_categories_are_supported_without_following_symlinked_parent(self) -> None:
+        approved = self.root / "source"
+        _skill(approved / "category-helper", name="category-helper")
+        aliases = self.root / ".hermes/skills/research"
+        aliases.mkdir(parents=True)
+        (aliases / "category-helper").symlink_to(approved / "category-helper", target_is_directory=True)
+        parent_target = self.root / "outside-category"
+        _skill(parent_target / "escaped", name="escaped")
+        (self.root / ".hermes/skills/linked-category").symlink_to(parent_target, target_is_directory=True)
+
+        self.assertEqual(discover_local_skills(
+            self.root, scope="home", linked_skill_roots=(approved.resolve(),)
+        ), {"category-helper": [".hermes/skills/research/category-helper"]})
+
+    def test_linked_allowlist_root_inside_user_checkout_is_allowed(self) -> None:
+        checkout = self.root / "checkout"
+        (checkout / ".git").mkdir(parents=True)
+        approved = checkout / "skill-sources"
+        _skill(approved / "checkout-helper", name="checkout-helper")
+        aliases = self.root / ".agents/skills"
+        aliases.mkdir(parents=True)
+        (aliases / "checkout-helper").symlink_to(approved / "checkout-helper", target_is_directory=True)
+
+        self.assertEqual(discover_local_skills(
+            self.root, scope="project", linked_skill_roots=(approved.resolve(),)
+        ), {"checkout-helper": [".agents/skills/checkout-helper"]})
+
+    def test_linked_target_rejects_replaced_allowlist_root_and_does_not_read_unapproved_skill(self) -> None:
+        real_root = self.root / "real-source"
+        _skill(real_root / "helper", name="helper")
+        approved_link = self.root / "approved-source"
+        approved_link.symlink_to(real_root, target_is_directory=True)
+        approved = self.root / "approved"
+        approved.mkdir()
+        aliases = self.root / ".agents/skills"
+        aliases.mkdir(parents=True)
+        (aliases / "helper").symlink_to(real_root / "helper", target_is_directory=True)
+
+        self.assertIsNone(linked_skill_target(aliases / "helper", (approved_link,)))
+        with patch("scripts.learning_selection._skill_id", side_effect=AssertionError("read target")) as read_skill:
+            self.assertIsNone(linked_skill_target(aliases / "helper", (approved.resolve(),)))
+        read_skill.assert_not_called()
+
+    def test_custom_hermes_profile_metadata_is_checked_on_canonical_ancestors(self) -> None:
+        hermes_root = self.root / "custom-hermes/profiles/work/skills"
+        _skill(hermes_root / "custom-managed", name="custom-managed")
+        lock = hermes_root / ".hub/lock.json"
+        lock.parent.mkdir(parents=True)
+        lock.write_text(
+            '{"installed":{"package":{"install_path":"custom-managed"}}}',
+            encoding="utf-8",
+        )
+        aliases = self.root / ".agents/skills"
+        aliases.mkdir(parents=True)
+        (aliases / "custom-managed").symlink_to(
+            hermes_root / "custom-managed", target_is_directory=True
+        )
+
+        self.assertIsNone(linked_skill_target(
+            aliases / "custom-managed", (self.root.resolve(),)
+        ))

@@ -18,7 +18,7 @@ from scripts.compliance import require_standard
 from scripts.harness import model_ref
 from scripts.approved_binary import stage as stage_binary
 from scripts.learning import (CONFIG, INTERNAL, _reject_out_of_project_fixtures, approval_still_current,
-                              connection, dataset_snapshot, local_path,
+                              connection, dataset_snapshot, local_path, skill_source,
                               prompt_key, require_model_approval, sanitize, wake)
 from scripts.runtime import run_model
 from scripts.run_quality_eval import run_quality
@@ -350,6 +350,7 @@ def proposal_archive(proposal, report, *, response_hash=None):
         'sha256': proposal_hash(proposal), 'proposal': proposal,
         'input_hash': report.get('optimizer', {}).get('input_hash'),
         'source_hash': report.get('before'), 'source_modes': report.get('source_modes'),
+        'source_canonical': report.get('source_canonical'),
         'response_hash': response_hash,
     }
 
@@ -369,6 +370,7 @@ def load_saved_proposal(attempt, report):
     if (record.get('sha256') != actual or expected != actual
             or record.get('input_hash') != report.get('optimizer', {}).get('input_hash')
             or record.get('source_hash') != report.get('before')
+            or record.get('source_canonical') != report.get('source_canonical')
             or record.get('source_modes') != report.get('source_modes')):
         return None
     return proposal
@@ -399,6 +401,9 @@ def proposal_source_matches(prior_path, report, source, version):
         return False
     original = Path(prior_path) / 'original' / report.get('skill', '')
     try:
+        if (report.get('source_canonical')
+                and Path(report['source_canonical']) != Path(source)):
+            return False
         from scripts.learning_promotion import tree_modes
         return (tree_hash(source) == version and tree_hash(original) == version
                 and report.get('source_modes') == tree_modes(source) == tree_modes(original))
@@ -510,20 +515,53 @@ def complete_harness_settings(settings):
 
 def source_matches_report(source, report):
     """Bind lifecycle operations to the exact skill directory that was captured."""
-    captured = report.get('source')
+    captured = report.get('source_canonical')
     try:
-        return Path(captured).resolve(strict=True) == Path(source).resolve(strict=True)
+        if captured is not None:
+            return Path(captured) == Path(source)
+        return Path(report.get('source')).resolve(strict=True) == Path(source).resolve(strict=True)
     except (OSError, TypeError, ValueError):
         return False
+
+
+def linked_source(config, settings):
+    """Fail closed for linked aliases even if a caller tampers with worker settings."""
+    if 'linked_target' in settings:
+        return True
+    try:
+        relative = Path(settings['source'])
+        if relative.is_absolute() or '..' in relative.parts:
+            return False
+    except (KeyError, TypeError, ValueError):
+        return False
+    cursor = config['root']
+    for part in relative.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            return True
+    return False
+
+
+def source_identity(config, settings):
+    """Return source path and whether it must stay read-only."""
+    is_linked = linked_source(config, settings)
+    resolved = skill_source(config, settings)
+    if is_linked and str(resolved) != settings.get('linked_target'):
+        raise ValueError('The linked skill source changed before use')
+    return resolved, is_linked
 
 
 def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_only=False, manual_retry=False):
     attempt.mkdir(parents=True, exist_ok=False)
     started = time.monotonic()
-    report = {'skill': name, 'source': str(source), 'before': version, 'evidence': [row['id'] for row in rows],
+    report = {'skill': name, 'source': str(config['root'] / settings['source']),
+              'source_canonical': str(source),
+              'before': version, 'evidence': [row['id'] for row in rows],
               'status': 'blocked', 'validations': {}}
     runtime_dir = None
     try:
+        source, is_linked = source_identity(config, settings)
+        report.update(source_canonical=str(source), linked_source=is_linked)
         from scripts.learning_promotion import promote, tree_modes, verify_code
         approved = require_model_approval(config, name=name)
         if 'binary' in settings.get('harnesses', {}).get('codex', {}):
@@ -716,7 +754,10 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
         report['status'] = 'qualified'
         # Preserve the full approval inputs before attempting to activate the candidate.
         write_recovery_record(attempt / 'report.json', report)
-        if settings.get('auto_apply') is True:
+        if is_linked:
+            report['promotion'] = {'status': 'manual_required',
+                                   'reason': 'Linked skill sources are read-only to automatic learning'}
+        elif settings.get('auto_apply') is True:
             from scripts.learning import config_for
             current = config_for(config['root'], trusted_internal=True)
             if (not current or current['fingerprint'] != config['fingerprint']
@@ -724,6 +765,9 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
                     or not approval_still_current(current, approved, name=name)
                     or not source_matches_report(source, report)):
                 raise ValueError('Owner configuration changed during qualification')
+            current_source, current_linked = source_identity(config, settings)
+            if current_linked or current_source != source:
+                raise ValueError('Skill source changed before promotion')
             report['promotion'] = promote(source, candidate, version, config['state'],
                                           expected_candidate_hash=candidate_hash,
                                           expected_source_modes=source_modes,
@@ -742,7 +786,7 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
         write_recovery_record(attempt / 'report.json', report)
 
 
-def recover_attempt(attempt, source, state):
+def recover_attempt(attempt, source, state, *, linked=False, config=None, settings=None):
     path = attempt / 'report.json'
     if not path.is_file():
         return 'interrupted'
@@ -751,6 +795,25 @@ def recover_attempt(attempt, source, state):
         return report['status']
     promotion = attempt / 'promotion.json'
     if promotion.is_file():
+        if not source_matches_report(source, report):
+            report.update(status='blocked', reason='Skill source changed before promotion recovery')
+            write_recovery_record(path, report)
+            return 'blocked'
+        if linked:
+            report.update(status='blocked', reason='Cannot recover promotion onto a linked skill source')
+            write_recovery_record(path, report)
+            return 'blocked'
+        if config is not None and settings is not None:
+            try:
+                current_source, current_linked = source_identity(config, settings)
+            except (OSError, KeyError, TypeError, ValueError, RuntimeError) as error:
+                report.update(status='blocked', reason=sanitize(str(error)))
+                write_recovery_record(path, report)
+                return 'blocked'
+            if current_linked or current_source != source:
+                report.update(status='blocked', reason='Skill source changed before promotion recovery')
+                write_recovery_record(path, report)
+                return 'blocked'
         from scripts.learning_promotion import recover_exchange
         record = read_json(promotion)
         try:
@@ -778,6 +841,7 @@ def recover_attempt(attempt, source, state):
             archive_matches = (actual is not None and saved.get('sha256') == actual
                                and saved.get('input_hash') == optimizer.get('input_hash')
                                and saved.get('source_hash') == report.get('before')
+                               and saved.get('source_canonical') == report.get('source_canonical')
                                and saved.get('source_modes') == report.get('source_modes')
                                and (bound_hash is None or bound_hash == actual))
             if archive_matches and bound_hash is None:
@@ -807,7 +871,7 @@ def enqueue_changed_validation_retries(config, db):
         try:
             if not model_eligible(config, name, settings):
                 continue
-            source = local_path(config['root'], settings['source'], directory=True)
+            source, _ = source_identity(config, settings)
             version = tree_hash(source)
             approval = require_model_approval(config, name=name)
             current_validation = validation_fingerprint(config, settings, approval.get(name))
@@ -850,13 +914,14 @@ def drain(config, db):
                     report_path = Path(prior['path']) / 'report.json'
                     report = read_json(report_path) if report_path.is_file() else {}
                     try:
-                        source = local_path(config['root'], settings['source'], directory=True)
-                        if automatic_selection(config) and not source_matches_report(source, report):
+                        source, is_linked = source_identity(config, settings)
+                        if not source_matches_report(source, report):
                             status = 'blocked'
                             report.update(status=status, reason='Discovered skill source changed during this revision')
                             write_recovery_record(report_path, report)
                         else:
-                            status = recover_attempt(Path(prior['path']), source, config['state'])
+                            status = recover_attempt(Path(prior['path']), source, config['state'], linked=is_linked,
+                                                     config=config, settings=settings)
                     except (OSError, KeyError, TypeError, ValueError, RuntimeError) as error:
                         if not automatic_selection(config):
                             raise
@@ -868,7 +933,7 @@ def drain(config, db):
             if not model_eligible(config, name, settings):
                 continue
             try:
-                source = local_path(config['root'], settings['source'], directory=True)
+                source, _ = source_identity(config, settings)
                 version = tree_hash(source)
             except (OSError, KeyError, TypeError, ValueError, RuntimeError):
                 if automatic_selection(config):
@@ -925,9 +990,15 @@ def rollback_revision(config, revision):
             raise ValueError('No applied revision for an opted-in skill')
         path = Path(row['path']) / 'report.json'
         report = read_json(path)
-        source = local_path(config['root'], config['skills'][row['skill']]['source'], directory=True)
-        if automatic_selection(config) and not source_matches_report(source, report):
+        settings = config['skills'][row['skill']]
+        source, is_linked = source_identity(config, settings)
+        if is_linked:
+            raise ValueError('Linked skill sources are read-only to promotion rollback')
+        if not source_matches_report(source, report):
             raise ValueError('Discovered skill source changed since this revision was applied')
+        current_source, current_linked = source_identity(config, settings)
+        if current_linked or current_source != source:
+            raise ValueError('Skill source changed before promotion rollback')
         recovery = path.with_name('rollback.json')
         saved = read_json(recovery) if recovery.is_file() else {}
         value = saved if saved and recover_exchange(source, saved, config['state']) else rollback(

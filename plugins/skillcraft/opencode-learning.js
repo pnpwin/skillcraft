@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, sep } from 'node:path';
 
 export const learningEventTypes = [
@@ -240,27 +240,36 @@ export async function verifiedSkills(segment, catalog, inventory) {
     matches.push(entry);
     enrolledByPath.set(entry.path, matches);
   }
+  const hasLinkedSkills = inventory.some((entry) => entry.linked === true);
   const loaded = [];
   const seen = new Set();
   for (const attached of nativeSkillAttachments(segment)) {
     const entries = skillsByID.get(attached.id);
     if (entries?.length !== 1) continue;
     const entry = entries[0];
-    if (!entry?.path || typeof entry.content !== 'string' || enrolledByPath.get(entry.path)?.length !== 1) continue;
+    if (!entry?.path || typeof entry.content !== 'string') continue;
     try {
-      const bytes = await readFile(entry.path);
+      let sourcePath = entry.path;
+      let matches = enrolledByPath.get(sourcePath);
+      if (!matches && hasLinkedSkills && isAbsolute(sourcePath)) {
+        sourcePath = await realpath(sourcePath);
+        matches = enrolledByPath.get(sourcePath);
+        if (matches?.[0]?.linked !== true) continue;
+      }
+      if (matches?.length !== 1) continue;
+      const enrolled = matches[0];
+      const bytes = await readFile(sourcePath);
       const source = bytes.toString('utf8');
       const frontmatter = /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/.exec(source);
       const currentBody = frontmatter ? source.slice(frontmatter[0].length) : source;
-      const enrolled = enrolledByPath.get(entry.path)[0];
       const hash = createHash('sha256').update(bytes).digest('hex');
       if (enrolled.hash !== hash || entry.content !== currentBody) continue;
       if (attached.name !== undefined && attached.name !== (entry.name ?? entry.id)) continue;
       if (attached.raw ? attached.text !== currentBody : !wrappedSkillMatches(attached.text, entry)) continue;
-      const key = `${entry.path}\0${hash}\0${enrolled.snapshot_hash}`;
+      const key = `${sourcePath}\0${hash}\0${enrolled.snapshot_hash}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      loaded.push({ path: entry.path, hash, snapshot_hash: enrolled.snapshot_hash });
+      loaded.push({ path: sourcePath, hash, snapshot_hash: enrolled.snapshot_hash });
     } catch {
       // An attachment without a readable source cannot certify a file binding.
     }

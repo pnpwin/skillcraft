@@ -20,7 +20,7 @@ from scripts.utils import EXCLUDED, digest, read_json, safe_id, tree_hash
 
 CONFIG = Path('.skillcraft/learning.json')
 INTERNAL = 'SKILLCRAFT_LEARNING_INTERNAL'
-PROJECT_MARKERS = ('.git', '.arc', '.hg', '.svn', 'AGENTS.md')
+PROJECT_MARKERS = ('.git', '.hg', '.svn', 'AGENTS.md')
 MESSAGE_INTERVAL = 15
 MODEL_STEP_INTERVAL = 15
 VERDICTS = {'success', 'failure', 'correction'}
@@ -120,13 +120,51 @@ def local_path(root, value, *, directory=False):
     return path
 
 
-def selected_skills(root, raw, scope, selection):
+def configured_linked_roots(raw, selection):
+    values = raw.get('linked_skill_roots', [])
+    if selection != 'all' and 'linked_skill_roots' in raw:
+        raise ValueError('linked_skill_roots requires selection all')
+    if not isinstance(values, list):
+        raise ValueError('linked_skill_roots must be a list of absolute source directories')
+    roots = []
+    for value in values:
+        if not isinstance(value, str):
+            raise ValueError('linked_skill_roots must contain absolute source directories')
+        path = Path(value)
+        if not path.is_absolute() or '..' in path.parts:
+            raise ValueError('linked_skill_roots must contain absolute source directories')
+        roots.append(path)
+    return tuple(dict.fromkeys(roots))
+
+
+def approved_link_target(root, source, linked_roots):
+    from scripts.learning_selection import linked_skill_target
+
+    relative = relative_path(source)
+    parent = local_path(root, relative.parent.as_posix(), directory=True)
+    return linked_skill_target(parent / relative.name, linked_roots)
+
+
+def skill_source(config, settings):
+    """Resolve a selected source against the same approved target at use time."""
+    source = settings['source']
+    if 'linked_target' not in settings:
+        return local_path(config['root'], source, directory=True)
+    target = approved_link_target(config['root'], source, config.get('linked_skill_roots', ()))
+    if target is None or str(target) != settings['linked_target']:
+        raise ValueError(f'The linked skill source changed or is no longer allowed: {source}')
+    return target
+
+
+def selected_skills(root, raw, scope, selection, linked_roots=()):
     overrides = raw.get('skills', {})
     if selection not in ('explicit', 'all') or not isinstance(overrides, dict):
         raise ValueError('Expected selection explicit or all and a skills object')
     for name, settings in overrides.items():
         if name != safe_id(name) or not isinstance(settings, dict):
             raise ValueError('Expected a skill ID and settings object')
+        if 'linked_target' in settings:
+            raise ValueError('linked_target is resolved from an approved directory')
     if selection == 'explicit':
         if not overrides:
             raise ValueError('Learning requires explicitly selected skills')
@@ -146,23 +184,33 @@ def selected_skills(root, raw, scope, selection):
     if not isinstance(exclude, list) or any(not isinstance(name, str) or name != safe_id(name) for name in exclude):
         raise ValueError('exclude must contain exact skill IDs')
     defaults = raw.get('defaults', {})
-    if not isinstance(defaults, dict) or 'source' in defaults:
+    if not isinstance(defaults, dict) or {'source', 'linked_target'} & defaults.keys():
         raise ValueError('defaults must be a skills settings object without a source')
     pins = {name: relative_path(settings['source']).as_posix() for name, settings in overrides.items()
             if 'source' in settings}
     result = {}
     excluded = set(exclude)
     running_skill = Path(__file__).resolve().parents[1]
-    for name, paths in discover_local_skills(root, scope=scope).items():
+    for name, paths in discover_local_skills(root, scope=scope, linked_skill_roots=linked_roots).items():
         if name in excluded:
             continue
         override = overrides.get(name, {})
-        source = pins.get(name)
-        if source is None and len(paths) == 1:
-            source = paths[0]
-        if source not in paths or root / source == running_skill:
+        if name in pins:
+            paths = [pins[name]] if pins[name] in paths else []
+        candidates = {}
+        for path in paths:
+            target = root / path
+            linked = target.is_symlink()
+            if linked:
+                target = approved_link_target(root, path, linked_roots)
+            if target is not None and target != running_skill and (target not in candidates or not linked):
+                candidates[target] = (path, linked)
+        if len(candidates) != 1:
             continue
+        target, (source, linked) = next(iter(candidates.items()))
         settings = {**defaults, **override, 'source': source}
+        if linked:
+            settings.update(linked_target=str(target), auto_apply=False)
         for field in ('train', 'holdout'):
             if field in defaults and field not in override:
                 pattern = defaults[field]
@@ -177,7 +225,8 @@ def has_project_boundary(directory, home):
     for parent in (directory, *directory.parents):
         if parent == home:
             return False
-        if any((parent / marker).exists() or (parent / marker).is_symlink() for marker in PROJECT_MARKERS):
+        if parent.is_mount() or any((parent / marker).exists() or (parent / marker).is_symlink()
+                                    for marker in PROJECT_MARKERS):
             return True
     return False
 
@@ -257,9 +306,10 @@ def config_for(project, *, enrolling=False, trusted_internal=False, hermes_home=
                 if marker_raw.strip() != fingerprint:
                     return None
         selection = raw.get('selection', 'explicit')
-        skills = selected_skills(root, raw, scope, selection)
+        linked_roots = configured_linked_roots(raw, selection)
+        skills = selected_skills(root, raw, scope, selection, linked_roots)
         return {'root': root, 'state': state, 'skills': skills, 'sources': sources,
-                'scope': scope, 'selection': selection,
+                'scope': scope, 'selection': selection, 'linked_skill_roots': linked_roots,
                 'fingerprint': fingerprint, 'approval': approval, 'hermes': hermes_home is not None,
                 'auto_import': auto_import}
     return None
@@ -282,7 +332,7 @@ def approval_inputs(config):
     for name, settings in config['skills'].items():
         approved = {'datasets': {}, 'fixtures': []}
         if all(key in settings for key in ('train', 'holdout')):
-            source = local_path(root, settings['source'], directory=True)
+            source = skill_source(config, settings)
             datasets = {split: local_path(root, settings[split]) for split in ('train', 'holdout')}
             if automatic and not all(path.exists() for path in datasets.values()):
                 continue
@@ -306,6 +356,8 @@ def approval_inputs(config):
         if approved['datasets'] or 'binary' in approved:
             if automatic:
                 approved['source'] = settings['source']
+                if 'linked_target' in settings:
+                    approved['linked_target'] = settings['linked_target']
             result[name] = approved
     return result
 
@@ -323,6 +375,11 @@ def _reject_out_of_project_fixtures(items, base, root):
 
 def approval_record(config):
     return {'config_sha256': config['fingerprint'], 'validation': approval_inputs(config)}
+
+
+def same_approved_source(settings, approval):
+    return (settings['source'] == approval.get('source')
+            and settings.get('linked_target') == approval.get('linked_target'))
 
 
 def require_model_approval(config, *, name=None):
@@ -343,7 +400,7 @@ def require_model_approval(config, *, name=None):
                                  or set(stored.get('datasets', {})) != {'train', 'holdout'}))
                 or (needs_binary and (not isinstance(stored, dict) or not stored.get('binary')))):
             raise ValueError('Model learning requires re-enable with approved train, holdout, and fixtures')
-        if automatic and (needs_datasets or needs_binary) and stored.get('source') != settings['source']:
+        if automatic and (needs_datasets or needs_binary) and not same_approved_source(settings, stored):
             raise ValueError('The selected skill source changed; re-enable learning')
     return approval
 
@@ -366,7 +423,7 @@ def approval_still_current(config, approval, *, name=None):
         if not needs_binary and not needs_datasets:
             continue
         expected = approval.get(skill)
-        if not isinstance(expected, dict) or (automatic and expected.get('source') != settings['source']):
+        if not isinstance(expected, dict) or (automatic and not same_approved_source(settings, expected)):
             return False
         if needs_binary:
             try:
@@ -376,7 +433,7 @@ def approval_still_current(config, approval, *, name=None):
                 return False
         if not all(key in settings for key in ('train', 'holdout')):
             continue
-        source = local_path(root, settings['source'], directory=True)
+        source = skill_source(config, settings)
         fixtures = {(item['split'], item['case_id'], item['destination']): item
                     for item in expected.get('fixtures', [])}
         seen = set()
@@ -461,7 +518,7 @@ def binding(config, loaded):
     bindings = {}
     for name, opts in config['skills'].items():
         try:
-            source = local_path(config['root'], opts['source'], directory=True)
+            source = skill_source(config, opts)
             markdown = source / 'SKILL.md'
             for entry in loaded:
                 if isinstance(entry, dict) and Path(entry.get('path') or '.').resolve() == markdown:
@@ -482,11 +539,13 @@ def source_inventory(config, *, hermes=False):
         return versions
     for settings in config['skills'].values():
         try:
-            source = local_path(config['root'], settings['source'], directory=True)
+            source = skill_source(config, settings)
             markdown = source / 'SKILL.md'
             content = markdown.read_bytes()
             version = {'path': str(markdown), 'hash': sha256(content).hexdigest(),
                        'snapshot_hash': tree_hash(source)}
+            if 'linked_target' in settings:
+                version['linked'] = True
             if hermes:
                 # Hermes decodes SKILL.md with utf-8-sig and universal newlines.
                 decoded = content.decode('utf-8-sig').replace('\r\n', '\n').replace('\r', '\n')
@@ -505,7 +564,7 @@ def selected_version(config, name, versions):
     version = None
     if settings:
         try:
-            source = local_path(config['root'], settings['source'], directory=True)
+            source = skill_source(config, settings)
             version = tree_hash(source)
         except (OSError, ValueError):
             if config.get('selection') != 'all':
@@ -669,7 +728,7 @@ def eval_context(workspace, project=None):
         return None
     if manifest.get('harness') not in HARNESSES:
         return None
-    source = local_path(config['root'], config['skills'][name]['source'], directory=True)
+    source = skill_source(config, config['skills'][name])
     version = tree_hash(source)
     candidate = snapshot_hash(source)
     if tree_hash(source) != version:
