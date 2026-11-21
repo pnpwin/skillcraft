@@ -1,6 +1,6 @@
 # Learn from verified skill use
 
-Enable learning for a specific project and its checked-out skill sources.
+Enable learning for a project or for eligible local skill sources under home.
 Install the SkillCraft plugin in Codex or OpenCode to collect conversation
 events. Standalone SkillCraft can collect evaluation and review evidence.
 Review and trust SkillCraft's bundled `UserPromptSubmit` and `Stop` hooks in
@@ -58,6 +58,40 @@ requires deterministic checks for every scored expectation. Add an independent
 `judge_model` in a supported Codex or OpenCode evaluation setup when the rubric
 requires model grading.
 
+Schema version 1 also supports automatic selection. For example, a
+capture-only project configuration is:
+
+```json
+{
+  "schema_version": 1,
+  "enabled": true,
+  "sources": ["sessions", "evals"],
+  "selection": "all",
+  "exclude": ["private-skill"]
+}
+```
+
+The existing `skills` map selects sources explicitly when `selection` is absent
+or set to `"explicit"`. Use `"all"` to discover local skills on each call. To opt
+out of specific skills, add their exact IDs to `exclude`. Automatic selection
+works in an empty project and adds eligible new skills without re-enrollment.
+
+Project discovery uses `.agents/skills`, `.codex/skills`, `.hermes/skills`,
+`.opencode/skills`, and `opencode/skills`. Hermes also supports one level of
+categories. Automatic discovery skips symlinked paths, nested Git checkouts,
+known plugin and marketplace locations or manifests, and installs identified
+by Hermes bundle and Hub metadata. A standalone copy with no installation
+metadata can be excluded by ID. If the same skill ID exists in several
+eligible directories, pin its `source` by adding it to the `skills` map.
+
+For capture only, omit evaluation settings. To set up model-based revision in
+bulk, set `defaults` with shared `harnesses` and dataset paths such as
+`"train": "evals/{skill}/train.json"` and
+`"holdout": "evals/{skill}/holdout.json"`. The optional `skills` map overrides
+settings by ID. Run `enable` after preparing a new skill's evaluation data to
+approve its inputs before model-based revision. Automatic promotion requires
+`auto_apply: true`.
+
 For background runs, set Codex's optional `codex_home` and `binary` paths
 or OpenCode's optional `server` URL in the corresponding runtime settings.
 If `codex.binary` is configured, enable records its executable identity and
@@ -89,6 +123,24 @@ Set `sources` to `["evals"]` for an evaluation-only comparison. To suspend
 collection, set `enabled` to false. Existing journal and revision files stay
 available for inspection.
 
+## Home configuration
+
+For home-wide collection, create `~/.skillcraft/learning.json` with
+`"scope": "home"` and an automatic selection configuration, then approve it:
+
+```sh
+"${SKILLCRAFT_VENV:-${XDG_DATA_HOME:-$HOME/.local/share}/skillcraft/venv}/bin/python" \
+  "$SKILLCRAFT/scripts/learning.py" enable "$HOME"
+```
+
+The home configuration captures sessions under `HOME` when there is no project
+configuration or intervening Git, Arc, Hg, SVN, or `AGENTS.md` project marker. A session
+at exactly `HOME` opts in even when `HOME` has a repository marker. An approved
+project configuration takes precedence; a disabled project configuration blocks
+home fallback. Home collection never uses a project's separate journal.
+Home automatic selection uses the same directories relative to `HOME` and
+also checks `~/.config/opencode/skills`. Explicit selection works at home as well.
+
 ## Local Hermes chats
 
 Install and enable the SkillCraft Git plugin in the Hermes profile that hosts
@@ -117,6 +169,12 @@ the Hermes profile that owns the chats:
 
 ```sh
 hermes skillcraft enable "$PWD" --auto-import
+```
+
+For the home configuration, enroll the same scope in Hermes with:
+
+```sh
+hermes skillcraft enable "$HOME" --auto-import
 ```
 
 SkillCraft forwards verified feedback and adds the completed turn's messages
