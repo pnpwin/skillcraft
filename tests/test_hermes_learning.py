@@ -10,6 +10,8 @@ import unittest
 from unittest.mock import Mock, patch
 from venv import EnvBuilder
 
+import yaml
+
 from plugins import skillcraft
 from scripts import learning
 from scripts.utils import tree_hash, write_json
@@ -78,6 +80,8 @@ class HermesLearningTest(unittest.TestCase):
         self.assertTrue(path.is_file())
         self.assertTrue((path.parent / 'references/learning.md').is_file())
         self.assertEqual(set(self.hooks), {'pre_llm_call', 'post_tool_call', 'post_api_request', 'post_llm_call'})
+        manifest = yaml.safe_load(Path(skillcraft.__file__).with_name('plugin.yaml').read_text())
+        self.assertCountEqual(manifest['provides_hooks'], self.hooks)
         self.command('enable')
         self.start('one')
         self.view('one')

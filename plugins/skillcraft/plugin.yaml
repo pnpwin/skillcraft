@@ -6,4 +6,5 @@ python_dependencies:
 provides_hooks:
   - pre_llm_call
   - post_tool_call
+  - post_api_request
   - post_llm_call
