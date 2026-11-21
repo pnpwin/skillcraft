@@ -54,6 +54,8 @@ hermes plugins enable skillcraft
 
 Open the shared skill with `skill_view("skillcraft:skillcraft")`. Hermes supports
 skill authoring and an [opt-in learning journal](plugins/skillcraft/skills/skillcraft/references/learning.md#local-hermes-chats).
+For file-based quality A/B on macOS, install and sign in to the native Hermes
+Chat CLI, then follow the [Hermes runner guide](plugins/skillcraft/skills/skillcraft/references/hermes-runner.md).
 
 **Standalone installation**
 
@@ -109,10 +111,10 @@ npm --prefix "$SKILLCRAFT/scripts/opencode-runner" run check
 ```
 
 Each experiment needs a new workspace outside the skill, for example
-`.agents/skillcraft-workspaces/`. Commands detect the calling harness from the
-shell session, including local Codex chats in ChatGPT desktop. Use `--harness codex`
-or `--harness opencode` in a plain terminal, in CI, or when both session signals
-are present. `--harness chatgpt` explicitly selects the same Codex runner. Each
+`.agents/skillcraft-workspaces/`. Commands detect Codex, OpenCode, or Hermes
+from unambiguous native session signals. Use `--harness codex`,
+`--harness opencode`, or `--harness hermes` in a plain terminal, in CI, or when
+signals conflict. `--harness chatgpt` explicitly selects the same Codex runner. Each
 experiment uses the selected harness for execution, grading and optimization.
 
 For controlled OpenCode evaluations, point `SKILLCRAFT_SERVER` at a separate

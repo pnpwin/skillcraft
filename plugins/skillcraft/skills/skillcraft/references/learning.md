@@ -155,8 +155,23 @@ home fallback. A session
 at exactly `HOME` opts in even when `HOME` has a repository marker. An approved
 project configuration takes precedence; a disabled project configuration blocks
 home fallback. Home collection never uses a project's separate journal.
-Home automatic selection uses the same directories relative to `HOME` and
-also checks `~/.config/opencode/skills`. Explicit selection works at home as well.
+Home automatic selection includes `~/.codex/skills`, `~/.hermes/skills`, and
+`~/.config/opencode/skills`. The native Hermes plugin uses only the active
+profile's Hermes skill root, including one category level. Explicit selection
+works at home as well. See the [configuration reference](configuration.md#root-fields)
+for the full list and the rules for linked sources.
+
+To send experience from a named profile's own skills to the shared home
+journal, set `"hermes_skill_home": ".hermes/profiles/work"` alongside
+`"scope": "home"` and `"selection": "all"`. Re-enable shared Learning and
+enroll the named profile. This scopes shared discovery to the chosen Hermes
+skill root and keeps each profile journal separate.
+
+```sh
+"$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/learning.py" enable "$HOME"
+hermes -p work skillcraft enable "$HOME" --auto-import
+hermes -p work skillcraft status "$HOME"
+```
 
 ## Local Hermes chats
 
@@ -206,9 +221,9 @@ default profile on a standard installation).
 ```
 
 Both enrollments must match the current project configuration. The command
-reports imported, duplicate, and skipped entries. Import preserves the recorded
-version, checks it against the current skill, and accepts feedback from
-completed turns. New evidence queues a check under the existing evaluation
+reports imported, duplicate, and skipped entries. Import accepts feedback from
+completed turns when both scopes select the same skill source and the recorded
+version matches the current skill. New evidence queues a check under the existing evaluation
 and promotion requirements.
 
 To recover feedback from one older local chat, select its session ID in the

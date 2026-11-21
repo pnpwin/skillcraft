@@ -178,6 +178,93 @@ class LearningScopeTests(unittest.TestCase):
             stats = learning.import_hermes(self.home, profile, completed_session='session', automatic=True)
         self.assertEqual(stats['imported'], 1)
 
+    def test_active_hermes_profile_discovers_only_its_own_hermes_skills(self):
+        default = self.make_skill(self.home, 'default-only', '.hermes/skills')
+        sibling = self.make_skill(self.home, 'sibling-only', '.hermes/profiles/other/skills')
+        profile = self.home / '.hermes/profiles/work'
+        active_root = profile / 'skills'
+        active = self.make_skill(profile, 'active-only', 'skills/research')
+        self.make_skill(profile, 'bundled', 'skills')
+        (active_root / '.bundled_manifest').write_text('bundled:hash\n')
+        codex = self.make_skill(self.home, 'codex-local', '.codex/skills')
+        opencode = self.make_skill(self.home, 'opencode-local', '.config/opencode/skills')
+        self.configure(self.home, scope='home', selection='all', sources=['sessions'])
+        self.enable(self.home)
+        self.enable(self.home, '--hermes-home', str(profile))
+
+        shared = learning.config_for(self.home)
+        self.assertEqual(set(shared['skills']), {default.name, codex.name, opencode.name})
+        named = learning.config_for(self.home, hermes_home=profile)
+        self.assertEqual(set(named['skills']), {active.name, codex.name, opencode.name})
+        self.assertEqual(learning.skill_source(named, named['skills'][active.name]), active)
+        other = learning.config_for(self.home, enrolling=True, hermes_home=sibling.parents[1])
+        self.assertEqual(set(other['skills']), {sibling.name, codex.name, opencode.name})
+
+        later = self.make_skill(profile, 'added-after-enable', 'skills')
+        self.assertIn(later.name, learning.config_for(self.home, hermes_home=profile)['skills'])
+        self.assertNotIn(later.name, learning.config_for(self.home)['skills'])
+
+    def test_named_hermes_profile_can_import_verified_home_evidence(self):
+        profile = self.home / '.hermes/profiles/work'
+        other = self.home / '.hermes/profiles/other'
+        self.make_skill(self.home, 'demo', '.hermes/skills')
+        source = self.make_skill(profile, 'demo', 'skills')
+        self.make_skill(other, 'demo', 'skills')
+        self.configure(self.home, scope='home', selection='all', sources=['sessions'],
+                       hermes_skill_home='.hermes/profiles/work')
+        self.enable(self.home)
+        shared = learning.config_for(self.home)
+        self.assertEqual(learning.skill_source(shared, shared['skills']['demo']), source)
+        for active, expected in ((profile, 1), (other, 0)):
+            with self.subTest(active=active.name):
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(learning.main(['--hermes-home', str(active), 'enable', str(self.home),
+                                                    '--auto-import']), 0)
+                observed = learning.config_for(self.home, hermes_home=active)
+                versions = learning.source_inventory(observed, hermes=True)
+                session = active.name
+                self.assertTrue(learning.observe(self.home, 'hermes', session, 'read', 'user', 'Use demo', [],
+                                                 hermes_home=active))
+                self.assertTrue(learning.observe(self.home, 'hermes', session, 'read', 'assistant', 'Output', versions,
+                                                 hermes_home=active))
+                self.assertTrue(learning.observe(self.home, 'hermes', session, 'feedback', 'user', 'It works.', [],
+                                                 target_turn='read', hermes_home=active))
+                self.assertTrue(learning.observe(self.home, 'hermes', session, 'feedback', 'assistant', 'Thanks', [],
+                                                 hermes_home=active))
+                with patch.object(learning, 'wake'):
+                    result = learning.import_hermes(self.home, active, completed_session=session, automatic=True)
+                self.assertEqual(result['imported'], expected)
+                self.assertEqual(result['skipped'], 1 - expected)
+
+    def test_home_link_preview_uses_the_active_hermes_profile(self):
+        profile = self.home / '.hermes/profiles/work'
+        source = self.make_skill(self.root, 'external', 'sources')
+        aliases = profile / 'skills/research'
+        aliases.mkdir(parents=True)
+        (aliases / 'external').symlink_to(source, target_is_directory=True)
+        self.configure(self.home, scope='home', selection='all', sources=['sessions'])
+        raw = {'scope': 'home', 'selection': 'all'}
+        default = learning.config_for(self.home, enrolling=True)
+        named = learning.config_for(self.home, enrolling=True, hermes_home=profile)
+        self.assertEqual(learning.linked_root_preview(default, raw)['candidates'], [])
+        self.assertEqual(learning.linked_root_preview(named, raw)['candidates'], [{
+            'root': str(source.parent),
+            'links': [{'source': '.hermes/profiles/work/skills/research/external', 'target': str(source)}],
+        }])
+
+    def test_hermes_skill_home_is_home_relative_and_requires_automatic_home_scope(self):
+        for scope, selection, path in (
+            ('project', 'all', '.hermes/profiles/work'),
+            ('home', 'explicit', '.hermes/profiles/work'),
+            ('home', 'all', '/tmp/profile'),
+            ('home', 'all', '../profile'),
+        ):
+            with self.subTest(scope=scope, selection=selection, path=path):
+                root = self.home if scope == 'home' else self.project
+                self.configure(root, scope=scope, selection=selection, hermes_skill_home=path)
+                with self.assertRaisesRegex(ValueError, 'hermes_skill_home'):
+                    learning.config_for(root, enrolling=True)
+
     def test_defaults_allow_bulk_model_setup_while_pinning_approval_to_each_skill_source(self):
         self.configure(self.project, selection='all', defaults={
             'train': 'evals/{skill}/train.json', 'holdout': 'evals/{skill}/holdout.json',

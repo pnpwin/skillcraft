@@ -161,7 +161,7 @@ def skill_source(config, settings):
     return target
 
 
-def selected_skills(root, raw, scope, selection, linked_roots=()):
+def selected_skills(root, raw, scope, selection, linked_roots=(), *, hermes_home=None):
     overrides = raw.get('skills', {})
     if selection not in ('explicit', 'all') or not isinstance(overrides, dict):
         raise ValueError('Expected selection explicit or all and a skills object')
@@ -196,7 +196,10 @@ def selected_skills(root, raw, scope, selection, linked_roots=()):
     result = {}
     excluded = set(exclude)
     running_skill = Path(__file__).resolve().parents[1]
-    for name, paths in discover_local_skills(root, scope=scope, linked_skill_roots=linked_roots).items():
+    discovered = discover_local_skills(
+        root, scope=scope, linked_skill_roots=linked_roots, hermes_home=hermes_home,
+    )
+    for name, paths in discovered.items():
         if name in excluded:
             continue
         override = overrides.get(name, {})
@@ -283,6 +286,18 @@ def matching_marker(contents, fingerprint):
     return None
 
 
+def discovery_hermes_home(root, raw, scope, selection, active_profile):
+    configured = None
+    if 'hermes_skill_home' in raw:
+        if scope != 'home' or selection != 'all':
+            raise ValueError('hermes_skill_home requires scope home and selection all')
+        try:
+            configured = local_path(root, raw['hermes_skill_home'])
+        except ValueError as error:
+            raise ValueError('hermes_skill_home must be a home-relative path without symlinks') from error
+    return active_profile if active_profile is not None else configured
+
+
 def config_for(project, *, enrolling=False, trusted_internal=False, hermes_home=None):
     if os.environ.get(INTERNAL) == '1' and not trusted_internal:
         return None
@@ -323,11 +338,12 @@ def config_for(project, *, enrolling=False, trusted_internal=False, hermes_home=
             auto_import = hermes_home is not None and marker.get('auto_import') is True
         selection = raw.get('selection', 'explicit')
         linked_roots = configured_linked_roots(raw, selection)
-        skills = selected_skills(root, raw, scope, selection, linked_roots)
+        discovery_home = discovery_hermes_home(root, raw, scope, selection, hermes_home)
+        skills = selected_skills(root, raw, scope, selection, linked_roots, hermes_home=discovery_home)
         return {'root': root, 'state': state, 'skills': skills, 'sources': sources,
                 'scope': scope, 'selection': selection, 'linked_skill_roots': linked_roots,
                 'fingerprint': fingerprint, 'approval': approval, 'hermes': hermes_home is not None,
-                'auto_import': auto_import}
+                'hermes_skill_home': discovery_home, 'auto_import': auto_import}
     return None
 
 
@@ -945,7 +961,11 @@ def import_hermes(project, profile, *, completed_session=None, automatic=False):
                     counts['skipped'] += 1
                     continue
                 name, version, kind = entry['skill'], entry['version'], entry['kind']
-                if (selected_version(target, name, versions) != version
+                source_settings = source['skills'].get(name)
+                target_settings = target['skills'].get(name)
+                if (not source_settings or not target_settings
+                        or not same_approved_source(source_settings, target_settings)
+                        or selected_version(target, name, versions) != version
                         or not isinstance(bound, dict) or bound.get(name) != version
                         or kind not in VERDICTS or not isinstance(witness, list) or len(witness) != 6
                         or not isinstance(witness[2], str) or not witness[2]
@@ -1087,7 +1107,7 @@ def linked_root_preview(config, raw):
             if 'source' in opts}
     candidates = linked_root_candidates(
         config['root'], scope=config['scope'], linked_skill_roots=config['linked_skill_roots'],
-        exclude=raw.get('exclude', ()), pins=pins,
+        hermes_home=config['hermes_skill_home'], exclude=raw.get('exclude', ()), pins=pins,
     )
     entries = [{'root': str(root), 'links': [{'source': source, 'target': str(target)}
                                             for source, target in links]}
@@ -1242,7 +1262,8 @@ def enable_learning(args, home):
             approved_roots.extend(entry['root'] for entry in entries)
             updated = {**raw, 'linked_skill_roots': approved_roots}
             linked_roots = configured_linked_roots(updated, config['selection'])
-            skills = selected_skills(root, updated, config['scope'], config['selection'], linked_roots)
+            skills = selected_skills(root, updated, config['scope'], config['selection'], linked_roots,
+                                     hermes_home=config['hermes_skill_home'])
             for entry in entries:
                 for link in entry['links']:
                     name = Path(link['source']).name

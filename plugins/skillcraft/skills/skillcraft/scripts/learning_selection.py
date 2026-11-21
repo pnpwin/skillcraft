@@ -266,14 +266,25 @@ def _preview_crosses_checkout(root: Path, target: Path) -> bool:
     return target in checkouts or len(checkouts) > 1
 
 
-def _scope_candidates(root: Path, scope: str, *, include_links: bool):
-    roots = _PROJECT_ROOTS if scope == "project" else _HOME_ROOTS if scope == "home" else ()
-    for rel_root in roots:
-        relative = Path(rel_root)
+def _scope_roots(root: Path, scope: str, hermes_home: Path | None) -> dict[Path, bool]:
+    paths = _PROJECT_ROOTS if scope == "project" else _HOME_ROOTS if scope == "home" else ()
+    default_hermes = Path(".hermes/skills")
+    roots = {Path(path): Path(path) == default_hermes for path in paths}
+    if scope == "home" and hermes_home is not None:
+        roots.pop(default_hermes)
+        skills = hermes_home / "skills"
+        if skills.is_relative_to(root):
+            relative = skills.relative_to(root)
+            if not any(part.casefold() in _EXCLUDED_PARTS for part in relative.parts):
+                roots[relative] = True
+    return roots
+
+
+def _scope_candidates(root: Path, scope: str, *, include_links: bool, hermes_home: Path | None):
+    for relative, hermes in _scope_roots(root, scope, hermes_home).items():
         skills_root = root / relative
         if _crosses_managed_directory(root, relative) or not skills_root.is_dir():
             continue
-        hermes = rel_root.endswith(".hermes/skills")
         names, paths, valid = _managed_hermes(skills_root) if hermes else (set(), set(), True)
         for candidate in _skill_directories(skills_root, hermes=hermes, include_links=include_links):
             linked = candidate.is_symlink()
@@ -304,6 +315,7 @@ def linked_root_candidates(
     *,
     scope: str,
     linked_skill_roots: tuple[Path, ...] = (),
+    hermes_home: Path | None = None,
     exclude=(),
     pins=None,
 ) -> dict[Path, tuple[tuple[str, Path], ...]]:
@@ -320,7 +332,7 @@ def linked_root_candidates(
     excluded = set(exclude)
     pins = pins or {}
     grouped: dict[Path, set[tuple[str, Path]]] = {}
-    for link, linked in _scope_candidates(root, scope, include_links=True):
+    for link, linked in _scope_candidates(root, scope, include_links=True, hermes_home=hermes_home):
         if not linked or link.name in excluded:
             continue
         alias = link.relative_to(root).as_posix()
@@ -344,17 +356,21 @@ def discover_local_skills(
     *,
     scope: str,
     linked_skill_roots: tuple[Path, ...] = (),
+    hermes_home: Path | None = None,
 ) -> dict[str, list[str]]:
     """Return exact skill IDs mapped to scope-relative source paths.
 
     ``root`` is the project root for ``scope="project"`` and the home root for
-    ``scope="home"``. Discovery is read-only and performed on every call.
+    ``scope="home"``. A selected Hermes profile replaces the default Hermes
+    directory in home scope. Discovery is read-only and performed on every call.
     """
     root = Path(root)
     if root.is_symlink():
         return {}
     found: dict[str, set[str]] = {}
-    for skill_dir, linked in _scope_candidates(root, scope, include_links=bool(linked_skill_roots)):
+    for skill_dir, linked in _scope_candidates(
+        root, scope, include_links=bool(linked_skill_roots), hermes_home=hermes_home,
+    ):
         if linked:
             if linked_skill_target(skill_dir, linked_skill_roots) is None:
                 continue

@@ -2,7 +2,8 @@
 
 Compact reference for user-facing SkillCraft settings. The [Learning guide](learning.md),
 [Codex runner guide](codex-runner.md), [OpenCode runner guide](opencode-runner.md),
-and [schema guide](schemas.md) explain workflows and contracts in more detail.
+[Hermes runner guide](hermes-runner.md), and [schema guide](schemas.md) explain
+workflows and contracts in more detail.
 The [workflow diagrams](workflows.md) show where key options change execution.
 
 ## Learning configuration
@@ -40,13 +41,27 @@ This project configuration enables capture for one skill.
 | `skills` | Object keyed by exact skill ID. Default `{}` | Pins/overrides settings for IDs. With `selection: explicit`, each entry needs `source`. With `all`, `source` pins a duplicate ID to one discovered path, including an approved symlink. |
 | `exclude` | List of exact skill IDs. Default `[]` | Only valid with `selection: all`. |
 | `defaults` | Skills-settings object. Default `{}` | Only valid with `selection: all`. Merged first, then a matching `skills` entry overrides it. Cannot contain `source` or `linked_target`. |
+| `hermes_skill_home` | Home-relative directory. Default for shared Learning is `.hermes`. | Only valid with `scope: home` and `selection: all`. Selects the Hermes profile whose `skills/` directory shared Learning discovers. The native Hermes plugin uses the active profile. |
 | `linked_skill_roots` | List of absolute source-directory paths. Default `[]`. | Only valid with `selection: all`. Eligible skill links must resolve under an approved root. SkillCraft uses snapshots for revisions and disables automatic promotion and rollback of linked sources. |
 
-Automatic discovery checks `.agents/skills`, `.codex/skills`, `.hermes/skills`,
-`.opencode/skills`, and `opencode/skills`. Home scope also checks
-`~/.config/opencode/skills`. Hermes allows one category directory. Installed
-plugins/marketplaces, nested Git checkouts and identified managed installs are
-skipped. If an ID appears more than once, pin its `source` or exclude it.
+Project discovery checks `.agents/skills`, `.codex/skills`, `.hermes/skills`,
+`.opencode/skills`, and `opencode/skills` relative to the project. Home discovery
+checks the equivalents under `HOME`, including `~/.codex/skills` and the default
+`~/.hermes/skills`, plus `~/.config/opencode/skills`.
+
+In a Hermes home-scope session, the active profile's `skills/` replaces
+`~/.hermes/skills`. For `hermes -p work`, this is usually
+`~/.hermes/profiles/work/skills`. For shared Learning outside the Hermes
+plugin, set `"hermes_skill_home": ".hermes/profiles/work"` in the home
+configuration to select the same source for import and revision. This setting
+does not select the model or its credentials. See
+[named-profile enrollment](learning.md#home-configuration).
+
+Hermes skill roots allow one category level. Discovery stays under the
+enrolled project or home directory. To include a skill from a profile located
+outside `HOME`, use an eligible skill symlink and an approved
+`linked_skill_roots` entry. Managed installs, bundled skills and nested Git
+checkouts are excluded. If an ID appears more than once, pin its `source` or exclude it.
 
 Symlinked skill roots are reviewed before use. In an interactive terminal,
 `enable PROJECT` asks about candidate roots on stderr and prints the result JSON
@@ -160,11 +175,16 @@ candidate follows the normal `auto_apply` rules. See
 
 | Setting | Applies to | Default / accepted values |
 |---|---|---|
-| `--harness` | Evaluation, optimization and comparison commands | Autodetected from the active Codex/OpenCode session when unambiguous. Explicit choices: `codex`, `chatgpt` (Codex alias), `opencode`, `hermes`. |
+| `--harness` | Evaluation, optimization and comparison commands | Autodetected when exactly one native harness signal is present. Explicit choices are `codex`, `chatgpt` (Codex alias), `opencode`, and `hermes`. |
 | `--model` | Runtime commands | Required. Syntax depends on harness: Codex `MODEL[#EFFORT]`, OpenCode `provider/model[#variant]`, Hermes `provider:model`. |
 | `--profile FILE` | OpenCode evaluation, grading, comparison, optimization. Not Codex or Hermes | Optional JSON permissions profile. Custom profiles are recorded as uncontrolled. Codex and Hermes use their built-in bounded profiles. |
 | `--judge-profile FILE` | Quality / loop | Optional separate grading profile. |
 | `--optimizer-profile FILE` | Optimization loop | Optional separate optimizer profile. |
+
+Codex sets `CODEX_THREAD_ID`. OpenCode sets `OPENCODE=1` and
+`OPENCODE_SESSION_ID`. Hermes advertises `AI_AGENT=hermes-agent` and
+`HERMES_AGENT=true`. A profile path by itself does not identify the calling
+harness. Use `--harness` when a launcher supplies no signals or multiple harnesses do.
 
 OpenCode profile keys are `name` (string, default `custom`),
 `inherit_bounded_files` (boolean, default false for a supplied profile),

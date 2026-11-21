@@ -6,6 +6,60 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { consumeWithReconnect, initialCursor, messageText, reconcileProjection, selectTurn, spawnBounded, turnsAfter, verifiedSkills } from '../../plugins/skillcraft/src/opencode/learning.js';
 
+test('failed stop does not complete a turn or become a feedback target during reconciliation', async () => {
+  const messages = [
+    { id: 'u1', type: 'user', text: 'first' },
+    { id: 'tool1', type: 'assistant', time: { completed: 1 }, finish: 'tool-calls', content: [] },
+    { id: 'bad', type: 'assistant', time: { completed: 2 }, finish: 'stop', error: { type: 'provider', message: 'failed' }, content: [{ type: 'text', text: 'partial' }] },
+    { id: 'u2', type: 'user', text: 'next' },
+    { id: 'a2', type: 'assistant', time: { completed: 3 }, finish: 'stop', metadata: { attempt: 2 }, content: [{ type: 'text', text: 'recovered' }] },
+  ];
+  assert.equal(messageText(messages[2]), '');
+  const turns = turnsAfter(messages, undefined);
+  assert.deepEqual(turns.map(t => [t.user.id, t.final?.id, t.targetTurn]), [['u1', undefined, undefined], ['u2', 'a2', undefined]]);
+  const state = { cursor: undefined, completed: new Set(), pendingSeen: new Set() };
+  const captured = [];
+  await reconcileProjection(messages, state, async turn => { captured.push([turn.user.id, turn.final?.id]); return true; });
+  await reconcileProjection(messages, state, async turn => { captured.push([turn.user.id, turn.final?.id]); return true; });
+  assert.deepEqual(captured, [['u1', undefined], ['u2', 'a2']]);
+});
+
+test('a newer failed assistant supersedes a persisted successful-looking stop', () => {
+  const messages = [
+    { id: 'u1', type: 'user', text: 'first' },
+    { id: 'old', type: 'assistant', time: { completed: 1 }, finish: 'stop', content: [] },
+    { id: 'bad', type: 'assistant', time: { completed: 2 }, finish: 'error', error: { type: 'provider', message: 'failed' }, content: [] },
+    { id: 'u2', type: 'user', text: 'next' },
+  ];
+  const turns = turnsAfter(messages, undefined);
+  assert.equal(turns[0].final, null);
+  assert.equal(turns[1].targetTurn, undefined);
+  assert.equal(selectTurn(messages).targetTurn, undefined);
+});
+
+test('a newer unfinished assistant delays completion until its own final answer', () => {
+  const user = { id: 'u1', type: 'user', text: 'first' };
+  const old = { id: 'old', type: 'assistant', time: { completed: 1 }, finish: 'stop', content: [] };
+  const current = { id: 'current', type: 'assistant', time: {}, content: [] };
+  assert.equal(selectTurn([user, old, current]).final, null);
+  const finished = { ...current, time: { completed: 2 }, finish: 'stop' };
+  assert.equal(selectTurn([user, old, finished]).final.id, 'current');
+});
+
+test('keeps cursor and adjacent feedback semantics across several pending turns', () => {
+  const messages = [
+    { id: 'u0', type: 'user', text: 'first' },
+    { id: 'a0', type: 'assistant', time: { completed: 1 }, finish: 'stop', content: [] },
+    ...Array.from({ length: 100 }, (_, index) => ({ id: `u${index + 1}`, type: 'user', text: 'pending' })),
+  ];
+  const turns = turnsAfter(messages, 'u0');
+  assert.equal(turns.length, 100);
+  assert.equal(turns[0].targetTurn, 'u0');
+  assert.ok(turns.slice(1).every((turn) => turn.targetTurn === undefined && turn.final === null));
+  assert.equal(selectTurn(messages).targetTurn, undefined);
+  assert.deepEqual(turnsAfter(messages, 'missing'), []);
+});
+
 test('selects only the latest completed turn and targets the prior pair key', () => {
   const messages = [
     { id: 'u1', type: 'user', text: 'first' },

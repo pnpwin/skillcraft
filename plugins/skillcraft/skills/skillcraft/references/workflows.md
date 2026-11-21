@@ -63,15 +63,18 @@ flowchart TD
     A{"Scope enabled for this configuration?"} -->|No| B["Skip Learning"]
     A -->|Yes| C{"Selection mode"}
     C -->|explicit| D["Use the enrolled skill list"]
-    C -->|all| E["Discover eligible local skills and apply exclusions and approved linked roots"]
+    C -->|all| E["Discover eligible project or home skills and apply exclusions and approved linked roots"]
     D --> F{"Enabled source"}
-    E --> F
+    E --> P{"Home scope with an active or configured Hermes profile?"}
+    P -->|Yes| Q["Use that profile's Hermes skills directory"]
+    P -->|No| F
+    Q --> F
     F -->|Completed Codex or OpenCode chat| G["Verify the skill version and record eligible feedback"]
     F -->|Completed Hermes chat| H["Record verified feedback in its profile journal"]
     F -->|Completed A/B or reviewed feedback| I["Import verified evidence for the matching runs"]
     H --> J{"Automatic forwarding enabled or manual import requested?"}
     J -->|No| K["Keep evidence in the Hermes profile journal"]
-    J -->|Yes, with shared enrollment| L["Verify version and deduplicate into the shared journal"]
+    J -->|Yes, with shared enrollment| L["Verify the same selected source and version, then deduplicate into the shared journal"]
     G --> M["Queue a check at a message or model-step threshold"]
     I --> N["Queue a check when new qualifying evidence arrives"]
     L --> O["Check shared thresholds and newly imported evidence"]
