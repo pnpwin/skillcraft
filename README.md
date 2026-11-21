@@ -87,6 +87,10 @@ The agent can also select SkillCraft naturally for relevant authoring, evaluatio
 revision, or triggering requests. Instructions and full required guides start at
 [SKILL.md](plugins/skillcraft/skills/skillcraft/SKILL.md).
 
+For a compact index of learning configuration, runner settings, environment
+variables and evaluation/optimization CLI options, see the
+[configuration reference](plugins/skillcraft/skills/skillcraft/references/configuration.md).
+
 ## Validate and evaluate
 
 ```sh

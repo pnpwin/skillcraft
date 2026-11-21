@@ -1,5 +1,8 @@
 # Codex runner
 
+See the [configuration reference](configuration.md#runner-settings) for shared
+runner options and environment variables.
+
 SkillCraft uses Codex CLI and its local App Server over stdio. Install the skill
 as a Git marketplace plugin, or place it in `.agents/skills/skillcraft/`. Keep
 experiment workspaces outside the skill directory.

@@ -1,5 +1,8 @@
 # OpenCode runner: operation and limitations
 
+See the [configuration reference](configuration.md#runner-settings) for shared
+runner options and environment variables.
+
 ## Architecture
 
 Python owns datasets, snapshots, repetitions, fixture copies, grading and reports.
