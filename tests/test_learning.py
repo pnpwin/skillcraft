@@ -390,6 +390,122 @@ class LearningTest(unittest.TestCase):
             learning.notify_feedback(workspace, feedback)
         self.wake.assert_not_called()
 
+    def test_baseline_feedback_is_neutral_deduplicated_and_keeps_review_identity(self):
+        self.enable()
+        workspace, _ = self.fake_eval()
+        manifest_path = workspace / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['configurations']['without_skill'] = {'snapshot_hash': None}
+        write_json(manifest_path, manifest)
+        baseline = workspace / 'eval-fail/without_skill/run-001'
+        write_json(baseline / 'run.json', {'run_id': 'baseline-r1', 'status': 'completed'})
+        write_json(baseline / 'eval_metadata.json', {'eval_id': 'fail', 'snapshot_hash': None})
+        self.markdown.write_text('---\nname: demo\ndescription: A demo skill.\n---\n\nNew behavior.\n')
+        feedback = workspace / 'feedback.json'
+        write_json(feedback, {'schema_version': 1, 'status': 'complete', 'reviews': [{
+            'run_id': 'baseline-r1', 'snapshot_hash': None,
+            'reviewed': True, 'feedback': 'Keep the requested date in the answer.', 'verdict': 'failure',
+        }]})
+
+        imported = learning.ingest_feedback(workspace, feedback, project=self.project)
+
+        self.assertEqual(imported, {'new_evidence': False, 'new_baseline_feedback': True})
+        self.assertEqual(learning.ingest_feedback(workspace, feedback, project=self.project),
+                         {'new_evidence': False, 'new_baseline_feedback': False})
+        self.assertFalse(learning.notify_feedback(workspace, feedback))
+        self.wake.assert_not_called()
+        with learning.connection(self.config) as db:
+            rows = db.execute('SELECT * FROM baseline_feedback').fetchall()
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM evidence').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM checkpoints').fetchone()[0], 0)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]['run_id'], rows[0]['review_id'], rows[0]['harness'],
+                          rows[0]['skill'], rows[0]['case_id'], rows[0]['note']),
+                         ('baseline-r1', 'baseline-r1', 'codex', 'demo', 'fail',
+                          'Keep the requested date in the answer.'))
+        self.assertNotIn('verdict', rows[0].keys())
+        self.assertNotIn('version', rows[0].keys())
+
+    def test_baseline_feedback_requires_a_finished_review_and_exact_original_run(self):
+        self.enable()
+        workspace, _ = self.fake_eval()
+        manifest_path = workspace / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['configurations']['without_skill'] = {'snapshot_hash': None}
+        write_json(manifest_path, manifest)
+        baseline = workspace / 'eval-fail/without_skill/run-001'
+        write_json(baseline / 'run.json', {'run_id': 'baseline-r1', 'status': 'completed'})
+        write_json(baseline / 'eval_metadata.json', {'eval_id': 'fail', 'snapshot_hash': None})
+        feedback = workspace / 'feedback.json'
+
+        def import_review(review, *, status='complete'):
+            write_json(feedback, {'schema_version': 1, 'status': status, 'reviews': [review]})
+            return learning.ingest_feedback(workspace, feedback, project=self.project)
+
+        self.assertEqual(import_review({'run_id': 'baseline-r1', 'snapshot_hash': None,
+                                        'reviewed': False, 'feedback': 'Draft note'}, status='in_progress'),
+                         {'new_evidence': False, 'new_baseline_feedback': False})
+        for review in (
+            {'run_id': 'another-run', 'snapshot_hash': None,
+             'reviewed': True, 'feedback': 'Note for another execution'},
+            {'run_id': 'baseline-r1', 'snapshot_hash': 'different',
+             'reviewed': True, 'feedback': 'Note with stale binding'},
+            {'run_id': 'baseline-r1', 'snapshot_hash': None,
+             'reviewed': True, 'feedback': '   '},
+        ):
+            with self.subTest(review=review):
+                self.assertEqual(import_review(review),
+                                 {'new_evidence': False, 'new_baseline_feedback': False})
+        self.wake.assert_not_called()
+        with learning.connection(self.config) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM baseline_feedback').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM evidence').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM checkpoints').fetchone()[0], 0)
+
+    def test_selected_baseline_review_keeps_original_run_and_selected_view_id(self):
+        from scripts.generate_review import find_runs
+        from scripts.grading_store import reserve_attempt, seal_attempt
+
+        self.enable()
+        workspace, _ = self.fake_eval()
+        manifest_path = workspace / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['configurations'] = {
+            'with_skill': {'snapshot_hash': 'another-snapshot'},
+            'without_skill': {'snapshot_hash': None},
+        }
+        write_json(manifest_path, manifest)
+        shutil.rmtree(workspace / 'eval-fail/with_skill/run-001')
+        relative = 'eval-fail/without_skill/run-001'
+        baseline = workspace / relative
+        (baseline / 'outputs').mkdir(parents=True)
+        write_json(baseline / 'run.json', {'run_id': 'baseline-r1', 'status': 'completed'})
+        write_json(baseline / 'eval_metadata.json', {'eval_id': 'fail', 'snapshot_hash': None})
+        write_json(baseline / 'messages.json', [])
+        grade = {'status': 'completed', 'evaluation_complete': True,
+                 'expectations': [{'text': 'Stable date', 'source': 'deterministic', 'passed': True}]}
+        write_json(baseline / 'grading.json', grade)
+        selected_path, attempt = reserve_attempt(baseline, {}, self.project / 'regrade', None, None)
+        write_json(selected_path / 'grading.json', grade)
+        seal_attempt(selected_path, attempt, grade)
+        selection = {'schema_version': 1, 'source_workspace': str(workspace), 'rule': 'Verify selected review',
+                     'runs': {relative: {'selected': str(selected_path)}}}
+        write_json(self.project / 'selection.json', selection)
+        view_id = find_runs(workspace, selection)[0]['id']
+        self.assertEqual(view_id, f'baseline-r1@{attempt["attempt_id"]}')
+        feedback = self.project / 'feedback.json'
+        write_json(feedback, {'schema_version': 1, 'status': 'complete', 'reviews': [{
+            'run_id': view_id, 'snapshot_hash': None, 'reviewed': True,
+            'feedback': 'Keep the requested date in the answer.',
+        }]})
+
+        result = learning.ingest_feedback(workspace, feedback, project=self.project, selection=selection)
+
+        self.assertEqual(result, {'new_evidence': False, 'new_baseline_feedback': True})
+        with learning.connection(self.config) as db:
+            row = db.execute('SELECT run_id,review_id FROM baseline_feedback').fetchone()
+        self.assertEqual(tuple(row), ('baseline-r1', view_id))
+
     def test_new_ab_runs_can_queue_after_the_first_import_checkpoint(self):
         self.enable()
         workspace, _ = self.fake_eval()

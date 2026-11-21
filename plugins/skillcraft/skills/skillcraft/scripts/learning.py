@@ -45,6 +45,12 @@ CREATE TABLE IF NOT EXISTS evidence (
     independent TEXT NOT NULL, case_id TEXT, kind TEXT NOT NULL, note TEXT NOT NULL,
     reproducible INTEGER NOT NULL DEFAULT 0, consumed INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS baseline_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace TEXT NOT NULL, run_id TEXT NOT NULL, review_id TEXT NOT NULL,
+    harness TEXT NOT NULL, skill TEXT NOT NULL, case_id TEXT NOT NULL, note TEXT NOT NULL,
+    UNIQUE(review_id, note)
+);
 CREATE TABLE IF NOT EXISTS checkpoints (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     witness TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'pending'
@@ -728,7 +734,7 @@ def snapshot_hash(source):
     return hash_value.hexdigest()
 
 
-def eval_context(workspace, project=None):
+def eval_context(workspace, project=None, *, allow_unbound=False):
     config = config_for(project or workspace) or (config_for(Path.cwd()) if not project else None)
     if not config or 'evals' not in config['sources']:
         return None
@@ -744,7 +750,7 @@ def eval_context(workspace, project=None):
     if tree_hash(source) != version:
         return None
     variants = {arm for arm, entry in manifest['configurations'].items() if entry.get('snapshot_hash') == candidate}
-    if not variants:
+    if not variants and not allow_unbound:
         return None
     return config, manifest, name, version, variants
 
@@ -753,9 +759,12 @@ def observed_runs(workspace, variants, *, include_pilot=False):
     phases = [workspace, workspace / 'pilot'] if include_pilot else [workspace]
     for phase in phases:
         for path in sorted(phase.glob('eval-*/*/run-*/run.json')):
-            if path.parent.parent.name in variants:
+            arm = path.parent.parent.name
+            if arm in variants:
                 run = read_json(path)
-                if run.get('status') != 'completed' or not run.get('attached') or not run.get('run_id'):
+                if run.get('status') != 'completed' or not run.get('run_id'):
+                    continue
+                if bool(run.get('attached')) != (arm != 'without_skill'):
                     continue
                 meta = read_json(path.parent / 'eval_metadata.json')
                 yield path.parent, run, meta
@@ -817,53 +826,81 @@ def notify_eval(workspace, *, project=None):
 
 
 def notify_feedback(workspace, feedback_path, *, project=None, selection=None):
+    """Import a review and report whether it contributed skill evidence."""
+    return ingest_feedback(workspace, feedback_path, project=project, selection=selection)['new_evidence']
+
+
+def ingest_feedback(workspace, feedback_path, *, project=None, selection=None):
     from scripts.generate_review import validate_feedback_entries
     from scripts.grading_store import load_selection, read_grading
 
     workspace = Path(workspace).resolve()
-    context = eval_context(workspace, project)
+    result = {'new_evidence': False, 'new_baseline_feedback': False}
+    context = eval_context(workspace, project, allow_unbound=True)
     if not context:
-        return False
+        return result
     config, manifest, name, version, variants = context
     feedback = read_json(feedback_path)
     if not isinstance(feedback, dict) or feedback.get('status') != 'complete' or feedback.get('schema_version') != 1:
-        return False
+        return result
     validate_feedback_entries(feedback)
     selected = load_selection(workspace, selection)
     runs = {}
+    baseline = manifest['configurations'].get('without_skill')
+    if baseline is not None and baseline.get('snapshot_hash') is None:
+        variants.add('without_skill')
     for path, run, meta in observed_runs(workspace, variants, include_pilot=selected is None):
+        is_baseline = path.parent.name == 'without_skill'
+        if is_baseline and (meta.get('snapshot_hash') is not None
+                            or meta.get('configuration', 'without_skill') != 'without_skill'
+                            or run.get('installed_hash') is not None
+                            or (run.get('environment') or {}).get('candidate') is not None):
+            continue
         view_id = run['run_id']
         attempt = None
         if selected is not None:
             attempt = selected['runs'][path.relative_to(workspace).as_posix()]['selected']
-        grade, _, provenance = read_grading(path, attempt)
-        if selected is not None:
-            view_id = f'{view_id}@{provenance["attempt_id"] if provenance else "legacy"}'
-        checks = graded_checks(grade, judge=bool((provenance or manifest).get('judge_model')))
-        runs[view_id] = (run, meta, checks)
-    added = False
+        checks = None
+        if not is_baseline or selected is not None:
+            grade, _, provenance = read_grading(path, attempt)
+            if not is_baseline:
+                checks = graded_checks(grade, judge=bool((provenance or manifest).get('judge_model')))
+            if selected is not None:
+                view_id = f'{view_id}@{provenance["attempt_id"] if provenance else "legacy"}'
+        runs[view_id] = (run, meta, checks, is_baseline)
     with connection(config) as db:
         for entry in feedback['reviews']:
-            kind = entry.get('verdict')
-            match = runs.get(entry.get('run_id'))
+            review_id = entry.get('run_id')
+            match = runs.get(review_id)
             note = entry.get('feedback', '')
-            if kind not in VERDICTS or not entry.get('reviewed') or not match:
+            if not entry.get('reviewed') or not match:
                 continue
-            run, meta, checks = match
+            run, meta, checks, is_baseline = match
             if entry.get('snapshot_hash') != meta.get('snapshot_hash') or run.get('installed_hash') != meta.get('snapshot_hash'):
                 continue
-            if kind == 'correction' and not note.strip():
-                continue
             case_id = meta['eval_id']
+            if is_baseline:
+                if note.strip():
+                    result['new_baseline_feedback'] |= db.execute(
+                        'INSERT OR IGNORE INTO baseline_feedback(workspace,run_id,review_id,harness,skill,case_id,note) '
+                        'VALUES (?,?,?,?,?,?,?)',
+                        (str(workspace), run['run_id'], review_id, manifest['harness'], name, case_id, sanitize(note)),
+                    ).rowcount != 0
+                continue
+            kind = entry.get('verdict')
+            if kind not in VERDICTS or (kind == 'correction' and not note.strip()):
+                continue
             reproducible = kind == 'correction' and reproducible_failure(checks)
-            added |= record(db, f'feedback:{entry["run_id"]}:{name}:{kind}:{sanitize(note)}', name, version, 'feedback',
-                            manifest['harness'], str(workspace), run['run_id'], independence(meta), case_id,
-                            kind, note or f'Explicit reviewer verdict: {kind}', reproducible)
-        if added:
+            result['new_evidence'] |= record(
+                db, f'feedback:{review_id}:{name}:{kind}:{sanitize(note)}', name, version, 'feedback',
+                manifest['harness'], str(workspace), run['run_id'], independence(meta), case_id, kind,
+                note or f'Explicit reviewer verdict: {kind}', reproducible,
+            )
+        if result['new_evidence']:
             queue(db, 'feedback:' + digest(feedback_path))
-    if added:
+    if result['new_evidence']:
         wake(config)
-    return added
+    return result
 
 
 def import_hermes(project, profile, *, completed_session=None, automatic=False):
@@ -1296,9 +1333,9 @@ def main(argv=None):
         if args.command == 'ingest':
             if args.selection and not args.feedback:
                 raise ValueError('--selection requires --feedback')
-            changed = (notify_feedback(args.workspace, args.feedback, project=args.project, selection=args.selection) if args.feedback
-                       else notify_eval(args.workspace, project=args.project))
-            print(json.dumps({'new_evidence': changed}))
+            result = (ingest_feedback(args.workspace, args.feedback, project=args.project, selection=args.selection)
+                      if args.feedback else {'new_evidence': notify_eval(args.workspace, project=args.project)})
+            print(json.dumps(result))
             return 0
         if args.command == 'enable':
             print(json.dumps(enable_learning(args, home), ensure_ascii=False))
@@ -1332,6 +1369,7 @@ def main(argv=None):
                     'model_steps': db.execute('SELECT COALESCE(SUM(steps),0) FROM model_steps').fetchone()[0],
                     **({'auto_import': config['auto_import']} if home is not None else {}),
                     'evidence': {r[0]: r[1] for r in db.execute('SELECT kind,COUNT(*) FROM evidence GROUP BY kind')},
+                    'baseline_feedback': db.execute('SELECT COUNT(*) FROM baseline_feedback').fetchone()[0],
                     'checkpoints': {r[0]: r[1] for r in db.execute('SELECT status,COUNT(*) FROM checkpoints GROUP BY status')},
                     'revisions': [dict(r) for r in db.execute('SELECT * FROM revisions ORDER BY id DESC LIMIT 20')],
                 }, ensure_ascii=False))
