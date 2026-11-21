@@ -83,8 +83,11 @@ def run_model(prompt, output, model, *, mode='quality', skill=None, skill_id=Non
     model_config = model_ref(model, harness)
     selection = harness_metadata(harness)
     harness = selection['harness']
-    if harness == 'hermes' and (mode != 'quality' or operation != 'run' or bool(skill) != attach or preparation):
-        raise ValueError('Hermes supports paired file-quality runs with native preload')
+    if harness == 'hermes' and (operation != 'run' or preparation or
+                                 (mode == 'quality' and bool(skill) != attach) or
+                                 (mode == 'optimizer' and (skill or attach or output_schema is None)) or
+                                 mode not in {'quality', 'optimizer'}):
+        raise ValueError('Hermes supports paired file-quality runs and schema-checked optimization')
     settings = profile_settings(profile, safe_id(skill_id or Path(skill).name) if skill else None, harness=harness)
     if timeout <= 0:
         raise ValueError('timeout must be positive')

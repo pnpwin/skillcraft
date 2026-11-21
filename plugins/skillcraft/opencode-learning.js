@@ -16,8 +16,10 @@ export function learningEventPhase(event) {
     case 'session.inbox.delivered':
       return 'start';
     case 'session.execution.succeeded':
+      return 'finish';
     case 'session.execution.failed':
     case 'session.execution.interrupted':
+      return 'abandon';
     case 'session.idle':
       return 'finish';
     case 'session.status':
@@ -27,6 +29,17 @@ export function learningEventPhase(event) {
     default:
       return null;
   }
+}
+
+export function completedModelSteps(segment) {
+  const ids = new Set();
+  for (const message of segment) {
+    if (message.type !== 'assistant' || !message.time?.completed || typeof message.finish !== 'string') continue;
+    if (message.error || message.metadata?.error || message.metadata?.retry === true) continue;
+    if (Number.isInteger(message.metadata?.attempt) && message.metadata.attempt > 1) continue;
+    if (typeof message.id === 'string' && message.id) ids.add(message.id);
+  }
+  return ids.size;
 }
 
 export function selectTurn(messages) {

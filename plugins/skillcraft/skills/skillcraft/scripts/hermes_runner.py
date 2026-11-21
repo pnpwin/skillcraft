@@ -181,6 +181,62 @@ def native_events(rows):
     return final[0], parts
 
 
+def validate_output_schema(value, schema, path='$'):
+    """Validate the small JSON Schema subset used for trusted optimizer output."""
+    if not isinstance(schema, dict) or not isinstance(schema.get('type'), str):
+        raise ValueError(f'Invalid output schema at {path}')
+    kind = schema['type']
+    allowed = {
+        'object': {'type', 'properties', 'required', 'additionalProperties'},
+        'array': {'type', 'items', 'maxItems'},
+        'string': {'type'}, 'integer': {'type'}, 'number': {'type'},
+        'boolean': {'type'}, 'null': {'type'},
+    }
+    if kind not in allowed or set(schema) - allowed[kind]:
+        raise ValueError(f'Unsupported output schema at {path}')
+    if kind == 'object':
+        properties = schema.get('properties', {})
+        required = schema.get('required', [])
+        if (not isinstance(properties, dict) or not isinstance(required, list)
+                or any(not isinstance(key, str) for key in required)
+                or len(required) != len(set(required))
+                or set(required) - set(properties)
+                or schema.get('additionalProperties', False) is not False):
+            raise ValueError(f'Invalid object schema at {path}')
+        if not isinstance(value, dict) or set(required) - set(value) or set(value) - set(properties):
+            raise ValueError(f'Output does not match object schema at {path}')
+        for key, item in value.items():
+            validate_output_schema(item, properties[key], f'{path}.{key}')
+        return
+    if kind == 'array':
+        maximum = schema.get('maxItems')
+        if (not isinstance(value, list) or not isinstance(schema.get('items'), dict)
+                or maximum is not None and (type(maximum) is not int or maximum < 0)
+                or maximum is not None and len(value) > maximum):
+            raise ValueError(f'Output does not match array schema at {path}')
+        for index, item in enumerate(value):
+            validate_output_schema(item, schema['items'], f'{path}[{index}]')
+        return
+    valid = {
+        'string': lambda item: isinstance(item, str),
+        'integer': lambda item: type(item) is int,
+        'number': lambda item: type(item) in {int, float},
+        'boolean': lambda item: type(item) is bool,
+        'null': lambda item: item is None,
+    }[kind](value)
+    if not valid:
+        raise ValueError(f'Output does not match {kind} schema at {path}')
+
+
+def require_structured_output(text, schema):
+    try:
+        value = json.loads(text)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise ValueError('Hermes response is not a single JSON value') from error
+    validate_output_schema(value, schema)
+    return value
+
+
 def binary():
     configured = os.environ.get('SKILLCRAFT_HERMES_BIN', 'hermes')
     value = shutil.which(configured)
@@ -360,6 +416,8 @@ def run(request):
             final, parts = native_events(read_lines(events))
             if final.get('exit_code') != 0:
                 raise ValueError('Hermes did not complete the native turn')
+            if request.get('output_schema') is not None:
+                require_structured_output(final.get('text'), request['output_schema'])
             session = final['session_id']
             receipts = read_lines(home / 'requests.jsonl')
             write_json(output / 'hermes-requests.json', receipts)

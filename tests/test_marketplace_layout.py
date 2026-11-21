@@ -19,7 +19,7 @@ class MarketplaceLayoutTests(unittest.TestCase):
         self.assertTrue((package_root / opencode['exports']['.']).is_file())
         self.assertIn('skills/', opencode['files'])
         self.assertEqual((package_root / codex['skills']).resolve(), SKILL.parent)
-        self.assertEqual(set(read_json(package_root / codex['hooks'])['hooks']), {'UserPromptSubmit', 'Stop'})
+        self.assertEqual(set(read_json(package_root / codex['hooks'])['hooks']), {'PostModelRequest', 'UserPromptSubmit', 'Stop'})
         self.assertEqual(list(package_root.rglob('SKILL.md')), [SKILL / 'SKILL.md'])
         self.assertEqual(ROOT, SKILL)
 

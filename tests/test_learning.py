@@ -272,11 +272,11 @@ class LearningTest(unittest.TestCase):
                     codex_capture.confirmed_reads(str(rollout), 'native-session', 'native-turn', versions), expected,
                 )
 
-    def fake_eval(self):
+    def fake_eval(self, harness='codex'):
         workspace = self.project / 'iteration'
         snapshot = learning.snapshot_hash(self.source)
         write_json(workspace / 'manifest.json', {
-            'kind': 'quality', 'skill_id': 'demo', 'harness': 'codex', 'controlled': True,
+            'kind': 'quality', 'skill_id': 'demo', 'harness': harness, 'controlled': True,
             'environment_consistent': True, 'configurations': {'with_skill': {'snapshot_hash': snapshot}},
         })
         write_json(workspace / 'benchmark.json', {'errors': 0, 'validation_errors': []})
@@ -288,6 +288,15 @@ class LearningTest(unittest.TestCase):
             'expectations': [{'text': 'Stable date', 'source': 'deterministic', 'passed': False}],
         })
         return workspace, snapshot
+
+    def test_hermes_quality_supplies_a_reproducible_failure(self):
+        self.enable()
+        workspace, _ = self.fake_eval('hermes')
+        self.assertTrue(learning.notify_eval(workspace))
+        self.assertFalse(learning.notify_eval(workspace))
+        with learning.connection(self.config) as db:
+            signal = db.execute('SELECT harness,origin,case_id,kind,reproducible FROM evidence').fetchone()
+        self.assertEqual(tuple(signal), ('hermes', 'ab', 'fail', 'failure', 1))
 
     def test_import_idempotence_and_reproducible_reviewer_correction(self):
         self.enable()

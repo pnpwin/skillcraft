@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import os
 import stat
 import subprocess
@@ -84,6 +85,29 @@ class HermesRunnerTest(unittest.TestCase):
         self.assertEqual(parts[1]['text'], 'Finished')
         with self.assertRaises(ValueError):
             hermes_runner.native_events([{'type': 'system', 'subtype': 'init'}])
+
+    def test_optimizer_response_must_match_strict_schema(self):
+        schema = {'type': 'object', 'additionalProperties': False,
+                  'required': ['rationale', 'changes'],
+                  'properties': {'rationale': {'type': 'string'},
+                                 'changes': {'type': 'array', 'maxItems': 8, 'items': {
+                                     'type': 'object', 'additionalProperties': False,
+                                     'required': ['path', 'content'],
+                                     'properties': {'path': {'type': 'string'},
+                                                    'content': {'type': 'string'}}}}}}
+        valid = '{"rationale":"Fix typo","changes":[]}'
+        self.assertEqual(hermes_runner.require_structured_output(valid, schema),
+                         {'rationale': 'Fix typo', 'changes': []})
+        invalid = [
+            '```json\n' + valid + '\n```',
+            '{"rationale":"Fix typo","changes":[],"extra":true}',
+            '{"rationale":"Fix typo","changes":[{"path":"x","content":1}]}',
+            '{"rationale":"Fix typo","changes":' + json.dumps([
+                {'path': 'x', 'content': 'y'}] * 9) + '}',
+        ]
+        for response in invalid:
+            with self.subTest(response=response[:40]), self.assertRaises(ValueError):
+                hermes_runner.require_structured_output(response, schema)
 
     def test_corrupted_and_nonregular_artifacts(self):
         (path := self.root / 'actions.csv').write_text('before')

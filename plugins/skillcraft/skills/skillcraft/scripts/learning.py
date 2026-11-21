@@ -15,11 +15,13 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.harness import HARNESSES
 from scripts.utils import EXCLUDED, digest, read_json, safe_id, tree_hash
 
 CONFIG = Path('.skillcraft/learning.json')
 INTERNAL = 'SKILLCRAFT_LEARNING_INTERNAL'
 MESSAGE_INTERVAL = 15
+MODEL_STEP_INTERVAL = 15
 VERDICTS = {'success', 'failure', 'correction'}
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -27,6 +29,14 @@ CREATE TABLE IF NOT EXISTS messages (
     harness TEXT NOT NULL, session TEXT NOT NULL, turn TEXT NOT NULL,
     role TEXT NOT NULL, bindings TEXT NOT NULL, diagnostic TEXT, case_key TEXT, excerpt TEXT,
     UNIQUE(harness, session, turn, role)
+);
+CREATE TABLE IF NOT EXISTS pending_feedback (
+    harness TEXT NOT NULL, session TEXT NOT NULL, turn TEXT NOT NULL,
+    target TEXT NOT NULL, text TEXT NOT NULL, PRIMARY KEY(harness, session, turn)
+);
+CREATE TABLE IF NOT EXISTS model_steps (
+    harness TEXT NOT NULL, session TEXT NOT NULL, turn TEXT NOT NULL,
+    steps INTEGER NOT NULL, PRIMARY KEY(harness, session, turn)
 );
 CREATE TABLE IF NOT EXISTS evidence (
     id INTEGER PRIMARY KEY AUTOINCREMENT, witness TEXT NOT NULL UNIQUE,
@@ -156,6 +166,7 @@ def config_for(project, *, enrolling=False, trusted_internal=False, hermes_home=
         state = state_root / sha256(str(root).encode()).hexdigest()
         marker = state / 'enabled'
         approval = None
+        auto_import = False
         if not enrolling:
             try:
                 marker_fd = os.open(marker, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) |
@@ -176,11 +187,13 @@ def config_for(project, *, enrolling=False, trusted_internal=False, hermes_home=
                     return None
             elif isinstance(value, dict) and value.get('config_sha256') == fingerprint:
                 approval = value.get('validation')
+                auto_import = hermes_home is not None and value.get('auto_import') is True
             else:
                 if marker_raw.strip() != fingerprint:
                     return None
         return {'root': root, 'state': state, 'skills': skills, 'sources': sources,
-                'fingerprint': fingerprint, 'approval': approval, 'hermes': hermes_home is not None}
+                'fingerprint': fingerprint, 'approval': approval, 'hermes': hermes_home is not None,
+                'auto_import': auto_import}
     return None
 
 
@@ -320,12 +333,21 @@ def connection(config):
             db.execute("""CREATE TABLE IF NOT EXISTS hermes_replies (
                 session TEXT NOT NULL, turn TEXT NOT NULL, uid TEXT NOT NULL,
                 PRIMARY KEY (session, turn), UNIQUE (session, uid))""")
+            db.execute("""CREATE TABLE IF NOT EXISTS hermes_recovered_feedback (
+                session TEXT NOT NULL, turn TEXT NOT NULL, target TEXT NOT NULL,
+                final_uid TEXT NOT NULL, PRIMARY KEY (session, turn), UNIQUE (session, final_uid))""")
         with db:
             yield db
 
 
 def queue(db, witness):
     return db.execute('INSERT OR IGNORE INTO checkpoints(witness) VALUES (?)', (witness,)).rowcount != 0
+
+
+def queue_message_checkpoint(db, *, at_boundary=False):
+    count = db.execute('SELECT COUNT(*) FROM messages').fetchone()[0]
+    boundary = count // MESSAGE_INTERVAL * MESSAGE_INTERVAL
+    return bool(boundary and (not at_boundary or count == boundary) and queue(db, f'messages:{boundary}'))
 
 
 def wake(config):
@@ -393,8 +415,64 @@ def record(db, witness, skill, version, origin, harness, session, turn, independ
     ).rowcount != 0
 
 
+
+def record_feedback(db, harness, session, turn, target_turn, text):
+    kind = classify(text)
+    if kind:
+        prior = db.execute(
+            'SELECT turn,bindings,excerpt FROM messages WHERE harness=? AND session=? AND role=\'assistant\' '
+            'AND turn=?',
+            (harness, session, target_turn),
+        ).fetchone()
+        associated = json.loads(prior['bindings']) if prior else {}
+        if len(associated) > 1:
+            named = {name: version for name, version in associated.items()
+                     if re.search(r'(?<![\w-])' + re.escape(name) + r'(?![\w-])', text, re.I)}
+            if len(named) == 1:
+                associated = named
+        if len(associated) == 1:
+            name, version = next(iter(associated.items()))
+            tagged = CASE_TAG.search(text)
+            case_id = tagged.group(1) if tagged else None
+            # A conversation cannot assert that a correction is reproducible.
+            # Durably graded evidence for the same case must already exist.
+            prior_case = db.execute(
+                'SELECT independent,kind,reproducible FROM evidence WHERE skill=? AND version=? AND case_id=? '
+                'ORDER BY (kind=\'failure\' AND reproducible=1) DESC, id LIMIT 1', (name, version, case_id),
+            ).fetchone()
+            reproducible = kind == 'correction' and prior_case and (
+                prior_case['kind'] == 'failure' and prior_case['reproducible'])
+            prompt = db.execute(
+                'SELECT case_key FROM messages WHERE harness=? AND session=? AND turn=? AND role=\'user\'',
+                (harness, session, prior['turn']),
+            ).fetchone()
+            family = f'session:{harness}:{session}'
+            if prompt and prompt['case_key']:
+                family = f'prompt:{prompt["case_key"]}'
+            witness = json.dumps([harness, session, turn, prior['turn'], name, kind])
+            note = text
+            if kind == 'success' and prior['excerpt']:
+                note = f'{text}\nConfirmed prior answer: {prior["excerpt"]}'
+            return record(db, witness, name, version, 'session', harness, session, prior['turn'],
+                          prior_case['independent'] if prior_case else family,
+                          case_id, kind, note, bool(reproducible))
+    return False
+
+
+def add_model_steps(db, harness, session, turn, steps, *, schedule):
+    inserted = db.execute(
+        'INSERT OR IGNORE INTO model_steps VALUES (?,?,?,?)', (harness, session, turn, steps),
+    ).rowcount
+    if inserted and schedule:
+        total = db.execute('SELECT SUM(steps) FROM model_steps').fetchone()[0]
+        if total // MODEL_STEP_INTERVAL > (total - steps) // MODEL_STEP_INTERVAL:
+            return queue(db, f'model-steps:{total // MODEL_STEP_INTERVAL * MODEL_STEP_INTERVAL}')
+    return False
+
+
 def observe(project, harness, session, turn, role, text, loaded, *, target_turn=None,
-            diagnostic=None, hermes_home=None, hermes_uid=None):
+            diagnostic=None, hermes_home=None, hermes_uid=None,
+            model_steps=0, defer_feedback=False):
     config = config_for(project, hermes_home=hermes_home)
     if not config or 'sessions' not in config['sources']:
         return False
@@ -403,6 +481,8 @@ def observe(project, harness, session, turn, role, text, loaded, *, target_turn=
         raise ValueError('Invalid message origin')
     if not all(isinstance(x, str) and x for x in (session, turn)) or not isinstance(text, str):
         raise ValueError('Messages need durable session and turn identities')
+    if type(model_steps) is not int or not 0 <= model_steps <= 2**31 - 1 or (model_steps and role != 'assistant'):
+        raise ValueError('Invalid completed model step count')
     labels = binding(config, loaded)
     case_key = prompt_key(text) if role == 'user' else None
     excerpt = sanitize(text)[:500] if role == 'assistant' and labels else None
@@ -427,50 +507,28 @@ def observe(project, harness, session, turn, role, text, loaded, *, target_turn=
         if inserted and uid and role == 'assistant' and labels:
             db.execute('INSERT OR IGNORE INTO hermes_replies(session,turn,uid) VALUES (?,?,?)',
                        (session, turn, uid))
-        if inserted and role == 'user' and target_turn:
-            kind = classify(text)
-            if kind:
-                prior = db.execute(
-                    'SELECT turn,bindings,excerpt FROM messages WHERE harness=? AND session=? AND role=\'assistant\' '
-                    'AND turn=?',
-                    (harness, session, target_turn),
-                ).fetchone()
-                associated = json.loads(prior['bindings']) if prior else {}
-                if len(associated) > 1:
-                    named = {name: version for name, version in associated.items()
-                             if re.search(r'(?<![\w-])' + re.escape(name) + r'(?![\w-])', text, re.I)}
-                    if len(named) == 1:
-                        associated = named
-                if len(associated) == 1:
-                    name, version = next(iter(associated.items()))
-                    tagged = CASE_TAG.search(text)
-                    case_id = tagged.group(1) if tagged else None
-                    # A conversation cannot assert that a correction is reproducible.
-                    # Durably graded evidence for the same case must already exist.
-                    prior_case = db.execute(
-                        'SELECT independent,kind,reproducible FROM evidence WHERE skill=? AND version=? AND case_id=? '
-                        'ORDER BY (kind=\'failure\' AND reproducible=1) DESC, id LIMIT 1', (name, version, case_id),
-                    ).fetchone()
-                    reproducible = kind == 'correction' and prior_case and (
-                        prior_case['kind'] == 'failure' and prior_case['reproducible'])
-                    prompt = db.execute(
-                        'SELECT case_key FROM messages WHERE harness=? AND session=? AND turn=? AND role=\'user\'',
-                        (harness, session, prior['turn']),
-                    ).fetchone()
-                    family = f'session:{harness}:{session}'
-                    if prompt and prompt['case_key']:
-                        family = f'prompt:{prompt["case_key"]}'
-                    witness = json.dumps([harness, session, turn, prior['turn'], name, kind])
-                    note = text
-                    if kind == 'success' and prior['excerpt']:
-                        note = f'{text}\nConfirmed prior answer: {prior["excerpt"]}'
-                    record(db, witness, name, version, 'session', harness, session, prior['turn'],
-                           prior_case['independent'] if prior_case else family,
-                           case_id, kind, note, bool(reproducible))
-        if inserted and hermes_home is None:
-            count = db.execute('SELECT COUNT(*) FROM messages').fetchone()[0]
-            if count % MESSAGE_INTERVAL == 0:
-                queue(db, f'messages:{count}')
+        if inserted and role == 'user' and defer_feedback:
+            db.execute('DELETE FROM pending_feedback WHERE harness=? AND session=?', (harness, session))
+        if inserted and role == 'user' and target_turn and classify(text):
+            if defer_feedback:
+                db.execute('INSERT INTO pending_feedback VALUES (?,?,?,?,?)',
+                           (harness, session, turn, target_turn, sanitize(text)))
+            else:
+                record_feedback(db, harness, session, turn, target_turn, text)
+        if inserted and role == 'assistant':
+            feedback = db.execute(
+                'DELETE FROM pending_feedback WHERE harness=? AND session=? AND turn=? RETURNING target,text',
+                (harness, session, turn),
+            ).fetchone()
+            if feedback:
+                record_feedback(db, harness, session, turn, feedback['target'], feedback['text'])
+            if model_steps and db.execute(
+                "SELECT 1 FROM messages WHERE harness=? AND session=? AND turn=? AND role='user'",
+                (harness, session, turn),
+            ).fetchone():
+                add_model_steps(db, harness, session, turn, model_steps, schedule=hermes_home is None)
+        if inserted and hermes_home is None and (role == 'assistant' or not defer_feedback):
+            queue_message_checkpoint(db, at_boundary=role == 'user')
         pending = hermes_home is None and db.execute(
             "SELECT 1 FROM checkpoints WHERE status != 'done' LIMIT 1").fetchone()
     if pending:
@@ -500,7 +558,7 @@ def eval_context(workspace, project=None):
     name = manifest.get('skill_id')
     if manifest.get('kind') != 'quality' or name not in config['skills'] or manifest.get('learning_internal'):
         return None
-    if manifest.get('harness') not in {'codex', 'opencode'}:
+    if manifest.get('harness') not in HARNESSES:
         return None
     source = local_path(config['root'], config['skills'][name]['source'], directory=True)
     version = tree_hash(source)
@@ -630,7 +688,7 @@ def notify_feedback(workspace, feedback_path, *, project=None, selection=None):
     return added
 
 
-def import_hermes(project, profile):
+def import_hermes(project, profile, *, completed_session=None, automatic=False):
     """Import current-version conversation evidence from an enrolled Hermes profile."""
     project = Path(project).resolve()
     profile = Path(profile).expanduser().resolve(strict=True)
@@ -638,6 +696,8 @@ def import_hermes(project, profile):
     source = config_for(project, hermes_home=profile)
     if not target or not source or target['root'] != project or 'sessions' not in target['sources']:
         raise ValueError('Enable session learning in both SkillCraft and the selected Hermes profile for this project')
+    if automatic and not source['auto_import']:
+        raise ValueError('Automatic import requires explicit enrollment of this Hermes profile')
 
     journal = source['state'] / 'journal.sqlite'
     if journal.resolve() != journal:
@@ -651,15 +711,17 @@ def import_hermes(project, profile):
     versions = {name: tree_hash(local_path(project, settings['source'], directory=True))
                 for name, settings in target['skills'].items()}
     imported = sha256()
+    checkpoint = False
     with closing(sqlite3.connect(journal.as_uri() + '?mode=ro', uri=True, timeout=10)) as hermes:
         hermes.row_factory = sqlite3.Row
+        source_tables = {row[0] for row in hermes.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         rows = hermes.execute("""
             SELECT e.*, a.bindings FROM evidence e
             LEFT JOIN messages a
               ON a.harness=e.harness AND a.session=e.session AND a.turn=e.turn AND a.role='assistant'
-            WHERE e.harness='hermes' AND e.origin='session'
+            WHERE e.harness='hermes' AND e.origin='session' AND (? IS NULL OR e.session=?)
             ORDER BY e.id
-        """)
+        """, (completed_session, completed_session))
         with connection(target) as db:
             for entry in rows:
                 try:
@@ -672,25 +734,135 @@ def import_hermes(project, profile):
                 if (versions.get(name) != version or not isinstance(bound, dict) or bound.get(name) != version
                         or kind not in VERDICTS or not isinstance(witness, list) or len(witness) != 6
                         or not isinstance(witness[2], str) or not witness[2]
-                        or witness != ['hermes', entry['session'], witness[2], entry['turn'], name, kind]
-                        or not hermes.execute("SELECT 1 FROM messages WHERE harness='hermes' "
-                                              "AND session=? AND turn=? AND role='user'",
-                                              (entry['session'], witness[2])).fetchone()):
+                        or witness != ['hermes', entry['session'], witness[2], entry['turn'], name, kind]):
                     counts['skipped'] += 1
                     continue
+                completed = hermes.execute(
+                    """SELECT COUNT(*)=2 FROM messages WHERE harness='hermes' AND session=? AND turn=?
+                       AND role IN ('user','assistant')""",
+                    (entry['session'], witness[2]),
+                ).fetchone()[0]
+                if not completed and 'hermes_recovered_feedback' in source_tables:
+                    completed = hermes.execute(
+                        'SELECT 1 FROM hermes_recovered_feedback WHERE session=? AND turn=? AND target=?',
+                        (entry['session'], witness[2], entry['turn']),
+                    ).fetchone()
+                if not completed:
+                    counts['skipped'] += 1
+                    continue
+                reproduction = None
+                if kind == 'correction':
+                    reproduction = db.execute(
+                        """SELECT independent FROM evidence WHERE skill=? AND version=? AND case_id=?
+                           AND origin='ab' AND kind='failure' AND reproducible=1 ORDER BY id LIMIT 1""",
+                        (name, version, entry['case_id']),
+                    ).fetchone()
                 # The native session/turn witness survives profile moves and copies.
                 identity = sha256(json.dumps(witness, separators=(',', ':')).encode()).hexdigest()
                 if record(db, f'hermes-import:{identity}', name, version, 'session', 'hermes',
-                          entry['session'], entry['turn'], entry['independent'], entry['case_id'],
-                          kind, entry['note']):
+                          entry['session'], entry['turn'],
+                          reproduction['independent'] if reproduction else entry['independent'],
+                          entry['case_id'], kind, entry['note'], bool(reproduction)):
                     counts['imported'] += 1
                     imported.update(identity.encode())
                 else:
                     counts['duplicates'] += 1
             if counts['imported']:
-                queue(db, 'hermes-import:' + imported.hexdigest())
-    if counts['imported']:
+                checkpoint = queue(db, 'hermes-import:' + imported.hexdigest())
+            if automatic:
+                pairs = hermes.execute("""
+                    SELECT a.turn FROM messages a
+                    JOIN messages u ON u.harness=a.harness AND u.session=a.session
+                                   AND u.turn=a.turn AND u.role='user'
+                    WHERE a.harness='hermes' AND a.session=? AND a.role='assistant'
+                    ORDER BY a.seq
+                """, (completed_session,))
+                inserted = db.executemany(
+                    "INSERT OR IGNORE INTO messages(harness,session,turn,role,bindings) VALUES ('hermes',?,?,?,'{}')",
+                    ((completed_session, pair['turn'], role) for pair in pairs for role in ('user', 'assistant')),
+                ).rowcount
+                if inserted:
+                    checkpoint |= queue_message_checkpoint(db)
+            if automatic and 'model_steps' in source_tables:
+                completed_steps = hermes.execute("""
+                    SELECT s.turn, s.steps FROM model_steps s
+                    JOIN messages a ON a.harness=s.harness AND a.session=s.session
+                                   AND a.turn=s.turn AND a.role='assistant'
+                    JOIN messages u ON u.harness=s.harness AND u.session=s.session
+                                   AND u.turn=s.turn AND u.role='user'
+                    WHERE s.harness='hermes' AND s.session=? ORDER BY a.seq
+                """, (completed_session,))
+                for entry in completed_steps:
+                    if type(entry['steps']) is int and 0 < entry['steps'] <= 2**31 - 1:
+                        checkpoint |= add_model_steps(db, 'hermes', completed_session, entry['turn'],
+                                                      entry['steps'], schedule=True)
+    if checkpoint:
         wake(target)
+    return counts
+
+
+def recover_hermes(project, profile, *, session, items):
+    project = Path(project).resolve()
+    source = config_for(project, hermes_home=profile)
+    if not source or source['root'] != project or 'sessions' not in source['sources']:
+        raise ValueError('Enable session learning in this Hermes profile and use its approved project root')
+    if not isinstance(session, str) or not session or not isinstance(items, list):
+        raise ValueError('History recovery requires one native Hermes session and a list of observations')
+    counts = {'recorded': 0, 'duplicates': 0, 'skipped': 0}
+    if not items:
+        return counts
+    journal = source['state'] / 'journal.sqlite'
+    if journal.resolve() != journal or not journal.is_file():
+        raise ValueError('History recovery requires verified observations in this Hermes profile journal')
+    versions = {name: tree_hash(local_path(project, settings['source'], directory=True))
+                for name, settings in source['skills'].items()}
+    with connection(source) as db:
+        db.execute('BEGIN IMMEDIATE')
+        for item in items:
+            if not isinstance(item, dict):
+                counts['skipped'] += 1
+                continue
+            values = [item.get(field) for field in ('target_turn', 'feedback_turn', 'feedback',
+                                                   'reply_uid_sha256', 'final_reply_uid')]
+            if not all(isinstance(value, str) and value for value in values):
+                counts['skipped'] += 1
+                continue
+            target, prompt_uid, feedback, uid, final_uid = values
+            kind = classify(feedback)
+            if not kind or not re.fullmatch(r'[0-9a-f]{64}', uid):
+                counts['skipped'] += 1
+                continue
+            prior = db.execute("""
+                SELECT a.bindings FROM hermes_replies r
+                JOIN messages a ON a.harness='hermes' AND a.session=r.session
+                               AND a.turn=r.turn AND a.role='assistant'
+                JOIN messages u ON u.harness='hermes' AND u.session=r.session
+                               AND u.turn=r.turn AND u.role='user'
+                WHERE r.session=? AND r.turn=? AND r.uid=?
+            """, (session, target, uid)).fetchone()
+            bound = json.loads(prior['bindings']) if prior else {}
+            if not isinstance(bound, dict) or not bound or any(
+                versions.get(name) != version for name, version in bound.items()
+            ):
+                counts['skipped'] += 1
+                continue
+            if db.execute("SELECT 1 FROM evidence WHERE harness='hermes' AND session=? AND turn=? AND kind=?",
+                          (session, target, kind)).fetchone():
+                counts['duplicates'] += 1
+                continue
+            turn = 'history:' + sha256(prompt_uid.encode()).hexdigest()
+            inserted = db.execute('INSERT OR IGNORE INTO hermes_recovered_feedback VALUES (?,?,?,?)',
+                                  (session, turn, target, sha256(final_uid.encode()).hexdigest())).rowcount
+            if inserted and record_feedback(db, 'hermes', session, turn, target, feedback):
+                counts['recorded'] += 1
+            elif inserted:
+                db.execute('DELETE FROM hermes_recovered_feedback WHERE session=? AND turn=?', (session, turn))
+                counts['skipped'] += 1
+            else:
+                counts['duplicates'] += 1
+    target = config_for(project)
+    if target and 'sessions' in target['sources']:
+        counts['import'] = import_hermes(project, profile, completed_session=session)
     return counts
 
 
@@ -699,9 +871,17 @@ def main(argv=None):
     cli.add_argument('--hermes-home', type=Path, help=argparse.SUPPRESS)
     sub = cli.add_subparsers(dest='command', required=True)
     sub.add_parser('observe', help='Read one native message envelope from stdin')
+    sync = sub.add_parser('sync-hermes')
+    sync.add_argument('project', type=Path)
+    sync.add_argument('session')
+    recovery = sub.add_parser('recover-hermes', help='Record independently verified local history observations')
+    recovery.add_argument('project', type=Path)
     for verb in ('enable', 'work', 'status', 'rollback', 'inventory'):
         parser = sub.add_parser(verb)
         parser.add_argument('project', type=Path)
+        if verb == 'enable':
+            parser.add_argument('--auto-import', action='store_true',
+                                help='Forward completed experience from this enrolled Hermes profile')
         if verb == 'rollback':
             parser.add_argument('revision', type=int)
         if verb == 'work':
@@ -720,8 +900,9 @@ def main(argv=None):
     try:
         home = args.hermes_home
         if home is not None:
-            if not home.is_absolute() or args.command not in {'enable', 'inventory', 'observe', 'status'}:
-                raise ValueError('Hermes supports journal collection only and requires an absolute profile path')
+            journal_commands = {'enable', 'inventory', 'observe', 'status', 'sync-hermes', 'recover-hermes'}
+            if not home.is_absolute() or args.command not in journal_commands:
+                raise ValueError('This command requires an absolute Hermes profile path and a supported journal operation')
         if args.command == 'observe':
             inserted = observe(**json.load(sys.stdin), hermes_home=home)
             if home is not None:
@@ -729,6 +910,17 @@ def main(argv=None):
             return 0
         if args.command == 'import-hermes':
             print(json.dumps(import_hermes(args.project, args.from_profile)))
+            return 0
+        if args.command == 'sync-hermes':
+            if home is None or not args.session:
+                raise ValueError('Hermes synchronization requires a profile and a session')
+            print(json.dumps(import_hermes(args.project, home, completed_session=args.session, automatic=True)))
+            return 0
+        if args.command == 'recover-hermes':
+            if home is None:
+                raise ValueError('Recovery requires the Hermes profile that owns the session')
+            payload = json.load(sys.stdin)
+            print(json.dumps(recover_hermes(args.project, home, session=payload['session'], items=payload['items'])))
             return 0
         if args.command == 'ingest':
             if args.selection and not args.feedback:
@@ -745,11 +937,17 @@ def main(argv=None):
         if args.command == 'enable':
             if args.project.resolve() != config['root']:
                 raise ValueError('Enable learning from the project root')
+            if args.auto_import:
+                if home is None:
+                    raise ValueError('Use hermes skillcraft enable to enroll a source profile for automatic import')
+                target = config_for(args.project)
+                if not target or 'sessions' not in target['sources']:
+                    raise ValueError('Enable regular SkillCraft session learning before automatic import')
             config['state'].mkdir(parents=True, exist_ok=True, mode=0o700)
             from tempfile import NamedTemporaryFile
             with NamedTemporaryFile('w', encoding='utf-8', dir=config['state'], delete=False) as marker:
                 approval = (approval_record(config) if home is None
-                            else {'config_sha256': config['fingerprint']})
+                            else {'config_sha256': config['fingerprint'], 'auto_import': args.auto_import})
                 json.dump(approval, marker, ensure_ascii=False)
                 marker.write('\n')
                 marker.flush()
@@ -758,7 +956,8 @@ def main(argv=None):
             print(json.dumps({'enabled': str(config['root']), 'journal': str(config['state'])}))
         elif args.command == 'inventory':
             versions = source_inventory(config, hermes=home is not None)
-            print(json.dumps({'root': str(config['root']), 'versions': versions} if home else versions,
+            print(json.dumps({'root': str(config['root']), 'versions': versions,
+                              'auto_import': config['auto_import']} if home else versions,
                              ensure_ascii=False))
         elif args.command == 'work':
             from scripts.learning_worker import work
@@ -773,6 +972,8 @@ def main(argv=None):
             with connection(config) as db:
                 print(json.dumps({
                     'messages': db.execute('SELECT COUNT(*) FROM messages').fetchone()[0],
+                    'model_steps': db.execute('SELECT COALESCE(SUM(steps),0) FROM model_steps').fetchone()[0],
+                    **({'auto_import': config['auto_import']} if home is not None else {}),
                     'evidence': {r[0]: r[1] for r in db.execute('SELECT kind,COUNT(*) FROM evidence GROUP BY kind')},
                     'checkpoints': {r[0]: r[1] for r in db.execute('SELECT status,COUNT(*) FROM checkpoints GROUP BY status')},
                     'revisions': [dict(r) for r in db.execute('SELECT * FROM revisions ORDER BY id DESC LIMIT 20')],
