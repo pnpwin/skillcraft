@@ -3,7 +3,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from scripts.learning_selection import discover_local_skills, linked_skill_target
+from scripts.learning_selection import (
+    discover_local_skills,
+    linked_root_candidates,
+    linked_skill_target,
+)
 
 
 def _skill(directory: Path, *, name: str | None = None, body: str = "private body") -> None:
@@ -275,3 +279,102 @@ class LearningSelectionTest(unittest.TestCase):
         self.assertIsNone(linked_skill_target(
             aliases / "custom-managed", (self.root.resolve(),)
         ))
+
+    def test_linked_root_candidates_group_safe_aliases_without_reading_skill_content(self) -> None:
+        sources = self.root / "sources"
+        _skill(sources / "alpha", name="alpha")
+        _skill(sources / "beta", name="beta")
+        aliases = self.root / ".agents/skills"
+        aliases.mkdir(parents=True)
+        (aliases / "alpha").symlink_to(sources / "alpha", target_is_directory=True)
+        (aliases / "beta").symlink_to(sources / "beta", target_is_directory=True)
+
+        with patch("scripts.learning_selection._skill_id", side_effect=AssertionError("read target")) as read_skill:
+            candidates = linked_root_candidates(self.root, scope="project")
+        read_skill.assert_not_called()
+        self.assertEqual(candidates, {
+            sources.resolve(): (
+                (".agents/skills/alpha", (sources / "alpha").resolve()),
+                (".agents/skills/beta", (sources / "beta").resolve()),
+            ),
+        })
+
+    def test_linked_root_candidates_honor_exclusions_pins_and_existing_roots(self) -> None:
+        sources = self.root / "sources"
+        for name in ("alpha", "beta", "gamma"):
+            _skill(sources / name, name=name)
+        aliases = self.root / ".agents/skills"
+        aliases.mkdir(parents=True)
+        for name in ("alpha", "beta", "gamma"):
+            (aliases / name).symlink_to(sources / name, target_is_directory=True)
+
+        candidates = linked_root_candidates(
+            self.root,
+            scope="project",
+            exclude=("alpha",),
+            pins={"beta": ".agents/skills/beta"},
+        )
+        self.assertEqual(candidates, {
+            sources.resolve(): (
+                (".agents/skills/beta", (sources / "beta").resolve()),
+                (".agents/skills/gamma", (sources / "gamma").resolve()),
+            ),
+        })
+        self.assertEqual(linked_root_candidates(
+            self.root,
+            scope="project",
+            linked_skill_roots=(sources.resolve(),),
+        ), {})
+
+    def test_linked_root_candidates_reject_source_root_checkout(self) -> None:
+        checkout_sources = self.root / "checkout-sources"
+        _skill(checkout_sources / "nested", name="nested")
+        (checkout_sources / ".git").mkdir()
+        root_aliases = self.root / ".agents/skills"
+        root_aliases.mkdir(parents=True)
+        (root_aliases / "nested").symlink_to(checkout_sources / "nested", target_is_directory=True)
+
+        self.assertEqual(linked_root_candidates(self.root, scope="project"), {})
+
+    def test_preview_accepts_external_checkout_but_skips_checkout_nested_inside_it(self) -> None:
+        project = self.root / "project"
+        aliases = project / ".agents/skills"
+        aliases.mkdir(parents=True)
+        checkout = (self.root / "external").resolve()
+        (checkout / ".git").mkdir(parents=True)
+        _skill(checkout / "plain", name="plain")
+        nested = checkout / "nested"
+        (nested / ".git").mkdir(parents=True)
+        _skill(nested / "skills/helper", name="helper")
+        (aliases / "plain").symlink_to(checkout / "plain", target_is_directory=True)
+        (aliases / "helper").symlink_to(nested / "skills/helper", target_is_directory=True)
+        self.assertEqual(linked_root_candidates(project, scope="project"), {
+            checkout: ((".agents/skills/plain", checkout / "plain"),),
+        })
+
+    def test_explicit_git_root_remains_valid_but_preview_rejects_nested_repo_boundaries(self) -> None:
+        explicit_root = self.root / "explicit-repo"
+        (explicit_root / ".git").mkdir(parents=True)
+        _skill(explicit_root / "explicit-helper", name="explicit-helper")
+        aliases = self.root / ".agents/skills"
+        aliases.mkdir(parents=True)
+        explicit_link = aliases / "explicit-helper"
+        explicit_link.symlink_to(explicit_root / "explicit-helper", target_is_directory=True)
+        self.assertEqual(
+            linked_skill_target(explicit_link, (explicit_root.resolve(),)),
+            (explicit_root / "explicit-helper").resolve(),
+        )
+        self.assertEqual(linked_root_candidates(self.root, scope="project"), {})
+
+        explicit_link.unlink()
+        nested_root = self.root / "sources"
+        _skill(nested_root / "nested-helper", name="nested-helper")
+        (nested_root / "nested-helper/.git").mkdir()
+        nested_link = aliases / "nested-helper"
+        nested_link.symlink_to(nested_root / "nested-helper", target_is_directory=True)
+        self.assertEqual(linked_root_candidates(self.root, scope="project"), {})
+        self.assertEqual(linked_root_candidates(
+            self.root,
+            scope="project",
+            linked_skill_roots=(nested_root.resolve(),),
+        ), {})

@@ -204,6 +204,83 @@ def _has_repo_below(root: Path, target: Path) -> bool:
     return False
 
 
+def _canonical_link_target(link: Path) -> Path | None:
+    """Resolve a leaf link without reading skill contents."""
+    try:
+        if not link.is_symlink() or safe_id(link.name) != link.name:
+            return None
+        parent = link.parent.absolute()
+        if parent.is_symlink():
+            return None
+        target = link.resolve(strict=True)
+        skill_file = target / "SKILL.md"
+        if (not target.is_dir() or target.name != link.name
+                or skill_file.is_symlink() or not skill_file.is_file()
+                or _has_managed_ancestry(target) or _canonical_hermes_excluded(target)):
+            return None
+        return target
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _inside_linked_roots(target: Path, linked_skill_roots: tuple[Path, ...]) -> bool:
+    """Whether the target is already covered by a canonical approved source root."""
+    for approved in linked_skill_roots:
+        approved = Path(approved)
+        if not approved.is_absolute():
+            continue
+        try:
+            canonical_root = approved.resolve(strict=True)
+            if canonical_root != approved or not canonical_root.is_dir():
+                continue
+            relative = target.relative_to(canonical_root)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if relative.parts and not _has_repo_below(canonical_root, target):
+            return True
+    return False
+
+
+def _under_linked_roots(target: Path, linked_skill_roots: tuple[Path, ...]) -> bool:
+    """Whether a target is strictly below any canonical approved root."""
+    for approved in linked_skill_roots:
+        approved = Path(approved)
+        if not approved.is_absolute():
+            continue
+        try:
+            canonical_root = approved.resolve(strict=True)
+            if canonical_root != approved or not canonical_root.is_dir():
+                continue
+            if target.relative_to(canonical_root).parts:
+                return True
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return False
+
+
+def _preview_crosses_checkout(root: Path, target: Path) -> bool:
+    if target.is_relative_to(root) and _has_repo_below(root, target):
+        return True
+    checkouts = [directory for directory in (target, *target.parents)
+                 if (directory / ".git").exists() or (directory / ".git").is_symlink()]
+    return target in checkouts or len(checkouts) > 1
+
+
+def _scope_candidates(root: Path, scope: str, *, include_links: bool):
+    roots = _PROJECT_ROOTS if scope == "project" else _HOME_ROOTS if scope == "home" else ()
+    for rel_root in roots:
+        relative = Path(rel_root)
+        skills_root = root / relative
+        if _crosses_managed_directory(root, relative) or not skills_root.is_dir():
+            continue
+        hermes = rel_root.endswith(".hermes/skills")
+        names, paths, valid = _managed_hermes(skills_root) if hermes else (set(), set(), True)
+        for candidate in _skill_directories(skills_root, hermes=hermes, include_links=include_links):
+            linked = candidate.is_symlink()
+            if not _is_excluded(candidate, skills_root, names, paths, valid, linked=linked):
+                yield candidate, linked
+
+
 def linked_skill_target(link: Path, linked_skill_roots: tuple[Path, ...]) -> Path | None:
     """Return an approved canonical skill directory for a safe leaf symlink.
 
@@ -211,42 +288,55 @@ def linked_skill_target(link: Path, linked_skill_roots: tuple[Path, ...]) -> Pat
     below one of them, and all canonical path and metadata exclusions apply.
     """
     link = Path(link)
-    try:
-        if not linked_skill_roots or not link.is_symlink() or safe_id(link.name) != link.name:
-            return None
-        # Discovery parents must be real directories. The leaf itself is the
-        # only symlink permitted in the source path.
-        parent = link.parent.absolute()
-        if parent.is_symlink():
-            return None
-        target = link.resolve(strict=True)
-        if not target.is_dir() or target.name != link.name:
-            return None
-        for approved in linked_skill_roots:
-            approved = Path(approved)
-            if not approved.is_absolute():
-                continue
-            try:
-                canonical_root = approved.resolve(strict=True)
-            except (OSError, RuntimeError):
-                continue
-            if canonical_root != approved or not canonical_root.is_dir():
-                continue
-            try:
-                relative = target.relative_to(canonical_root)
-            except ValueError:
-                continue
-            if not relative.parts or _has_repo_below(canonical_root, target):
-                continue
-            if _has_managed_ancestry(target) or _canonical_hermes_excluded(target):
-                return None
-            skill_file = target / "SKILL.md"
-            if skill_file.is_symlink() or not skill_file.is_file() or _skill_id(skill_file) != link.name:
-                return None
-            return target
-    except (OSError, RuntimeError, ValueError):
+    if not linked_skill_roots:
         return None
-    return None
+    target = _canonical_link_target(link)
+    if target is None or not _inside_linked_roots(target, linked_skill_roots):
+        return None
+    skill_file = target / "SKILL.md"
+    if _skill_id(skill_file) != link.name:
+        return None
+    return target
+
+
+def linked_root_candidates(
+    root: Path,
+    *,
+    scope: str,
+    linked_skill_roots: tuple[Path, ...] = (),
+    exclude=(),
+    pins=None,
+) -> dict[Path, tuple[tuple[str, Path], ...]]:
+    """Propose canonical source roots for eligible linked local skill aliases.
+
+    This preview checks paths and managed-install metadata only. It deliberately
+    does not read ``SKILL.md`` contents; final discovery checks frontmatter after
+    the user approves a root.
+    """
+    root = Path(root)
+    if root.is_symlink():
+        return {}
+    root = root.resolve()
+    excluded = set(exclude)
+    pins = pins or {}
+    grouped: dict[Path, set[tuple[str, Path]]] = {}
+    for link, linked in _scope_candidates(root, scope, include_links=True):
+        if not linked or link.name in excluded:
+            continue
+        alias = link.relative_to(root).as_posix()
+        if link.name in pins and pins[link.name] != alias:
+            continue
+        target = _canonical_link_target(link)
+        if target is None or _under_linked_roots(target, linked_skill_roots):
+            continue
+        candidate_root = target.parent
+        if candidate_root == Path(candidate_root.anchor) or _preview_crosses_checkout(root, target):
+            continue
+        grouped.setdefault(candidate_root, set()).add((alias, target))
+    return {
+        candidate_root: tuple(sorted(aliases, key=lambda item: (item[0], item[1].as_posix())))
+        for candidate_root, aliases in sorted(grouped.items(), key=lambda item: item[0].as_posix())
+    }
 
 
 def discover_local_skills(
@@ -260,34 +350,20 @@ def discover_local_skills(
     ``root`` is the project root for ``scope="project"`` and the home root for
     ``scope="home"``. Discovery is read-only and performed on every call.
     """
-    roots = _PROJECT_ROOTS if scope == "project" else _HOME_ROOTS if scope == "home" else ()
     root = Path(root)
     if root.is_symlink():
         return {}
     found: dict[str, set[str]] = {}
-    for rel_root in roots:
-        relative = Path(rel_root)
-        skills_root = root / relative
-        if _crosses_managed_directory(root, relative) or not skills_root.is_dir():
-            continue
-        hermes = rel_root.endswith(".hermes/skills")
-        if hermes:
-            managed_names, managed_paths, lock_valid = _managed_hermes(skills_root)
-        else:
-            managed_names, managed_paths, lock_valid = set(), set(), True
-        for skill_dir in _skill_directories(skills_root, hermes=hermes, include_links=bool(linked_skill_roots)):
-            linked = skill_dir.is_symlink()
-            if _is_excluded(skill_dir, skills_root, managed_names, managed_paths, lock_valid, linked=linked):
+    for skill_dir, linked in _scope_candidates(root, scope, include_links=bool(linked_skill_roots)):
+        if linked:
+            if linked_skill_target(skill_dir, linked_skill_roots) is None:
                 continue
-            if linked:
-                if linked_skill_target(skill_dir, linked_skill_roots) is None:
-                    continue
-                skill_id = skill_dir.name
-            else:
-                skill_file = skill_dir / "SKILL.md"
-                if skill_file.is_symlink():
-                    continue
-                skill_id = _skill_id(skill_file)
-            if skill_id:
-                found.setdefault(skill_id, set()).add(skill_dir.relative_to(root).as_posix())
+            skill_id = skill_dir.name
+        else:
+            skill_file = skill_dir / "SKILL.md"
+            if skill_file.is_symlink():
+                continue
+            skill_id = _skill_id(skill_file)
+        if skill_id:
+            found.setdefault(skill_id, set()).add(skill_dir.relative_to(root).as_posix())
     return {key: sorted(paths) for key, paths in sorted(found.items())}
