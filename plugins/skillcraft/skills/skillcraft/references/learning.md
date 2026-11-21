@@ -1,5 +1,8 @@
 # Learn from verified skill use
 
+For a compact field/default and precedence table, see the
+[configuration reference](configuration.md#learning-configuration).
+
 Enable learning for a project or for eligible local skill sources under home.
 Install the SkillCraft plugin in Codex or OpenCode to collect conversation
 events. Standalone SkillCraft can collect evaluation and review evidence.
