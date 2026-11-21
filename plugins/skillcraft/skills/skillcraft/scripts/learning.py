@@ -3,7 +3,6 @@
 import argparse
 from contextlib import closing, contextmanager
 from hashlib import sha256
-import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -231,34 +230,63 @@ def has_project_boundary(directory, home):
     return False
 
 
+def read_regular(path, *, dir_fd=None):
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) |
+                     getattr(os, 'O_NONBLOCK', 0), dir_fd=dir_fd)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(fd, 'rb') as stream:
+        metadata = os.fstat(stream.fileno())
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f'Learning file must be a regular file: {path}')
+        return stream.read(), stat.S_IMODE(metadata.st_mode)
+
+
+def read_learning_config(root):
+    try:
+        fd = os.open(root / CONFIG.parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) |
+                     getattr(os, 'O_NOFOLLOW', 0))
+    except FileNotFoundError:
+        return None
+    try:
+        return read_regular(CONFIG.name, dir_fd=fd)
+    finally:
+        os.close(fd)
+
+
+def learning_state(root, hermes_home=None):
+    state_root = (hermes_home / 'skillcraft/learning' if hermes_home is not None
+                  else Path.home() / '.local/share/skillcraft/learning')
+    return state_root / sha256(str(root).encode()).hexdigest()
+
+
+def matching_marker(contents, fingerprint):
+    if contents is None:
+        return None
+    raw = contents[0].decode('utf-8')
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        value = raw
+    if isinstance(value, dict) and value.get('config_sha256') == fingerprint:
+        return value
+    # Legacy markers authorize collection without model approval.
+    if isinstance(value, str) and value.strip() == fingerprint:
+        return {'config_sha256': fingerprint}
+    return None
+
+
 def config_for(project, *, enrolling=False, trusted_internal=False, hermes_home=None):
     if os.environ.get(INTERNAL) == '1' and not trusted_internal:
         return None
     path = Path(project).resolve()
     for root in (path, *path.parents):
-        directory = root / CONFIG.parent
-        try:
-            dir_fd = os.open(directory, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0))
-        except FileNotFoundError:
+        snapshot = read_learning_config(root)
+        if snapshot is None:
             continue
-        try:
-            fd = os.open(CONFIG.name, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) |
-                         getattr(os, 'O_NONBLOCK', 0), dir_fd=dir_fd)
-        except FileNotFoundError:
-            os.close(dir_fd)
-            continue
-        except BaseException:
-            os.close(dir_fd)
-            raise
-        try:
-            with os.fdopen(fd, 'rb') as stream:
-                metadata = os.fstat(stream.fileno())
-                if not stat.S_ISREG(metadata.st_mode):
-                    raise ValueError('Learning config must be a regular project file')
-                contents = stream.read()
-        finally:
-            os.close(dir_fd)
-        fingerprint = hashlib.sha256(contents).hexdigest()
+        contents, _ = snapshot
+        fingerprint = sha256(contents).hexdigest()
         raw = json.loads(contents)
         if not isinstance(raw, dict) or raw.get('schema_version') != 1:
             raise ValueError('Expected learning config schema_version 1')
@@ -275,36 +303,18 @@ def config_for(project, *, enrolling=False, trusted_internal=False, hermes_home=
         sources = raw.get('sources', ['sessions', 'evals'])
         if not isinstance(sources, list) or any(x not in {'sessions', 'evals'} for x in sources):
             raise ValueError('Learning sources must be sessions and/or evals')
-        state_root = (hermes_home / 'skillcraft/learning' if hermes_home is not None
-                      else Path.home() / '.local/share/skillcraft/learning')
-        state = state_root / sha256(str(root).encode()).hexdigest()
-        marker = state / 'enabled'
+        state = learning_state(root, hermes_home)
         approval = None
         auto_import = False
         if not enrolling:
             try:
-                marker_fd = os.open(marker, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) |
-                                    getattr(os, 'O_NONBLOCK', 0))
-                with os.fdopen(marker_fd, 'rb') as stream:
-                    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                        return None
-                    marker_raw = stream.read().decode('utf-8')
-                try:
-                    value = json.loads(marker_raw)
-                except (ValueError, TypeError):
-                    value = None
+                marker = matching_marker(read_regular(state / 'enabled'), fingerprint)
             except (OSError, ValueError, TypeError):
-                marker_raw, value = '', None
-            # Legacy markers remain sufficient for observation, but never authorize model work.
-            if isinstance(value, str):
-                if value.strip() != fingerprint:
-                    return None
-            elif isinstance(value, dict) and value.get('config_sha256') == fingerprint:
-                approval = value.get('validation')
-                auto_import = hermes_home is not None and value.get('auto_import') is True
-            else:
-                if marker_raw.strip() != fingerprint:
-                    return None
+                return None
+            if marker is None:
+                return None
+            approval = marker.get('validation')
+            auto_import = hermes_home is not None and marker.get('auto_import') is True
         selection = raw.get('selection', 'explicit')
         linked_roots = configured_linked_roots(raw, selection)
         skills = selected_skills(root, raw, scope, selection, linked_roots)
@@ -1033,6 +1043,193 @@ def recover_hermes(project, profile, *, session, items):
     return counts
 
 
+def linked_root_preview(config, raw):
+    from scripts.learning_selection import linked_root_candidates
+
+    pins = {name: relative_path(opts['source']).as_posix() for name, opts in raw.get('skills', {}).items()
+            if 'source' in opts}
+    candidates = linked_root_candidates(
+        config['root'], scope=config['scope'], linked_skill_roots=config['linked_skill_roots'],
+        exclude=raw.get('exclude', ()), pins=pins,
+    )
+    entries = [{'root': str(root), 'links': [{'source': source, 'target': str(target)}
+                                            for source, target in links]}
+               for root, links in candidates.items()]
+    version = sha256(json.dumps([config['fingerprint'], entries], sort_keys=True).encode()).hexdigest()
+    return {'candidates': entries, 'preview_sha256': version}
+
+
+def prompt_linked_roots(entries):
+    if not entries:
+        return []
+    print('Approve linked skill directories for read-only learning:', file=sys.stderr)
+    for index, entry in enumerate(entries, 1):
+        print(f"  {index}. {entry['root']!r}", file=sys.stderr)
+        for link in entry['links']:
+            print(f"     {link['source']!r} -> {link['target']!r}", file=sys.stderr)
+    print('Enter directory numbers separated by commas or spaces, or press Enter to skip: ',
+          end='', file=sys.stderr, flush=True)
+    try:
+        answer = sys.stdin.readline()
+    except KeyboardInterrupt as error:
+        raise ValueError('Learning enrollment cancelled') from error
+    if not answer:
+        raise ValueError('Learning enrollment cancelled')
+    try:
+        choices = [int(token) for token in answer.replace(',', ' ').split()]
+    except ValueError as error:
+        raise ValueError('Choose one or more directory numbers from the preview') from error
+    if any(index < 1 or index > len(entries) for index in choices):
+        raise ValueError('Choose one or more directory numbers from the preview')
+    return [entries[index - 1]['root'] for index in choices]
+
+
+@contextmanager
+def enrollment_lock(root):
+    import fcntl
+
+    fd = os.open(root / CONFIG.parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) |
+                 getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def enrollment_file(path, contents, mode):
+    from tempfile import NamedTemporaryFile
+
+    with NamedTemporaryFile(dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            os.fchmod(stream.fileno(), mode)
+            stream.write(contents)
+            stream.flush()
+            os.fsync(stream.fileno())
+        except BaseException:
+            temporary.unlink()
+            raise
+    return temporary
+
+
+def write_enrollment(changes, verify):
+    """Stage writes on their respective filesystems and restore on ordinary failure."""
+    staged = []
+    installed = []
+    try:
+        for path, original, contents in changes:
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            mode = original[1] if original else 0o600
+            staged.append((path, original, (contents, mode), enrollment_file(path, contents, mode)))
+        verify()
+        for path, original, value, temporary in staged:
+            if read_regular(path) != original:
+                raise ValueError(f'Learning enrollment changed during enable: {path}')
+            temporary.replace(path)
+            installed.append((path, original, value))
+    except (OSError, ValueError, KeyboardInterrupt):
+        for path, original, value in reversed(installed):
+            if read_regular(path) != value:
+                continue
+            if original is None:
+                path.unlink()
+            else:
+                backup = enrollment_file(path, *original)
+                try:
+                    backup.replace(path)
+                finally:
+                    backup.unlink(missing_ok=True)
+        raise
+    finally:
+        for _, _, _, temporary in staged:
+            temporary.unlink(missing_ok=True)
+
+
+def enable_learning(args, home):
+    config = config_for(args.project, enrolling=True, hermes_home=home)
+    if not config:
+        raise ValueError('Project learning is not enabled')
+    root = config['root']
+    if args.project.resolve() != root:
+        raise ValueError('Enable learning from the project root')
+    if home is not None and 'sessions' not in config['sources']:
+        raise ValueError('Hermes requires sessions in the learning sources')
+    if args.auto_import and home is None:
+        raise ValueError('Use hermes skillcraft enable to enroll a source profile for automatic import')
+    preview_only = args.preview_linked_roots
+    roots = args.approve_linked_root
+    if bool(roots) != (args.linked_roots_preview_sha256 is not None):
+        raise ValueError('--approve-linked-root requires --linked-roots-preview-sha256 and vice versa')
+    if (preview_only or roots) and config['selection'] != 'all':
+        raise ValueError('Linked root confirmation requires selection all')
+    if preview_only and args.auto_import:
+        raise ValueError('Preview does not change Hermes auto-import. Omit --auto-import.')
+
+    snapshot = read_learning_config(root)
+    if snapshot is None or sha256(snapshot[0]).hexdigest() != config['fingerprint']:
+        raise ValueError('Learning configuration changed. Run enable again.')
+    raw = json.loads(snapshot[0])
+    interactive = config['selection'] == 'all' and sys.stdin.isatty() and sys.stderr.isatty()
+    preview = linked_root_preview(config, raw) if preview_only or roots or interactive else None
+    if preview_only:
+        return preview
+    if roots:
+        if args.linked_roots_preview_sha256 != preview['preview_sha256']:
+            raise ValueError('Linked root preview changed. Preview again before approving directories.')
+    elif interactive:
+        roots = prompt_linked_roots(preview['candidates'])
+    entries = [entry for entry in preview['candidates'] if entry['root'] in roots] if roots else []
+    if {entry['root'] for entry in entries} != set(roots):
+        raise ValueError('Approve only absolute directories listed in the current preview')
+
+    original_config = config
+
+    def verify():
+        if read_learning_config(root) != snapshot:
+            raise ValueError('Learning configuration changed. Run enable again.')
+        if entries and linked_root_preview(original_config, raw) != preview:
+            raise ValueError('Linked root preview changed. Preview again before approving directories.')
+
+    shared_state = learning_state(root)
+    with enrollment_lock(root):
+        verify()
+        shared_path = shared_state / 'enabled'
+        shared_original = read_regular(shared_path) if home is not None and (entries or args.auto_import) else None
+        shared = matching_marker(shared_original, config['fingerprint'])
+        if args.auto_import and shared is None:
+            raise ValueError('Enable regular SkillCraft session learning before automatic import')
+        changes = []
+        if entries:
+            approved_roots = [str(path) for path in config['linked_skill_roots']]
+            approved_roots.extend(entry['root'] for entry in entries)
+            updated = {**raw, 'linked_skill_roots': approved_roots}
+            linked_roots = configured_linked_roots(updated, config['selection'])
+            skills = selected_skills(root, updated, config['scope'], config['selection'], linked_roots)
+            for entry in entries:
+                for link in entry['links']:
+                    name = Path(link['source']).name
+                    target = approved_link_target(root, link['source'], linked_roots)
+                    if (target is None or str(target) != link['target'] or name not in skills
+                            or skill_source({**config, 'linked_skill_roots': linked_roots}, skills[name]) != target):
+                        raise ValueError(f"Linked skill is no longer eligible or has an ambiguous source: {link['source']}")
+            contents = (json.dumps(updated, ensure_ascii=False, indent=2) + '\n').encode()
+            config = {**config, 'fingerprint': sha256(contents).hexdigest(),
+                      'linked_skill_roots': linked_roots, 'skills': skills}
+            changes.append((root / CONFIG, snapshot, contents))
+            if shared is not None:
+                # Enrollment from Hermes cannot authorize model inputs for the shared worker.
+                refreshed = {**shared, 'config_sha256': config['fingerprint']}
+                changes.append((shared_path, shared_original, (json.dumps(refreshed) + '\n').encode()))
+
+        marker = config['state'] / 'enabled'
+        approval = (approval_record(config) if home is None
+                    else {'config_sha256': config['fingerprint'], 'auto_import': args.auto_import})
+        changes.append((marker, read_regular(marker), (json.dumps(approval, ensure_ascii=False) + '\n').encode()))
+        write_enrollment(changes, verify)
+    return {'enabled': str(root), 'journal': str(config['state'])}
+
+
 def main(argv=None):
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument('--hermes-home', type=Path, help=argparse.SUPPRESS)
@@ -1049,6 +1246,13 @@ def main(argv=None):
         if verb == 'enable':
             parser.add_argument('--auto-import', action='store_true',
                                 help='Forward completed experience from this enrolled Hermes profile')
+            linking = parser.add_mutually_exclusive_group()
+            linking.add_argument('--preview-linked-roots', action='store_true',
+                                 help='Preview new linked skill directories without writing configuration or enrollment')
+            linking.add_argument('--approve-linked-root', action='append', default=[], metavar='PATH',
+                                 help='Approve an absolute directory from the preview (repeatable)')
+            parser.add_argument('--linked-roots-preview-sha256', metavar='DIGEST',
+                                help='Match the preview_sha256 returned by --preview-linked-roots')
         if verb == 'rollback':
             parser.add_argument('revision', type=int)
         if verb == 'work':
@@ -1096,32 +1300,15 @@ def main(argv=None):
                        else notify_eval(args.workspace, project=args.project))
             print(json.dumps({'new_evidence': changed}))
             return 0
-        config = config_for(args.project, enrolling=args.command == 'enable', hermes_home=home)
+        if args.command == 'enable':
+            print(json.dumps(enable_learning(args, home), ensure_ascii=False))
+            return 0
+        config = config_for(args.project, hermes_home=home)
         if not config:
             raise ValueError('Project learning is not enabled')
         if home is not None and 'sessions' not in config['sources']:
             raise ValueError('Hermes requires sessions in the learning sources')
-        if args.command == 'enable':
-            if args.project.resolve() != config['root']:
-                raise ValueError('Enable learning from the project root')
-            if args.auto_import:
-                if home is None:
-                    raise ValueError('Use hermes skillcraft enable to enroll a source profile for automatic import')
-                target = config_for(args.project)
-                if not target or 'sessions' not in target['sources']:
-                    raise ValueError('Enable regular SkillCraft session learning before automatic import')
-            config['state'].mkdir(parents=True, exist_ok=True, mode=0o700)
-            from tempfile import NamedTemporaryFile
-            with NamedTemporaryFile('w', encoding='utf-8', dir=config['state'], delete=False) as marker:
-                approval = (approval_record(config) if home is None
-                            else {'config_sha256': config['fingerprint'], 'auto_import': args.auto_import})
-                json.dump(approval, marker, ensure_ascii=False)
-                marker.write('\n')
-                marker.flush()
-                os.fsync(marker.fileno())
-            Path(marker.name).replace(config['state'] / 'enabled')
-            print(json.dumps({'enabled': str(config['root']), 'journal': str(config['state'])}))
-        elif args.command == 'inventory':
+        if args.command == 'inventory':
             versions = source_inventory(config, hermes=home is not None)
             print(json.dumps({'root': str(config['root']), 'versions': versions,
                               'auto_import': config['auto_import']} if home else versions,

@@ -19,20 +19,26 @@ MAX_SESSIONS = 128
 LOG = logging.getLogger(__name__)
 
 
-def run_learning(home, verb, *args, payload=None):
+def run_learning(home, verb, *args, payload=None, interactive=False):
     # The CLI owns its imports and SQLite state outside the gateway process.
     # Hermes may add the managed dependency environment to sys.path only.
     env = {**os.environ, 'PYTHONPATH': str(Path(yaml.__file__).resolve().parents[1])}
+    command = [sys.executable, '-B', str(SCRIPT), '--hermes-home', str(home.resolve()), verb, *args]
     try:
-        result = subprocess.run(
-            [sys.executable, '-B', str(SCRIPT), '--hermes-home', str(home.resolve()), verb, *args],
-            input=json.dumps(payload) if payload is not None else '',
-            capture_output=True, text=True, timeout=15, env=env,
-        )
+        if interactive:
+            # Let an interactive enable prompt use the caller's terminal. Keep
+            # stdout captured because the CLI result remains a JSON document.
+            result = subprocess.run(command, stdout=subprocess.PIPE, text=True, env=env)
+        else:
+            result = subprocess.run(
+                command, input=json.dumps(payload) if payload is not None else '',
+                capture_output=True, text=True, timeout=15, env=env,
+            )
     except subprocess.TimeoutExpired as error:
         raise RuntimeError('SkillCraft journal command timed out') from error
     if result.returncode:
-        raise RuntimeError(result.stderr.strip() or 'SkillCraft journal command failed')
+        stderr = getattr(result, 'stderr', None)
+        raise RuntimeError((stderr.strip() if stderr else None) or 'SkillCraft journal command failed')
     return json.loads(result.stdout)
 
 
