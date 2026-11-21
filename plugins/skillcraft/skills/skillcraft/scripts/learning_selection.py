@@ -49,20 +49,31 @@ def _skill_id(skill_file: Path) -> str | None:
 def _managed_hermes(skills_root: Path) -> tuple[set[str], set[Path], bool]:
     """Return bundled names and Hub-managed paths from Hermes native metadata."""
     manifest = skills_root / ".bundled_manifest"
+    hub = skills_root / ".hub"
+    lock_path = hub / "lock.json"
+    if any(path.is_symlink() for path in (manifest, hub, lock_path)):
+        return set(), set(), False
+    if any(path.exists() and not path.is_file() for path in (manifest, lock_path)):
+        return set(), set(), False
     names: set[str] = set()
+    manifest_valid = True
     try:
         with manifest.open("r", encoding="utf-8") as stream:
             for line in stream:
-                name, separator, _digest = line.strip().partition(":")
-                if separator and name:
-                    names.add(name.casefold())
-    except (OSError, UnicodeError):
+                line = line.strip()
+                if not line:
+                    continue
+                name, separator, digest = line.partition(":")
+                if not separator or not name or not digest:
+                    manifest_valid = False
+                    break
+                names.add(name.casefold())
+    except FileNotFoundError:
         pass
-    lock_path = skills_root / ".hub" / "lock.json"
+    except (OSError, UnicodeError):
+        manifest_valid = False
     managed_paths: set[Path] = set()
-    lock_valid = True
-    if (skills_root / ".hub").is_symlink() or lock_path.is_symlink():
-        lock_valid = False
+    lock_valid = manifest_valid
     if lock_path.exists():
         try:
             payload = json.loads(lock_path.read_text(encoding="utf-8"))
@@ -104,6 +115,8 @@ def _is_excluded(
     managed_hermes_names: set[str],
     managed_hermes_paths: set[Path],
     hermes_lock_valid: bool,
+    *,
+    linked: bool = False,
 ) -> bool:
     try:
         relative = candidate.relative_to(skills_root)
@@ -116,10 +129,10 @@ def _is_excluded(
     if any(relative == managed or managed in relative.parents for managed in managed_hermes_paths):
         return True
     return (candidate.name.casefold() in managed_hermes_names
-            or _crosses_managed_directory(skills_root, relative))
+            or _crosses_managed_directory(skills_root, relative.parent if linked else relative))
 
 
-def _skill_directories(skills_root: Path, *, hermes: bool) -> list[Path]:
+def _skill_directories(skills_root: Path, *, hermes: bool, include_links: bool) -> list[Path]:
     """Yield direct skills; Hermes additionally groups skills by category."""
     try:
         entries = sorted(skills_root.iterdir(), key=lambda p: p.name.casefold())
@@ -127,7 +140,13 @@ def _skill_directories(skills_root: Path, *, hermes: bool) -> list[Path]:
         return []
     candidates: list[Path] = []
     for entry in entries:
-        if not entry.is_dir() or entry.name.startswith(".") or entry.is_symlink():
+        if entry.name.startswith("."):
+            continue
+        if entry.is_symlink():
+            if include_links:
+                candidates.append(entry)
+            continue
+        if not entry.is_dir():
             continue
         if (entry / "SKILL.md").is_file():
             candidates.append(entry)
@@ -137,16 +156,106 @@ def _skill_directories(skills_root: Path, *, hermes: bool) -> list[Path]:
                 children = sorted(entry.iterdir(), key=lambda p: p.name.casefold())
             except OSError:
                 continue
-            candidates.extend(
-                child for child in children
-                if child.is_dir() and not child.is_symlink() and not child.name.startswith(".")
-                and (child / "SKILL.md").is_file()
-            )
+            for child in children:
+                if child.name.startswith("."):
+                    continue
+                if child.is_symlink():
+                    if include_links:
+                        candidates.append(child)
+                elif child.is_dir() and (child / "SKILL.md").is_file():
+                    candidates.append(child)
     return candidates
 
 
-def discover_local_skills(root: Path, *, scope: str) -> dict[str, list[str]]:
-    """Return exact skill IDs mapped to canonical relative source paths.
+def _has_managed_ancestry(path: Path) -> bool:
+    """Reject known managed locations and package markers on their ancestors."""
+    if any(part.casefold() in _EXCLUDED_PARTS for part in path.parts):
+        return True
+    for current in (path, *path.parents):
+        if any((current / marker).is_file() for marker in _PACKAGE_MARKERS):
+            return True
+    return False
+
+
+def _canonical_hermes_excluded(target: Path) -> bool:
+    """Check bundle and Hub provenance roots along the canonical ancestry."""
+    for ancestor in target.parents:
+        manifest = ancestor / ".bundled_manifest"
+        hub = ancestor / ".hub"
+        lock_path = hub / "lock.json"
+        if not (manifest.exists() or manifest.is_symlink() or hub.is_symlink()
+                or lock_path.exists() or lock_path.is_symlink()):
+            continue
+        names, paths, lock_valid = _managed_hermes(ancestor)
+        if _is_excluded(target, ancestor, names, paths, lock_valid):
+            return True
+    return False
+
+
+def _has_repo_below(root: Path, target: Path) -> bool:
+    """Reject nested repositories from the approved root through the target."""
+    relative = target.relative_to(root)
+    current = root
+    for part in relative.parts:
+        current = current / part
+        marker = current / ".git"
+        if marker.exists() or marker.is_symlink():
+            return True
+    return False
+
+
+def linked_skill_target(link: Path, linked_skill_roots: tuple[Path, ...]) -> Path | None:
+    """Return an approved canonical skill directory for a safe leaf symlink.
+
+    Approved roots are checked again at use time. The target must be strictly
+    below one of them, and all canonical path and metadata exclusions apply.
+    """
+    link = Path(link)
+    try:
+        if not linked_skill_roots or not link.is_symlink() or safe_id(link.name) != link.name:
+            return None
+        # Discovery parents must be real directories. The leaf itself is the
+        # only symlink permitted in the source path.
+        parent = link.parent.absolute()
+        if parent.is_symlink():
+            return None
+        target = link.resolve(strict=True)
+        if not target.is_dir() or target.name != link.name:
+            return None
+        for approved in linked_skill_roots:
+            approved = Path(approved)
+            if not approved.is_absolute():
+                continue
+            try:
+                canonical_root = approved.resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            if canonical_root != approved or not canonical_root.is_dir():
+                continue
+            try:
+                relative = target.relative_to(canonical_root)
+            except ValueError:
+                continue
+            if not relative.parts or _has_repo_below(canonical_root, target):
+                continue
+            if _has_managed_ancestry(target) or _canonical_hermes_excluded(target):
+                return None
+            skill_file = target / "SKILL.md"
+            if skill_file.is_symlink() or not skill_file.is_file() or _skill_id(skill_file) != link.name:
+                return None
+            return target
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return None
+
+
+def discover_local_skills(
+    root: Path,
+    *,
+    scope: str,
+    linked_skill_roots: tuple[Path, ...] = (),
+) -> dict[str, list[str]]:
+    """Return exact skill IDs mapped to scope-relative source paths.
 
     ``root`` is the project root for ``scope="project"`` and the home root for
     ``scope="home"``. Discovery is read-only and performed on every call.
@@ -166,13 +275,19 @@ def discover_local_skills(root: Path, *, scope: str) -> dict[str, list[str]]:
             managed_names, managed_paths, lock_valid = _managed_hermes(skills_root)
         else:
             managed_names, managed_paths, lock_valid = set(), set(), True
-        for skill_dir in _skill_directories(skills_root, hermes=hermes):
-            skill_file = skill_dir / "SKILL.md"
-            if skill_file.is_symlink() or _is_excluded(
-                skill_dir, skills_root, managed_names, managed_paths, lock_valid
-            ):
+        for skill_dir in _skill_directories(skills_root, hermes=hermes, include_links=bool(linked_skill_roots)):
+            linked = skill_dir.is_symlink()
+            if _is_excluded(skill_dir, skills_root, managed_names, managed_paths, lock_valid, linked=linked):
                 continue
-            skill_id = _skill_id(skill_file)
+            if linked:
+                if linked_skill_target(skill_dir, linked_skill_roots) is None:
+                    continue
+                skill_id = skill_dir.name
+            else:
+                skill_file = skill_dir / "SKILL.md"
+                if skill_file.is_symlink():
+                    continue
+                skill_id = _skill_id(skill_file)
             if skill_id:
                 found.setdefault(skill_id, set()).add(skill_dir.relative_to(root).as_posix())
     return {key: sorted(paths) for key, paths in sorted(found.items())}

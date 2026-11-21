@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -155,6 +155,31 @@ test('binds exact raw and wrapped native skill projections to current source and
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('matches native skill aliases only to enrolled linked targets', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'skillcraft-opencode-linked-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const target = join(directory, 'target');
+  const other = join(directory, 'other');
+  const alias = join(directory, 'alias');
+  const content = 'Exact skill instructions\n';
+  for (const root of [target, other]) {
+    await mkdir(root);
+    await writeFile(join(root, 'SKILL.md'), content);
+  }
+  await symlink(target, alias, 'dir');
+  const path = await realpath(join(target, 'SKILL.md'));
+  const evidence = { path, hash: createHash('sha256').update(content).digest('hex'), snapshot_hash: 'version' };
+  const catalog = [{ id: 'demo', path: join(alias, 'SKILL.md'), content }];
+  const segment = [{ type: 'skill', skill: 'demo', text: content }];
+
+  assert.deepEqual(await verifiedSkills(segment, catalog, [evidence]), []);
+  const inventory = [{ ...evidence, linked: true }];
+  assert.deepEqual(await verifiedSkills(segment, catalog, inventory), [evidence]);
+  await unlink(alias);
+  await symlink(other, alias, 'dir');
+  assert.deepEqual(await verifiedSkills(segment, catalog, inventory), []);
 });
 
 test('keeps consuming after a per-event error and reconnects when an iterator ends', async () => {

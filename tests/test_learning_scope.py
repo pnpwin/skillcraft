@@ -66,6 +66,66 @@ class LearningScopeTests(unittest.TestCase):
         path.symlink_to(self.project / '.agents/skills/demo', target_is_directory=True)
         self.assertEqual(set(learning.config_for(self.project)['skills']), {'included'})
 
+    def test_linked_skill_added_after_enable_records_canonical_version_without_auto_apply(self):
+        checkout = self.root / 'shared-checkout'
+        skill = self.make_skill(checkout, directory='skills/team')
+        (checkout / '.git').mkdir()
+        self.configure(self.project, selection='all', linked_skill_roots=[str(skill.parent)],
+                       defaults={'auto_apply': True})
+        self.enable(self.project)
+        config = learning.config_for(self.project)
+        self.assertFalse(config['skills'])
+
+        link = self.project / '.hermes/skills/demo'
+        link.parent.mkdir(parents=True)
+        link.symlink_to(skill, target_is_directory=True)
+        second_link = self.project / '.agents/skills/demo'
+        second_link.parent.mkdir(parents=True)
+        second_link.symlink_to(skill, target_is_directory=True)
+        config = learning.config_for(self.project)
+        settings = config['skills']['demo']
+        self.assertEqual(learning.skill_source(config, settings), skill)
+        self.assertIs(settings['auto_apply'], False)
+        loaded = learning.source_inventory(config)
+        self.assertEqual([entry['path'] for entry in loaded], [str(skill / 'SKILL.md')])
+        version = loaded[0]['snapshot_hash']
+        loaded[0]['path'] = str(link / 'SKILL.md')
+        self.assertTrue(learning.observe(self.project, 'codex', 'session', 'read', 'user', 'Use demo', []))
+        self.assertTrue(learning.observe(self.project, 'codex', 'session', 'read', 'assistant', 'Output', loaded))
+        self.assertTrue(learning.observe(self.project, 'codex', 'session', 'confirm', 'user',
+                                         'I verified it works.', [], target_turn='read'))
+        with learning.connection(config) as db:
+            self.assertEqual([tuple(row) for row in db.execute('SELECT skill, version, kind FROM evidence')],
+                             [('demo', version, 'success')])
+        self.assertEqual(learning.tree_hash(skill), version)
+
+    def test_link_retarget_requires_approval_for_new_source_even_with_identical_contents(self):
+        first = self.make_skill(self.root / 'first')
+        second = self.make_skill(self.root / 'second')
+        link = self.project / '.agents/skills/demo'
+        link.parent.mkdir(parents=True)
+        link.symlink_to(first, target_is_directory=True)
+        self.configure(self.project, selection='all', linked_skill_roots=[str(first.parent), str(second.parent)],
+                       defaults={'train': 'train.json', 'holdout': 'holdout.json'})
+        for split in ('train', 'holdout'):
+            write_json(self.project / f'{split}.json', {
+                'evals': [{'id': split, 'prompt': f'Use demo for {split}', 'expectations': []}],
+            })
+        self.enable(self.project)
+        prior = learning.config_for(self.project)
+        approved = learning.require_model_approval(prior, name='demo')
+        self.assertTrue(learning.approval_still_current(prior, approved, name='demo'))
+
+        link.unlink()
+        link.symlink_to(second, target_is_directory=True)
+        self.assertEqual(learning.tree_hash(first), learning.tree_hash(second))
+        self.assertEqual(learning.source_inventory(prior), [])
+        current = learning.config_for(self.project)
+        self.assertEqual(learning.skill_source(current, current['skills']['demo']), second)
+        self.assertFalse(learning.approval_still_current(current, approved, name='demo'))
+        with self.assertRaisesRegex(ValueError, 'source changed'):
+            learning.require_model_approval(current, name='demo')
+
     def test_home_journal_stays_separate_from_project_and_repository_sessions(self):
         self.configure(self.home, scope='home', selection='all')
         self.make_skill(self.home, 'global-skill')
@@ -75,6 +135,10 @@ class LearningScopeTests(unittest.TestCase):
         home = learning.config_for(local_chat)
         self.assertEqual(home['root'], self.home)
         self.assertEqual(set(home['skills']), {'global-skill'})
+        mounted = self.home / 'mounted-workspace'
+        mounted.mkdir()
+        with patch.object(Path, 'is_mount', lambda path: path == mounted):
+            self.assertIsNone(learning.config_for(mounted))
         repo = self.home / 'repo'
         repo.mkdir()
         (repo / '.git').write_text('gitdir: /worktrees/repo\n')

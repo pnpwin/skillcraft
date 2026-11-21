@@ -78,11 +78,22 @@ works in an empty project and adds eligible new skills without re-enrollment.
 
 Project discovery uses `.agents/skills`, `.codex/skills`, `.hermes/skills`,
 `.opencode/skills`, and `opencode/skills`. Hermes also supports one level of
-categories. Automatic discovery skips symlinked paths, nested Git checkouts,
-known plugin and marketplace locations or manifests, and installs identified
+categories. Automatic discovery skips nested Git checkouts, known plugin and
+marketplace locations or manifests, and installs identified
 by Hermes bundle and Hub metadata. A standalone copy with no installation
 metadata can be excluded by ID. If the same skill ID exists in several
 eligible directories, pin its `source` by adding it to the `skills` map.
+
+Symlinked skills require an explicit `linked_skill_roots` list of absolute
+source directories. For example, add
+`"linked_skill_roots": ["/path/to/checkout/skills/team"]` to a configuration
+with `"selection": "all"` and run `enable` again. A skill directory link is
+eligible if its final target is inside an approved directory and passes the
+managed-source exclusions. SkillCraft checks the target again when binding
+evidence or reading a revision source. Multiple links to the same source
+count as one skill. Learning can prepare revisions from a snapshot of a
+linked skill. Automatic promotion and rollback through a linked skill are
+disabled.
 
 For capture only, omit evaluation settings. To set up model-based revision in
 bulk, set `defaults` with shared `harnesses` and dataset paths such as
@@ -133,8 +144,9 @@ For home-wide collection, create `~/.skillcraft/learning.json` with
   "$SKILLCRAFT/scripts/learning.py" enable "$HOME"
 ```
 
-The home configuration captures sessions under `HOME` when there is no project
-configuration or intervening Git, Arc, Hg, SVN, or `AGENTS.md` project marker. A session
+Home collection applies under `HOME`. An intervening mount point, project
+configuration, or project marker (`.git`, `.hg`, `.svn`, or `AGENTS.md`) stops
+home fallback. A session
 at exactly `HOME` opts in even when `HOME` has a repository marker. An approved
 project configuration takes precedence; a disabled project configuration blocks
 home fallback. Home collection never uses a project's separate journal.
