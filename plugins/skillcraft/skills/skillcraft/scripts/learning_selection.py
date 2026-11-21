@@ -85,6 +85,19 @@ def _managed_hermes(skills_root: Path) -> tuple[set[str], set[Path], bool]:
     return names, managed_paths, lock_valid
 
 
+def _crosses_managed_directory(root: Path, relative: Path) -> bool:
+    """Check each descendant on the path, leaving the scope root eligible."""
+    current = root
+    for part in relative.parts:
+        current = current / part
+        git_marker = current / ".git"
+        if current.is_symlink() or git_marker.is_symlink() or git_marker.exists():
+            return True
+        if any((current / marker).is_file() for marker in _PACKAGE_MARKERS):
+            return True
+    return False
+
+
 def _is_excluded(
     candidate: Path,
     skills_root: Path,
@@ -92,10 +105,6 @@ def _is_excluded(
     managed_hermes_paths: set[Path],
     hermes_lock_valid: bool,
 ) -> bool:
-    if candidate.is_symlink():
-        return True
-    # Ignore actual Git packages/worktrees and package/plugin payloads. Check
-    # ancestors as well, since a skill nested inside one is managed content.
     try:
         relative = candidate.relative_to(skills_root)
     except ValueError:
@@ -106,16 +115,8 @@ def _is_excluded(
         return True
     if any(relative == managed or managed in relative.parents for managed in managed_hermes_paths):
         return True
-    current = skills_root
-    for part in relative.parts:
-        current = current / part
-        if current.is_symlink() or (current / ".git").exists():
-            return True
-        if any((current / marker).is_file() for marker in _PACKAGE_MARKERS):
-            return True
-    if candidate.name.casefold() in managed_hermes_names:
-        return True
-    return False
+    return (candidate.name.casefold() in managed_hermes_names
+            or _crosses_managed_directory(skills_root, relative))
 
 
 def _skill_directories(skills_root: Path, *, hermes: bool) -> list[Path]:
@@ -152,14 +153,13 @@ def discover_local_skills(root: Path, *, scope: str) -> dict[str, list[str]]:
     """
     roots = _PROJECT_ROOTS if scope == "project" else _HOME_ROOTS if scope == "home" else ()
     root = Path(root)
+    if root.is_symlink():
+        return {}
     found: dict[str, set[str]] = {}
     for rel_root in roots:
-        skills_root = root
-        unsafe_path = root.is_symlink()
-        for part in Path(rel_root).parts:
-            skills_root = skills_root / part
-            unsafe_path = unsafe_path or skills_root.is_symlink()
-        if unsafe_path or not skills_root.is_dir():
+        relative = Path(rel_root)
+        skills_root = root / relative
+        if _crosses_managed_directory(root, relative) or not skills_root.is_dir():
             continue
         hermes = rel_root.endswith(".hermes/skills")
         if hermes:

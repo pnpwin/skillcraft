@@ -96,6 +96,29 @@ class LearningSelectionTest(unittest.TestCase):
             "real": [".agents/skills/real"]
         })
 
+    def test_excludes_git_checkout_at_discovery_root_in_both_scopes(self) -> None:
+        _skill(self.root / ".agents/skills/managed")
+        (self.root / ".agents/skills/.git").mkdir()
+        _skill(self.root / ".codex/skills/local")
+        (self.root / ".git").mkdir()
+
+        for scope in ("project", "home"):
+            with self.subTest(scope=scope):
+                self.assertEqual(discover_local_skills(self.root, scope=scope), {
+                    "local": [".codex/skills/local"],
+                })
+
+    def test_excludes_git_worktree_above_discovery_root_in_both_scopes(self) -> None:
+        _skill(self.root / ".agents/skills/managed")
+        (self.root / ".agents/.git").write_text("gitdir: /checkout/worktrees/skills\n", encoding="utf-8")
+        _skill(self.root / ".codex/skills/local")
+
+        for scope in ("project", "home"):
+            with self.subTest(scope=scope):
+                self.assertEqual(discover_local_skills(self.root, scope=scope), {
+                    "local": [".codex/skills/local"],
+                })
+
     def test_missing_roots_and_unknown_scope_are_empty(self) -> None:
         self.assertEqual(discover_local_skills(self.root, scope="project"), {})
         self.assertEqual(discover_local_skills(self.root, scope="home"), {})
