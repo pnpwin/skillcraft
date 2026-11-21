@@ -142,6 +142,19 @@ process environment settings for background runs. The Codex `binary` option
 selects the executable. `codex_home`, OpenCode `server`, and Hermes `home`
 select the respective runtime profile or endpoint.
 
+### Hermes Learning cycle
+
+The Hermes profile journals verified feedback from completed local chat turns.
+Use `--auto-import` or `learning.py import-hermes` to forward that evidence to
+the shared Learning worker after enabling shared Learning for the same scope.
+When enough evidence qualifies for revision, the worker uses the approved
+`train` cases to prepare a candidate and evaluates it on `holdout` cases. To
+include Hermes in the quality runs, set `harnesses.hermes.model` and supply
+deterministic file checks for all expectations. To select Hermes as the
+proposal generator, use the `optimizer` setting above. Applying a passing
+candidate follows the normal `auto_apply` rules. See
+[Collection and promotion](learning.md#collection-and-promotion).
+
 ## Runner settings
 
 | Setting | Applies to | Default / accepted values |
@@ -169,8 +182,9 @@ details. Custom `--profile`, `--judge-profile`, or `--optimizer-profile` setting
 are supported only with OpenCode. Codex and Hermes reject them.
 
 Hermes supports paired file-quality runs with deterministic grading and
-schema-checked optimization (`improve_description.py` and `run_loop.py`). Trigger
-evaluations, model-judged grading, standalone grading, and blind comparison
+schema-checked description proposals through `improve_description.py`. Trigger
+evaluations, including the trigger-based `run_loop.py` workflow, require Codex
+or OpenCode. Model-judged grading, standalone grading, and blind comparison also
 require Codex or OpenCode.
 
 ## Environment
@@ -206,8 +220,8 @@ for the full current option list.
 | `learning.py work` | Project path | `--retry-blocked` queues validation of a saved candidate. |
 | `run_quality_eval.py` | `--skill`, `--evals`, `--workspace`, `--model` | Paired quality runs. `--repeats` (3), `--workers` (1), `--judge-model`, `--judge-profile`, repeated `--pilot-case` (defaults to first case), `--previous`, `--stop-threshold` (2), `--json`, `--timeout` (180), `--profile`, `--harness`. |
 | `run_eval.py` | `--skill`, `--evals`, `--workspace`, `--model` | Trigger runs. `--repeats` (3), `--workers` (1), optional independent `--judge-model` and `--judge-profile`, `--timeout` (180), `--profile`, `--harness`. |
-| `run_loop.py` | `--skill`, `--evals` (trigger set), `--quality-evals`, `--workspace`, `--model`, `--optimizer-model` | Description optimization plus quality regression. Optional `--judge-model`, `--profile`, `--judge-profile`, `--optimizer-profile`, `--iterations` (3), `--repeats` (3), `--workers` (1), `--timeout` (180), `--seed` (42), `--harness`. |
-| `improve_description.py` | `--skill`, `--training-results`, `--output`, `--model` | Training-only description proposal. Optional `--history`, `--profile`, `--timeout` (180), `--harness`. |
+| `run_loop.py` | `--skill`, `--evals` (trigger set), `--quality-evals`, `--workspace`, `--model`, `--optimizer-model` | Trigger-based description optimization plus quality regression with Codex or OpenCode. Optional `--judge-model`, `--profile`, `--judge-profile`, `--optimizer-profile`, `--iterations` (3), `--repeats` (3), `--workers` (1), `--timeout` (180), `--seed` (42), `--harness`. |
+| `improve_description.py` | `--skill`, `--training-results`, `--output`, `--model` | Training-only description proposal with Codex, OpenCode, or Hermes. Optional `--history`, `--profile`, `--timeout` (180), `--harness`. |
 | `compare.py` | `--left`, `--right`, `--output`, `--model` | Blind comparison. Optional `--analyzer-model`, `--profile`, `--seed` (42), `--timeout` (180), `--harness`. |
 | `grade.py` | Run directory positional argument | Optional `--judge-model`, `--profile`, `--output`, `--rubric`, `--timeout` (180), `--harness`. |
 | `generate_review.py` | Evaluation workspace | `--port` (0 chooses a free port), `--no-browser`, `--static` (HTML output), `--import-feedback`, `--selection`, `--feedback-output`, `--skill-name`, `--previous-workspace`, `--benchmark`. |
