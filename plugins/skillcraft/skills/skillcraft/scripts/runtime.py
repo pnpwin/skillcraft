@@ -1,4 +1,5 @@
 """Local orchestration bridge. Run artifacts are outside the executor Location."""
+import json
 import os
 from pathlib import Path
 import shutil
@@ -143,6 +144,11 @@ def run_model(prompt, output, model, *, mode='quality', skill=None, skill_id=Non
                   'Report unavailable evidence explicitly.' + tool_instructions(cli_state))
         permissions.append({'action': 'edit', 'resource': '*', 'effect': 'deny'})
     if harness == 'opencode':
+        if output_schema is not None:
+            # The V2 session prompt does not accept a structured response format.
+            system += ('\n\nReturn exactly one JSON value matching the schema below as the final response. '
+                       'Do not wrap it in Markdown or write it to a file.\n'
+                       + json.dumps(output_schema, ensure_ascii=False, separators=(',', ':')))
         config = {'$schema': 'https://opencode.ai/config.json', 'snapshots': False,
                   'agents': {agent: {'mode': 'primary', 'system': system, 'steps': settings['steps'], 'permissions': permissions}}}
         if settings['allow_delegation']:
@@ -161,8 +167,8 @@ def run_model(prompt, output, model, *, mode='quality', skill=None, skill_id=Non
     }
     if harness in {'codex', 'hermes'}:
         request['instructions'] = system
-        if output_schema is not None:
-            request['output_schema'] = output_schema
+    if output_schema is not None:
+        request['output_schema'] = output_schema
     write_json(output / 'request.json', request)
     write_json(output / 'fixtures.json', fixture_hashes)
     write_json(output / 'profile.json', settings)

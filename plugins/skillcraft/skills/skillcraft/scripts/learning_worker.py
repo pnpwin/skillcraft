@@ -666,6 +666,7 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
         input_hash = fingerprint({
             'prompt': prompt, 'harness': optimizer, 'model': optimizer_model,
             'timeout': timeout, 'runtime_overrides': runtime_overrides,
+            **({'output_schema': REPLACEMENTS} if optimizer == 'opencode' else {}),
         })
         report['optimizer'] = {'harness': optimizer, 'evidence': [row['id'] for row in usable],
                                'input_hash': input_hash}
