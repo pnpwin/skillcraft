@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import { Plugin, Skill } from '@opencode/plugin';
 import { parse } from 'yaml';
 import {
-  consumeWithReconnect, initialCursor, learningEventPhase, learningEventTypes, messageText,
+  completedModelSteps, consumeWithReconnect, initialCursor, learningEventPhase, learningEventTypes, messageText,
   reconcileProjection, selectTurn, spawnBounded, turnsAfter, verifiedSkills,
 } from './opencode-learning.js';
 
@@ -109,11 +109,15 @@ async function rememberStart({ session, messages }, state, event) {
   }
 }
 
-async function captureProjection(ctx, { session, messages }, state) {
+async function captureProjection(ctx, { session, messages }, state, { abandonedUserID } = {}) {
   const sessionID = session.id;
   const project = session.location.directory;
   if (!(await enabled(project))) return;
   await reconcileProjection(messages, state, async (turn) => {
+    if (turn.user.id === abandonedUserID) {
+      state.baselines.delete(turn.user.id);
+      return true;
+    }
     const bound = baselineForTurn(state, turn.user.id, messages);
     const now = bound ? await inventory(project) : null;
     const baselineByPath = new Map((bound || []).map((entry) => [entry.path, entry.snapshot_hash]));
@@ -132,6 +136,7 @@ async function captureProjection(ctx, { session, messages }, state) {
     const userRecorded = await observe({
       project, harness: 'opencode', session: sessionID, turn: turn.user.id, role: 'user',
       text: messageText(turn.user), loaded: [], target_turn: turn.targetTurn,
+      defer_feedback: true,
       diagnostic: turn.targetTurn ? undefined : 'No immediately preceding completed assistant turn is available for feedback association.',
     });
     if (!userRecorded) return false;
@@ -139,6 +144,7 @@ async function captureProjection(ctx, { session, messages }, state) {
     const assistantRecorded = await observe({
       project, harness: 'opencode', session: sessionID, turn: turn.user.id, role: 'assistant',
       text: messageText(turn.final), loaded, diagnostic,
+      model_steps: completedModelSteps([...turn.segment, turn.final]),
     });
     if (assistantRecorded) state.baselines.delete(turn.user.id);
     return assistantRecorded;
@@ -214,6 +220,17 @@ export default Plugin.define({
         if (!state) {
           state = sessionState(projection.messages, phase === 'start', event.data.inboxID);
           sessions.set(sessionID, state);
+        }
+        if (phase === 'abandon') {
+          // An explicit failed/interrupted terminal event closes the latest
+          // user turn without recording an assistant completion for it.
+          const current = projection.messages.findLast((message) => message.type === 'user');
+          if (current) {
+            await captureProjection(ctx, projection, state, { abandonedUserID: current.id });
+            state.cursor = current.id;
+            state.pendingSeen.add(`${current.id}/pending`);
+          }
+          return;
         }
         if (phase === 'start') await rememberStart(projection, state, event);
         else await captureProjection(ctx, projection, state);

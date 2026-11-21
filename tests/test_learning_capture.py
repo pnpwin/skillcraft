@@ -29,13 +29,31 @@ class LearningCaptureTests(unittest.TestCase):
                 'PLUGIN_DATA': str(data),
             }
             base = {'cwd': str(project), 'session_id': 'session', 'prompt': 'hello'}
+            rollout = project / 'rollout.jsonl'
+            rollout.write_text('')
             with mock.patch.dict(capture.os.environ, env, clear=False), \
                     mock.patch.object(capture, 'enabled', return_value=True), \
                     mock.patch.object(capture, 'inventory', return_value=[]), \
                     mock.patch.object(capture, 'observe', return_value=True) as observe, \
                     mock.patch.object(capture, 'confirmed_reads', return_value=[]):
                 self.invoke({**base, 'hook_event_name': 'UserPromptSubmit', 'turn_id': 'A'})
-                self.invoke({**base, 'hook_event_name': 'Stop', 'turn_id': 'A', 'last_assistant_message': 'answer A'})
+                self.invoke({**base, 'hook_event_name': 'PostModelRequest', 'turn_id': 'A',
+                             'kind': 'sampling', 'request_id': 'req-1', 'attempt_number': 1,
+                             'status': 'failed'})
+                self.invoke({**base, 'hook_event_name': 'PostModelRequest', 'turn_id': 'A',
+                             'kind': 'sampling', 'request_id': 'req-1', 'attempt_number': 2,
+                             'status': 'completed'})
+                self.invoke({**base, 'hook_event_name': 'PostModelRequest', 'turn_id': 'A',
+                             'kind': 'sampling', 'request_id': 'req-2', 'attempt_number': 1,
+                             'status': 'completed'})
+                self.invoke({**base, 'hook_event_name': 'PostModelRequest', 'turn_id': 'A',
+                             'kind': 'sampling', 'request_id': 'subagent', 'status': 'completed',
+                             'agent_id': 'child', 'agent_type': 'worker'})
+                self.invoke({**base, 'hook_event_name': 'Stop', 'turn_id': 'A', 'transcript_path': str(rollout), 'last_assistant_message': 'answer A'})
+                assistant_a = next(call.args[2] for call in observe.call_args_list if call.args[2]['role'] == 'assistant')
+                self.assertEqual(assistant_a['model_steps'], 2)
+                user_a = next(call.args[2] for call in observe.call_args_list if call.args[2]['role'] == 'user')
+                self.assertTrue(user_a['defer_feedback'])
                 self.invoke({**base, 'hook_event_name': 'UserPromptSubmit', 'turn_id': 'B'})
                 state_path = next((data / 'learning-capture').glob('*.json'))
                 self.invoke({**base, 'hook_event_name': 'UserPromptSubmit', 'turn_id': 'C'})
@@ -84,6 +102,53 @@ class LearningCaptureTests(unittest.TestCase):
             self.assertFalse(capture.observe('python', 'learning.py', {'project': 'project'}))
         self.assertEqual(run.call_count, 2)
         self.assertTrue(all(call.kwargs['timeout'] == capture.SUBPROCESS_TIMEOUT_SECONDS for call in run.call_args_list))
+
+    def test_counts_completed_codex_model_items_only_for_the_requested_non_aborted_turn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / 'rollout.jsonl'
+            def row(payload):
+                return {'type': 'event_msg', 'payload': payload}
+            rows = [
+                row({'type': 'item_completed', 'thread_id': 's', 'turn_id': 't',
+                     'item': {'type': 'AgentMessage', 'id': 'a1', 'content': 'not retained'}}),
+                row({'type': 'item_completed', 'thread_id': 's', 'turn_id': 't',
+                     'item': {'type': 'CommandExecution', 'id': 'cmd'}}),
+                row({'type': 'item_completed', 'thread_id': 'other', 'turn_id': 't',
+                     'item': {'type': 'AgentMessage', 'id': 'other'}}),
+                row({'type': 'item_completed', 'thread_id': 's', 'turn_id': 'other',
+                     'item': {'type': 'AgentMessage', 'id': 'other-turn'}}),
+                row({'type': 'item_completed', 'thread_id': 's', 'turn_id': 't',
+                     'item': {'type': 'AgentMessage', 'id': 'a1', 'content': 'duplicate'}}),
+                row({'type': 'item_completed', 'thread_id': 's', 'turn_id': 't',
+                     'item': {'type': 'AgentMessage', 'id': 'a2'}}),
+            ]
+            transcript.write_text(''.join(json.dumps(item) + '\n' for item in rows))
+            self.assertEqual(capture.completed_model_steps(str(transcript), 's', 't'), 1)
+            rows.append(row({'type': 'turn_aborted', 'thread_id': 's', 'turn_id': 't'}))
+            transcript.write_text(''.join(json.dumps(item) + '\n' for item in rows))
+            self.assertIsNone(capture.completed_model_steps(str(transcript), 's', 't'))
+            self.assertTrue(capture.aborted_turn(str(transcript), 's', 't'))
+
+    def test_aborted_codex_stop_does_not_send_an_assistant_completion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / 'project'
+            project.mkdir()
+            rollout = project / 'rollout.jsonl'
+            rollout.write_text(''.join(json.dumps({'type': 'event_msg', 'payload': payload}) + '\n' for payload in (
+                {'type': 'item_completed', 'thread_id': 'session', 'turn_id': 'turn',
+                 'item': {'type': 'AgentMessage', 'id': 'partial'}},
+                {'type': 'turn_aborted', 'thread_id': 'session', 'turn_id': 'turn', 'reason': 'interrupted'},
+            )))
+            env = {'PLUGIN_ROOT': str(CAPTURE.parents[1]), 'PLUGIN_DATA': str(Path(directory) / 'data')}
+            base = {'cwd': str(project), 'session_id': 'session'}
+            with mock.patch.dict(capture.os.environ, env, clear=False), \
+                    mock.patch.object(capture, 'enabled', return_value=True), \
+                    mock.patch.object(capture, 'inventory', return_value=[]), \
+                    mock.patch.object(capture, 'observe', return_value=True) as observe:
+                self.invoke({**base, 'hook_event_name': 'UserPromptSubmit', 'turn_id': 'turn', 'prompt': 'prompt'})
+                self.invoke({**base, 'hook_event_name': 'Stop', 'turn_id': 'turn',
+                             'transcript_path': str(rollout), 'last_assistant_message': 'partial'})
+            self.assertEqual([call.args[2]['role'] for call in observe.call_args_list], ['user'])
 
 
 if __name__ == '__main__':

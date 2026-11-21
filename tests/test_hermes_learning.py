@@ -40,13 +40,13 @@ class HermesLearningTest(unittest.TestCase):
         self.hooks = dict(call.args for call in self.context.register_hook.call_args_list)
         self.constants = constants
 
-    def command(self, name):
+    def command(self, name, *options):
         _, _, setup, run = self.context.register_cli_command.call_args.args
         parser = argparse.ArgumentParser()
         setup(parser)
         output = StringIO()
         with redirect_stdout(output), patch.dict('sys.modules', hermes_constants=self.constants):
-            run(parser.parse_args([name, str(self.project)]))
+            run(parser.parse_args([name, str(self.project), *options]))
         return json.loads(output.getvalue())
 
     def emit(self, name, turn, **extra):
@@ -77,7 +77,7 @@ class HermesLearningTest(unittest.TestCase):
         self.assertEqual(name, 'skillcraft')
         self.assertTrue(path.is_file())
         self.assertTrue((path.parent / 'references/learning.md').is_file())
-        self.assertEqual(set(self.hooks), {'pre_llm_call', 'post_tool_call', 'post_llm_call'})
+        self.assertEqual(set(self.hooks), {'pre_llm_call', 'post_tool_call', 'post_api_request', 'post_llm_call'})
         self.command('enable')
         self.start('one')
         self.view('one')
@@ -125,6 +125,8 @@ class HermesLearningTest(unittest.TestCase):
         self.view('one')
         self.finish('one')
         self.start('two', 'Подтверждаю: всё правильно.')
+        self.assertEqual(self.command('status')['evidence'], {})
+        self.finish('two')
         cfg = learning.config_for(self.project, hermes_home=self.home)
         with learning.connection(cfg) as db:
             row = db.execute('SELECT kind,version FROM evidence').fetchone()
@@ -194,6 +196,8 @@ class HermesLearningTest(unittest.TestCase):
         self.context.session_cwd.return_value = str(self.source.parent)
         self.feedback('two', reply)
         self.feedback('two', reply)
+        self.assertEqual(self.command('status')['evidence'], {})
+        self.finish('two')
         self.assertEqual(self.command('status')['evidence'], {'success': 1})
 
     def test_restart_cannot_skip_interrupted_turn_or_guess_missing_native_id(self):
@@ -206,3 +210,36 @@ class HermesLearningTest(unittest.TestCase):
         self.hooks['pre_llm_call'].__self__.sessions.clear()
         self.feedback('three', reply)
         self.assertEqual(self.command('status')['evidence'], {})
+
+    def test_hooks_sync_only_completed_turns_and_count_each_model_step_once(self):
+        owner = self.home.with_name('skillcraft-owner')
+        with patch.dict(os.environ, HOME=str(owner)), redirect_stdout(StringIO()):
+            self.assertEqual(learning.main(['enable', str(self.project)]), 0)
+            self.command('enable', '--auto-import')
+            self.start('first')
+            self.view('first')
+            for step in range(1, 15):
+                self.emit('post_api_request', 'first', api_call_count=step)
+                self.emit('post_api_request', 'first', api_call_count=step)
+            reply = self.finish('first')
+
+            self.feedback('interrupted', reply)
+            self.emit('post_api_request', 'interrupted', api_call_count=1)
+            target = learning.config_for(self.project)
+            with learning.connection(target) as db:
+                self.assertEqual(db.execute('SELECT SUM(steps) FROM model_steps').fetchone()[0], 14)
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM evidence').fetchone()[0], 0)
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM checkpoints').fetchone()[0], 0)
+
+            self.start('new-task')
+            self.finish('interrupted')
+            self.view('new-task')
+            reply = self.finish('new-task')
+            self.feedback('review', reply)
+            self.emit('post_api_request', 'review', api_call_count=1)
+            self.finish('review')
+            self.finish('review')
+            with learning.connection(target) as db:
+                self.assertEqual(db.execute('SELECT SUM(steps) FROM model_steps').fetchone()[0], 15)
+                self.assertEqual([r[0] for r in db.execute('SELECT kind FROM evidence')], ['success'])
+                self.assertIn('model-steps:15', [r[0] for r in db.execute('SELECT witness FROM checkpoints')])

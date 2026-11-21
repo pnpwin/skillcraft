@@ -173,6 +173,103 @@ def confirmed_reads(path, session, turn, versions):
     return list(matches.values())
 
 
+def completed_model_steps(path, session, turn):
+    """Infer a conservative lower bound from older Codex rollout records.
+
+    Rollout files are a private, versioned format. Fail closed when the file
+    is unavailable or the turn has an explicit abort marker.
+    """
+    if not isinstance(path, str):
+        return None
+    try:
+        transcript = Path(path)
+        if not transcript.is_file():
+            return None
+        with transcript.open('rb') as stream:
+            size = stream.seek(0, os.SEEK_END)
+            if size > 8 * 1024 * 1024:
+                stream.seek(-8 * 1024 * 1024, os.SEEK_END)
+                stream.readline()
+            else:
+                stream.seek(0)
+            lines = stream.read(8 * 1024 * 1024).splitlines()
+    except OSError:
+        return None
+
+    saw_completed_message = False
+    for line in lines:
+        try:
+            row = json.loads(line)
+            payload = row.get('payload', {})
+            if (row.get('type') != 'event_msg' or payload.get('thread_id') != session
+                    or payload.get('turn_id') != turn):
+                continue
+            if payload.get('type') in {'turn_aborted', 'turn_failed', 'turn_interrupted'}:
+                return None
+            if payload.get('type') != 'item_completed':
+                continue
+            item = payload.get('item')
+            if not isinstance(item, dict) or item.get('type') != 'AgentMessage':
+                continue
+            saw_completed_message = True
+            # An AgentMessage does not prove a one-to-one model-call boundary.
+            # Older runtimes lack PostModelRequest IDs, so use one lower-bound
+            # step instead of counting message parts.
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return 1 if saw_completed_message else None
+
+
+def aborted_turn(path, session, turn):
+    if not isinstance(path, str):
+        return False
+    try:
+        transcript = Path(path)
+        if not transcript.is_file():
+            return False
+        with transcript.open('rb') as stream:
+            size = stream.seek(0, os.SEEK_END)
+            if size > 8 * 1024 * 1024:
+                stream.seek(-8 * 1024 * 1024, os.SEEK_END)
+                stream.readline()
+            else:
+                stream.seek(0)
+            lines = stream.read(8 * 1024 * 1024).splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        try:
+            row = json.loads(line)
+            payload = row.get('payload', {})
+            if (row.get('type') == 'event_msg' and payload.get('thread_id') == session
+                    and payload.get('turn_id') == turn and payload.get('type') == 'turn_aborted'):
+                return True
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return False
+
+
+def completed_model_request(event, project, session, turn, state_path, state):
+    """Persist successful main-thread model request IDs, without response text."""
+    if (event.get('hook_event_name') != 'PostModelRequest'
+            or event.get('status') != 'completed'
+            or event.get('kind') != 'sampling'
+            or event.get('agent_id') or event.get('agent_type')
+            or state.get('pending_turn') != turn):
+        return
+    request_id = event.get('request_id')
+    if not isinstance(request_id, str) or not request_id:
+        return
+    requests = state.get('completed_model_requests', {})
+    requests = requests if isinstance(requests, dict) else {}
+    turn_requests = requests.get(turn, [])
+    turn_requests = [item for item in turn_requests if isinstance(item, str)] if isinstance(turn_requests, list) else []
+    if request_id in turn_requests:
+        return
+    requests = {turn: [*turn_requests, request_id]}
+    write_state(state_path, {**state, 'completed_model_requests': requests})
+
+
 def main():
     try:
         event = json.load(sys.stdin)
@@ -191,16 +288,20 @@ def main():
         return 0
     if not enabled(project):
         return 0
-    python = python_executable(plugin_root)
-    versions = inventory(python, script, project) if python else None
-    if versions is None:
-        return 0
-
     data_root = os.environ.get('PLUGIN_DATA')
     data_dir = Path(data_root).resolve() if data_root else None
     session_key = hashlib.sha256(session.encode()).hexdigest()
     state_path = data_dir / 'learning-capture' / f'{session_key}.json' if data_dir else None
     state = read_state(state_path) if state_path else {}
+    if event_name == 'PostModelRequest':
+        if state_path:
+            completed_model_request(event, project, session, turn, state_path, state)
+        return 0
+
+    python = python_executable(plugin_root)
+    versions = inventory(python, script, project) if python else None
+    if versions is None:
+        return 0
     loaded = []
     diagnostic = 'No complete skill read could be verified in this Codex turn.'
 
@@ -223,12 +324,14 @@ def main():
             'loaded': loaded,
             'target_turn': target_turn if isinstance(target_turn, str) else None,
             'diagnostic': diagnostic if not target_turn else None,
+            'defer_feedback': True,
         })
         if accepted and state_path:
             recent_turns = [item for item in prompt_turns if isinstance(item, str)] + [turn]
             write_state(state_path, {
                 **state,
                 'pending_turn': turn,
+                'completed_model_requests': {},
                 'versions': versions,
                 'prompt_turns': recent_turns,
             })
@@ -238,8 +341,15 @@ def main():
         # duplicate Stops must not replace a newer pending turn or its target.
         if not isinstance(text, str) or not text or state.get('pending_turn') != turn:
             return 0
+        if aborted_turn(event.get('transcript_path'), session, turn):
+            return 0
         unchanged = [version for version in versions if version in state.get('versions', [])]
         loaded = confirmed_reads(event.get('transcript_path'), session, turn, unchanged)
+        model_requests = state.get('completed_model_requests', {})
+        model_requests = model_requests.get(turn, []) if isinstance(model_requests, dict) else []
+        model_steps = len({item for item in model_requests if isinstance(item, str)}) if isinstance(model_requests, list) else 0
+        if model_steps <= 0:
+            model_steps = completed_model_steps(event.get('transcript_path'), session, turn)
         accepted = observe(python, script, {
             'project': project,
             'harness': 'codex',
@@ -249,6 +359,7 @@ def main():
             'text': text,
             'loaded': loaded,
             'diagnostic': diagnostic if not loaded else None,
+            **({'model_steps': model_steps} if model_steps is not None else {}),
         })
         if accepted and state_path:
             prompt_turns = state.get('prompt_turns', [])

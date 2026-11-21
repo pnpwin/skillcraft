@@ -3,9 +3,11 @@
 Enable learning for a specific project and its checked-out skill sources.
 Install the SkillCraft plugin in Codex or OpenCode to collect conversation
 events. Standalone SkillCraft can collect evaluation and review evidence.
-Review and trust SkillCraft's two bundled hooks in Codex before using
-conversation collection. The marketplace package uses the Codex compatibility
-manifest for hook discovery. [Codex hook trust](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks)
+Review and trust SkillCraft's bundled `UserPromptSubmit` and `Stop` hooks in
+Codex before using conversation collection. Trust `PostModelRequest` for
+model-step counting where the installed Codex exposes it. The marketplace
+package uses the Codex compatibility manifest for hook discovery.
+[Codex hook trust](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks)
 Completed quality evaluations and validated HTML feedback feed the same journal.
 A review mark alone records that a run was seen. Set an explicit success,
 failure, or correction verdict to use human feedback as evidence. For a
@@ -44,8 +46,18 @@ cases distinct IDs, prompts, and paraphrase groups. Datasets use the same
 format as quality evaluations. Keep holdout files outside deployable skill
 resources. Set `harnesses` to each runtime required for
 activation. Configure its model and authenticated connection as in the
-runner guides. The first configured runtime supplies the optimizer. Add an
-independent `judge_model` where deterministic checks do not cover the rubric.
+runner guides. The first configured runtime supplies the optimizer by default.
+To use Hermes for revision with any supported evaluator, add
+`"optimizer": {"harness": "hermes", "model": "provider:model"}` to the skill's
+settings, using the configured Hermes provider and model. Set an absolute
+`home` in that object to select a Hermes profile.
+
+For a Hermes-only loop, set `harnesses.hermes` with a `model` and optionally an
+absolute `home`. Hermes uses the isolated file-quality runner on macOS and
+requires deterministic checks for every scored expectation. Add an independent
+`judge_model` in a supported Codex or OpenCode evaluation setup when the rubric
+requires model grading.
+
 For background runs, set Codex's optional `codex_home` and `binary` paths
 or OpenCode's optional `server` URL in the corresponding runtime settings.
 If `codex.binary` is configured, enable records its executable identity and
@@ -99,10 +111,19 @@ the tool result. A reference-page read or an unchanged-result stub is
 insufficient on its own.
 
 The Hermes journal lives under `$HERMES_HOME/skillcraft/learning/` in that
-profile. To include its evidence in optimization, enable regular SkillCraft
-Learning for the same project in Codex or OpenCode, then import explicitly from
-the project root. Set `HERMES_PROFILE_HOME` to the source profile directory
-(`$HOME/.hermes` for the default profile on a standard installation).
+profile. To forward evidence automatically, first enable regular SkillCraft
+Learning for the same project, then run this command from the project root in
+the Hermes profile that owns the chats:
+
+```sh
+hermes skillcraft enable "$PWD" --auto-import
+```
+
+SkillCraft forwards verified feedback and adds the completed turn's messages
+and model steps to the shared counts. Enrollment without `--auto-import` keeps collection
+in the profile journal. To import that journal explicitly, set
+`HERMES_PROFILE_HOME` to the source profile directory (`$HOME/.hermes` for the
+default profile on a standard installation).
 
 ```sh
 "$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/learning.py" \
@@ -111,20 +132,37 @@ the project root. Set `HERMES_PROFILE_HOME` to the source profile directory
 
 Both enrollments must match the current project configuration. The command
 reports imported, duplicate, and skipped entries. Import preserves the recorded
-version, checks it against the current skill, and queues optimization only for
-new evidence. A chat correction is an observation and follows the existing
-evaluation and promotion requirements.
+version, checks it against the current skill, and accepts feedback from
+completed turns. New evidence queues a check under the existing evaluation
+and promotion requirements.
+
+To recover feedback from one older local chat, select its session ID in the
+same Hermes profile and run:
+
+```sh
+hermes skillcraft recover "$PWD" --session SESSION_ID
+```
+
+Recovery checks the original final reply against a previously recorded
+SkillCraft binding for the current skill version. The feedback must directly
+follow that reply in the native transcript and belong to a completed turn.
+The command reports skipped and duplicate records, including chats without a
+verifiable version binding.
 
 ## Collection and promotion
 
-The observer schedules background work after 15 new user or final-answer
-messages, or after an A/B result or feedback import adds new evidence. It
-ignores intermediate tool messages and learning-generated evaluations. A
-signal with an unknown skill or version stays diagnostic. Repeated A/B
-samples from one case or one explicit paraphrase group count as one source
-of evidence.
+The observer schedules a journal check after 15 user or final-answer
+messages, after 15 completed model steps, or when an A/B result or feedback
+import adds new evidence. A user turn can include multiple model steps.
+Observers commit the step count and any feedback from a chat only after that
+turn finishes. Step counts use runtime event identifiers, with no reasoning
+text. Intermediate tool messages, subagent activity, interrupted turns and
+learning-generated evaluations do not contribute model steps. A signal with an
+unknown skill or version stays diagnostic. Repeated A/B samples from one case
+or one explicit paraphrase group count as one source of evidence.
 
-Codex uses `UserPromptSubmit` and `Stop`. A supported local rollout can bind
+Codex uses `UserPromptSubmit` and `Stop` for turns and `PostModelRequest` for
+completed model requests. A supported local rollout can bind
 a successful command in that turn when it identifies the enrolled `SKILL.md`
 and returns its exact bytes. This also covers command wrappers that preserve
 the path and complete output. The package fingerprint must match the source

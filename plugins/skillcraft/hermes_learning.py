@@ -27,7 +27,7 @@ def run_learning(home, verb, *args, payload=None):
         result = subprocess.run(
             [sys.executable, '-B', str(SCRIPT), '--hermes-home', str(home.resolve()), verb, *args],
             input=json.dumps(payload) if payload is not None else '',
-            capture_output=True, text=True, timeout=4, env=env,
+            capture_output=True, text=True, timeout=15, env=env,
         )
     except subprocess.TimeoutExpired as error:
         raise RuntimeError('SkillCraft journal command timed out') from error
@@ -60,7 +60,9 @@ class Turn:
     id: str
     project: Path
     inventory: dict
+    auto_import: bool
     loaded: dict = field(default_factory=dict)
+    model_steps: set = field(default_factory=set)
     finished: bool = False
 
 
@@ -79,11 +81,12 @@ class Learning:
             return None
         return (self.get_home().resolve(), session_id)
 
-    def record(self, key, turn_id, project, role, text, *, loaded=(), target=None, uid=None):
+    def record(self, key, turn_id, project, role, text, *, loaded=(), target=None, uid=None, model_steps=0):
         return run_learning(key[0], 'observe', payload={
             'harness': 'hermes', 'session': key[1], 'turn': turn_id,
             'project': str(project), 'role': role, 'text': text,
             'target_turn': target, 'loaded': list(loaded), 'hermes_uid': uid,
+            'defer_feedback': role == 'user', 'model_steps': model_steps,
         })['inserted']
 
     def start(self, *, session_id=None, turn_id=None, user_message=None,
@@ -116,7 +119,8 @@ class Learning:
                 self.sessions.pop(key, None)
                 LOG.debug('Could not record the Hermes prompt in SkillCraft', exc_info=True)
                 return
-            self.sessions[key] = Turn(turn_id, project, {v['path']: v for v in enrollment['versions']})
+            self.sessions[key] = Turn(turn_id, project, {v['path']: v for v in enrollment['versions']},
+                                      enrollment.get('auto_import', False))
             self.sessions.move_to_end(key)
             if len(self.sessions) > MAX_SESSIONS:
                 self.sessions.popitem(last=False)
@@ -147,6 +151,19 @@ class Learning:
                 if entry and digest == entry['content_hash']:
                     turn.loaded[path] = entry
 
+    def model_finished(self, *, session_id=None, turn_id=None, api_request_id=None,
+                       api_call_count=None, finish_reason=None, **kwargs):
+        key = self.key(session_id, turn_id)
+        if not key or finish_reason in {'error', 'interrupted', 'cancelled', 'content_filter'}:
+            return
+        step = api_call_count if type(api_call_count) is int and api_call_count > 0 else api_request_id
+        if not isinstance(step, (int, str)) or not step:
+            return
+        with self.lock:
+            turn = self.sessions.get(key)
+            if turn and turn.id == turn_id and not turn.finished:
+                turn.model_steps.add(step)
+
     def finish(self, *, session_id=None, turn_id=None, assistant_response=None,
                conversation_history=None, **kwargs):
         key = self.key(session_id, turn_id)
@@ -165,6 +182,13 @@ class Learning:
                 uid = last.get('message_uid')
                 turn.finished = self.record(key, turn.id, turn.project, 'assistant', assistant_response,
                                             loaded=turn.loaded.values(),
-                                            uid=uid if isinstance(uid, str) and uid else None)
+                                            uid=uid if isinstance(uid, str) and uid else None,
+                                            model_steps=len(turn.model_steps))
             except (OSError, RuntimeError, ValueError, KeyError):
                 LOG.debug('Could not record the Hermes reply in SkillCraft', exc_info=True)
+                return
+        if turn.auto_import:
+            try:
+                run_learning(key[0], 'sync-hermes', str(turn.project), key[1])
+            except (OSError, RuntimeError, ValueError, KeyError):
+                LOG.warning('Could not synchronize completed Hermes experience in SkillCraft', exc_info=True)
