@@ -16,12 +16,16 @@ def resolve_harness(override=None, *, environ=None):
             raise ValueError(f'Unsupported harness: {override}')
         return override
     env = os.environ if environ is None else environ
-    codex = bool(env.get('CODEX_THREAD_ID'))
-    opencode = env.get('OPENCODE') == '1' and bool(env.get('OPENCODE_SESSION_ID'))
-    if codex == opencode:
-        reason = 'Both Codex and OpenCode session signals are present' if codex else 'No harness session signal was found'
+    signals = {
+        'codex': bool(env.get('CODEX_THREAD_ID')),
+        'opencode': env.get('OPENCODE') == '1' and bool(env.get('OPENCODE_SESSION_ID')),
+        'hermes': env.get('AI_AGENT') == 'hermes-agent' and env.get('HERMES_AGENT') == 'true',
+    }
+    detected = [name for name, present in signals.items() if present]
+    if len(detected) != 1:
+        reason = 'Multiple harness signals are present' if detected else 'No harness session signal was found'
         raise ValueError(f'{reason}. Specify --harness codex, chatgpt, opencode, or hermes.')
-    return 'codex' if codex else 'opencode'
+    return detected[0]
 
 
 def add_harness_arg(parser):

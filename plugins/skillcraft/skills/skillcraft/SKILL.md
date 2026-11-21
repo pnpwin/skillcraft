@@ -47,10 +47,10 @@ python3 -m venv "$SKILLCRAFT_VENV"
 npm --prefix "$SKILLCRAFT/scripts/opencode-runner" ci  # OpenCode
 ```
 
-Use the `SKILLCRAFT_VENV` interpreter for all Python commands. Scripts detect the
-harness from the calling session, including local Codex chats in the ChatGPT
-desktop app. In a terminal or CI, pass `--harness codex` or `--harness opencode`.
-For file-based quality A/B in a local Hermes session on macOS, pass `--harness hermes`.
+Use the `SKILLCRAFT_VENV` interpreter for all Python commands. Scripts detect
+Codex, OpenCode, or Hermes from unambiguous native session signals, including
+local Codex chats in the ChatGPT desktop app. In a plain terminal or CI, pass
+`--harness codex`, `--harness opencode`, or `--harness hermes`.
 `--harness chatgpt` is an alias for the Codex runner. Read `references/codex-runner.md` or
 `references/opencode-runner.md` before configuring models, authentication or
 permissions.
@@ -146,6 +146,8 @@ deterministic file checks. Omit judge arguments. The runner requires the local
 Hermes Chat CLI, a signed-in profile and macOS `sandbox-exec`. Use
 `SKILLCRAFT_HERMES_HOME` to select a source profile. The baseline catalog and
 candidate preload are checked against native requests before grading.
+Read [references/hermes-runner.md](references/hermes-runner.md) before setting
+up Hermes or interpreting its profile, model, isolation, or proof artifacts.
 
 The runner creates fresh sessions and independent fixtures. `with_skill` uses a
 native API attachment; this measures quality after loading, not natural selection.

@@ -14,10 +14,15 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(resolve_harness(environ={'CODEX_THREAD_ID': 'thread', 'PATH': '/both/bin'}), 'codex')
         self.assertEqual(resolve_harness(environ={'OPENCODE': '1', 'OPENCODE_SESSION_ID': 'session',
                                                   'PATH': '/both/bin'}), 'opencode')
+        self.assertEqual(resolve_harness(environ={'AI_AGENT': 'hermes-agent', 'HERMES_AGENT': 'true',
+                                                  'HERMES_HOME': '/profile'}), 'hermes')
 
     def test_ambiguous_or_missing_signals_require_an_override(self):
         both = {'CODEX_THREAD_ID': 'thread', 'OPENCODE': '1', 'OPENCODE_SESSION_ID': 'session'}
-        for env in [both, {}, {'OPENCODE': '1'}, {'AI_AGENT': 'opencode'}]:
+        hermes = {'AI_AGENT': 'hermes-agent', 'HERMES_AGENT': 'true'}
+        for env in [both, {}, {'OPENCODE': '1'}, {'AI_AGENT': 'opencode'}, {'HERMES_AGENT': 'true'},
+                    {'HERMES_HOME': '/profile'}, {**hermes, 'CODEX_THREAD_ID': 'thread'},
+                    {**hermes, **both}]:
             with self.subTest(env=env), self.assertRaisesRegex(ValueError, '--harness'):
                 resolve_harness(environ=env)
         self.assertEqual(resolve_harness('opencode', environ=both), 'opencode')
@@ -29,7 +34,7 @@ class HarnessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / 'eval'
             env = {key: value for key, value in os.environ.items()
-                   if key not in {'CODEX_THREAD_ID', 'OPENCODE', 'OPENCODE_SESSION_ID'}}
+                   if key not in {'CODEX_THREAD_ID', 'OPENCODE', 'OPENCODE_SESSION_ID', 'AI_AGENT', 'HERMES_AGENT'}}
             result = subprocess.run([sys.executable, '-B', str(SKILL / 'scripts/run_quality_eval.py'), '--model', 'example',
                                      '--workspace', str(workspace), '--skill', 'unused', '--evals', 'unused'],
                                     cwd=root, env=env, capture_output=True, text=True, timeout=10)

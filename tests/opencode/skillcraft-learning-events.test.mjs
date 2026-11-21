@@ -36,7 +36,7 @@ test('retains legacy busy and idle compatibility', () => {
   assert.equal(learningEventPhase({ type: 'session.idle' }), 'finish');
 });
 
-test('counts distinct completed assistant model messages, not deltas or failed attempts', () => {
+test('counts distinct successful completed model messages, including successful retries', () => {
   assert.equal(completedModelSteps([
     { type: 'assistant', id: 'one', time: { completed: 1 }, finish: 'tool-calls', content: [] },
     { type: 'assistant', id: 'two', time: { completed: 2 }, finish: 'stop', content: [] },
@@ -46,6 +46,8 @@ test('counts distinct completed assistant model messages, not deltas or failed a
     { type: 'assistant', id: 'attempt', time: { completed: 5 }, finish: 'stop', metadata: { attempt: 2 } },
     { type: 'assistant', id: 'streaming-only', finish: 'stop' },
     { type: 'user', id: 'prompt', text: 'ignored' },
-  ]), 2);
+    { type: 'assistant', id: 'error-finish', time: { completed: 6 }, finish: 'error' },
+    { type: 'assistant', id: 'filtered', time: { completed: 7 }, finish: 'content-filter' },
+  ]), 4);
   assert.equal(completedModelSteps([]), 0);
 });

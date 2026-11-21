@@ -31,12 +31,20 @@ export function learningEventPhase(event) {
   }
 }
 
+function successfulAssistant(message) {
+  return message.type === 'assistant' && message.time?.completed
+    && typeof message.finish === 'string' && !['error', 'content-filter'].includes(message.finish)
+    && !message.error && !message.metadata?.error;
+}
+
+function finalAssistant(message) {
+  return successfulAssistant(message) && message.finish === 'stop';
+}
+
 export function completedModelSteps(segment) {
   const ids = new Set();
   for (const message of segment) {
-    if (message.type !== 'assistant' || !message.time?.completed || typeof message.finish !== 'string') continue;
-    if (message.error || message.metadata?.error || message.metadata?.retry === true) continue;
-    if (Number.isInteger(message.metadata?.attempt) && message.metadata.attempt > 1) continue;
+    if (!successfulAssistant(message)) continue;
     if (typeof message.id === 'string' && message.id) ids.add(message.id);
   }
   return ids.size;
@@ -48,10 +56,9 @@ export function selectTurn(messages) {
   if (lastUserIndex < 0) return null;
   const latestCompleted = turns.at(-1);
   if (latestCompleted && messages.findIndex((message) => message.id === latestCompleted.user.id) === lastUserIndex) return latestCompleted;
-  const previousFinalIndex = messages.findLastIndex((message) => message.type === 'assistant' && message.time?.completed && message.finish === 'stop');
-  const previousUserIndex = previousFinalIndex >= 0
-    ? messages.findLastIndex((message, index) => index < previousFinalIndex && message.type === 'user')
-    : -1;
+  const prior = latestCompleted;
+  const previousFinalIndex = prior ? messages.findIndex((message) => message.id === prior.final.id) : -1;
+  const previousUserIndex = prior ? messages.findIndex((message) => message.id === prior.user.id) : -1;
   const latestPriorUserIndex = messages.findLastIndex((message, index) => index < lastUserIndex && message.type === 'user');
   return {
     user: messages[lastUserIndex],
@@ -64,23 +71,21 @@ export function selectTurn(messages) {
 export function completedTurns(messages) {
   const users = messages.flatMap((message, index) => message.type === 'user' ? [index] : []);
   const turns = [];
-  let previousFinalIndex = -1;
   for (let userNumber = 0; userNumber < users.length; userNumber += 1) {
     const userIndex = users[userNumber];
     const nextUserIndex = users[userNumber + 1] ?? messages.length;
-    const finalIndex = messages.findLastIndex((message, index) => index > userIndex && index < nextUserIndex
-      && message.type === 'assistant' && message.time?.completed && message.finish === 'stop');
-    if (finalIndex < 0) continue;
+    let finalIndex = nextUserIndex - 1;
+    while (finalIndex > userIndex && messages[finalIndex].type !== 'assistant') finalIndex -= 1;
+    if (finalIndex === userIndex || !finalAssistant(messages[finalIndex])) continue;
     const previousUserIndex = userNumber > 0 ? users[userNumber - 1] : -1;
     const previousTurnCompleted = previousUserIndex >= 0
-      && messages.slice(previousUserIndex + 1, userIndex).some((message) => message.type === 'assistant' && message.time?.completed && message.finish === 'stop');
+      && turns.at(-1)?.user.id === messages[previousUserIndex].id;
     turns.push({
       user: messages[userIndex],
       final: messages[finalIndex],
       targetTurn: previousTurnCompleted ? messages[previousUserIndex].id : undefined,
       segment: messages.slice(userIndex, finalIndex),
     });
-    previousFinalIndex = finalIndex;
   }
   return turns;
 }
@@ -98,23 +103,29 @@ export function turnsAfter(messages, cursor) {
   const cursorIndex = cursor === undefined ? -1 : messages.findIndex((message) => message.type === 'user' && message.id === cursor);
   if (cursor !== undefined && cursorIndex < 0) return [];
   const completedByUser = new Map(completedTurns(messages).map((turn) => [turn.user.id, turn]));
-  const users = messages.flatMap((message, index) => message.type === 'user' && index > cursorIndex ? [{ message, index }] : []);
+  const indexes = new Map(messages.map((message, index) => [message, index]));
+  const users = messages.flatMap((message, index) => message.type === 'user' ? [{ message, index }] : []);
   const turns = [];
+  let prior;
   for (let userNumber = 0; userNumber < users.length; userNumber += 1) {
     const { message: user, index: userIndex } = users[userNumber];
     const completed = completedByUser.get(user.id);
+    if (userIndex <= cursorIndex) {
+      if (completed) prior = completed;
+      continue;
+    }
     if (completed) {
       turns.push(completed);
+      prior = completed;
       continue;
     }
     const nextUserIndex = users[userNumber + 1]?.index ?? messages.length;
-    const previousFinal = messages.findLastIndex((item, index) => index < userIndex && item.type === 'assistant' && item.time?.completed && item.finish === 'stop');
-    const previousUser = previousFinal >= 0 ? messages.findLastIndex((item, index) => index < previousFinal && item.type === 'user') : -1;
-    const latestPriorUser = messages.findLastIndex((item, index) => index < userIndex && item.type === 'user');
+    const previousFinal = prior ? indexes.get(prior.final) : -1;
+    const latestPriorUser = users[userNumber - 1]?.message;
     turns.push({
       user,
       final: null,
-      targetTurn: previousUser >= 0 && previousUser === latestPriorUser ? messages[previousUser].id : undefined,
+      targetTurn: prior && prior.user === latestPriorUser ? prior.user.id : undefined,
       segment: messages.slice(previousFinal >= 0 ? previousFinal + 1 : 0, nextUserIndex),
     });
   }
@@ -138,7 +149,7 @@ export async function reconcileProjection(messages, state, capture) {
 
 export function messageText(message) {
   if (message.type === 'user') return message.text;
-  if (message.type !== 'assistant' || !message.time?.completed || message.finish !== 'stop') return '';
+  if (!finalAssistant(message)) return '';
   return message.content.filter((part) => part.type === 'text').map((part) => part.text).join('\n').trim();
 }
 
