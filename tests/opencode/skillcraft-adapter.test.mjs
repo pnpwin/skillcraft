@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } fr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { consumeWithReconnect, initialCursor, messageText, reconcileProjection, selectTurn, spawnBounded, turnsAfter, verifiedSkills } from '../../plugins/skillcraft/opencode-learning.js';
+import { consumeWithReconnect, initialCursor, messageText, reconcileProjection, selectTurn, spawnBounded, turnsAfter, verifiedSkills } from '../../plugins/skillcraft/src/opencode/learning.js';
 
 test('selects only the latest completed turn and targets the prior pair key', () => {
   const messages = [

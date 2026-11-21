@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import sys
 
-from .hermes_learning import Learning, run_learning
+from .src.hermes.hermes_learning import Learning, run_learning
 
 
 def cli_arguments(parser):
@@ -33,7 +33,7 @@ def journal_command(args):
         home = get_hermes_home()
         project = args.project.resolve()
         if args.learning_command == 'recover':
-            from .hermes_history import recover
+            from .src.hermes.hermes_history import recover
 
             audit = recover(home, project, args.session)
             result = run_learning(home, 'recover-hermes', str(project), payload=audit)

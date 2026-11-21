@@ -1,6 +1,8 @@
 import importlib.util
 import io
 import json
+import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -9,12 +11,57 @@ from unittest import mock
 
 
 CAPTURE = Path(__file__).parents[1] / 'plugins/skillcraft/hooks/learning_capture.py'
-SPEC = importlib.util.spec_from_file_location('skillcraft_learning_capture', CAPTURE)
+IMPLEMENTATION = CAPTURE.parents[1] / 'src/codex/learning_capture.py'
+SPEC = importlib.util.spec_from_file_location('skillcraft_learning_capture', IMPLEMENTATION)
 capture = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(capture)
 
 
 class LearningCaptureTests(unittest.TestCase):
+    def test_hook_command_loads_relocated_implementation(self):
+        hooks = json.loads((CAPTURE.parent / 'hooks.json').read_text())['hooks']
+        command = hooks['UserPromptSubmit'][0]['hooks'][0]['command']
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'plugin with spaces'
+            project = Path(directory) / 'project'
+            project.mkdir()
+            (project / '.skillcraft').mkdir()
+            (project / '.skillcraft/learning.json').write_text(json.dumps({
+                'schema_version': 1, 'enabled': True, 'sources': ['sessions'],
+            }))
+            for source in (CAPTURE, IMPLEMENTATION):
+                target = root / source.relative_to(CAPTURE.parents[1])
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+            script = root / 'skills/skillcraft/scripts/learning.py'
+            script.parent.mkdir(parents=True)
+            script.write_text("import json, sys\n"
+                              "if sys.argv[1] == 'inventory': print('[]')\n"
+                              "else: json.load(sys.stdin)\n")
+            event = {'cwd': str(project), 'session_id': 's', 'turn_id': 't',
+                     'hook_event_name': 'UserPromptSubmit', 'prompt': 'hello'}
+            for configured_root in (False, True):
+                data = Path(directory) / f'data-{configured_root}'
+                env = os.environ.copy()
+                env.pop('SKILLCRAFT_VENV', None)
+                env.pop('SKILLCRAFT_LEARNING_INTERNAL', None)
+                env['PLUGIN_DATA'] = str(data)
+                # The loader expands PLUGIN_ROOT in the command. To exercise
+                # fallback root discovery, invoke the same entrypoint directly.
+                if configured_root:
+                    env['PLUGIN_ROOT'] = str(root)
+                    args = command
+                else:
+                    env.pop('PLUGIN_ROOT', None)
+                    args = ['python3', str(root / 'hooks/learning_capture.py')]
+                result = subprocess.run(args, shell=configured_root, cwd=project, env=env,
+                                        input=json.dumps(event), text=True, capture_output=True,
+                                        timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                state_files = list((data / 'learning-capture').glob('*.json'))
+                self.assertEqual(len(state_files), 1, result.stderr)
+                self.assertEqual(json.loads(state_files[0].read_text())['pending_turn'], 't')
+
     def invoke(self, event):
         with mock.patch.object(capture.sys, 'stdin', io.StringIO(json.dumps(event))):
             return capture.main()

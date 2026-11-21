@@ -3,10 +3,11 @@
 Create, evaluate, and refine agent skills through measured iterations.
 
 SkillCraft combines an Agent Skills-compatible authoring workflow with a Python
-evaluation toolkit for Codex and OpenCode. Local Codex chats in the ChatGPT
-desktop app use the same skill and evaluation scripts as Codex CLI. The toolkit
-supports paired quality evaluations, natural-trigger testing, training-only
-description optimization, blind comparisons, and hash-bound packaging.
+evaluation toolkit for Codex and OpenCode and file-based A/B for Hermes on
+macOS. Local Codex chats in the ChatGPT desktop app use the same skill and
+evaluation scripts as Codex CLI. See the configuration reference for supported
+combinations of paired evaluations, trigger testing, description optimization,
+blind comparisons, and hash-bound packaging.
 
 The standalone skill ID is `skillcraft`. See the
 [Codex runner guide](plugins/skillcraft/skills/skillcraft/references/codex-runner.md#local-codex-in-the-chatgpt-desktop-app)
@@ -90,6 +91,8 @@ revision, or triggering requests. Instructions and full required guides start at
 For a compact index of learning configuration, runner settings, environment
 variables and evaluation/optimization CLI options, see the
 [configuration reference](plugins/skillcraft/skills/skillcraft/references/configuration.md).
+The [workflow diagrams](plugins/skillcraft/skills/skillcraft/references/workflows.md)
+show how these options affect quality A/B, description optimization, and Learning.
 
 ## Validate and evaluate
 
@@ -100,6 +103,7 @@ variables and evaluation/optimization CLI options, see the
 # Development checks from the repository root, with SKILLCRAFT set to the checkout's skill directory.
 "$SKILLCRAFT_VENV/bin/python" -B -m unittest discover -s tests -t .
 node --test tests/viewer.test.mjs
+node --test tests/opencode/*.test.mjs
 npm --prefix "$SKILLCRAFT/scripts/opencode-runner" run check
 "$SKILLCRAFT/scripts/opencode-runner/node_modules/.bin/tsx" --test tests/opencode/*.test.mts
 ```
@@ -177,11 +181,40 @@ For installations migrating from `.opencode/skills/` or the former `skill-creato
 
 ## Layout
 
-- `.agents/plugins/marketplace.json` registers the Codex marketplace.
-- `plugins/skillcraft/` contains the Codex manifest and the OpenCode plugin entry point.
-- `plugins/skillcraft/skills/skillcraft/` contains the shared skill, A/B scripts,
-  runners, judge prompts and review templates.
-- `tests/`: regression tests and representative fixtures.
+See [AGENTS.md](AGENTS.md) for development, safety, and merge rules.
+
+```text
+.
+├── AGENTS.md
+├── README.md
+├── .agents/plugins/marketplace.json     # Codex marketplace
+├── .github/workflows/ci.yml
+├── plugins/skillcraft/
+│   ├── .codex-plugin/plugin.json        # Codex manifest
+│   ├── hooks/
+│   │   ├── hooks.json                   # Codex hook registration
+│   │   └── learning_capture.py          # Codex hook entry point
+│   ├── package.json                     # OpenCode package and exports
+│   ├── opencode.js                      # OpenCode entry point
+│   ├── plugin.yaml                      # Hermes manifest
+│   ├── __init__.py                      # Hermes register(ctx)
+│   ├── src/                             # Plugin-only helper modules
+│   │   ├── __init__.py
+│   │   ├── codex/
+│   │   │   └── learning_capture.py
+│   │   ├── hermes/
+│   │   │   ├── __init__.py
+│   │   │   ├── hermes_history.py
+│   │   │   └── hermes_learning.py
+│   │   └── opencode/
+│   │       └── learning.js
+│   └── skills/skillcraft/               # Standalone skill and resources
+│       ├── SKILL.md
+│       ├── assets/
+│       ├── references/
+│       └── scripts/                     # Shared Learning, A/B, and run adapters
+└── tests/                                # Regression tests and fixtures
+```
 
 Custom OpenCode permissions profiles are recorded as **controlled:false**.
 Small evaluation datasets give limited statistical evidence. Human approvals are

@@ -118,7 +118,7 @@ class HermesLearningTest(unittest.TestCase):
         # The Hermes launcher can add its managed packages only to the host process.
         bare = self.home.with_name('bare-python')
         EnvBuilder(with_pip=False).create(bare)
-        with patch('plugins.skillcraft.hermes_learning.sys.executable', str(bare / 'bin/python')):
+        with patch('plugins.skillcraft.src.hermes.hermes_learning.sys.executable', str(bare / 'bin/python')):
             self.command('enable')
             self.assertEqual(self.command('status')['messages'], 0)
 

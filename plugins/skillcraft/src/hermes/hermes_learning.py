@@ -13,7 +13,7 @@ from threading import Lock
 
 import yaml
 
-SCRIPT = Path(__file__).resolve().parent / 'skills/skillcraft/scripts/learning.py'
+SCRIPT = Path(__file__).resolve().parents[2] / 'skills/skillcraft/scripts/learning.py'
 LOCAL_SURFACES = {'cli', 'tui', 'desktop'}
 MAX_SESSIONS = 128
 LOG = logging.getLogger(__name__)

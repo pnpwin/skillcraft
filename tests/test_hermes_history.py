@@ -14,7 +14,7 @@ import importlib.util
 # Load the isolated module without importing the Hermes hook adapter (and its
 # optional PyYAML runtime dependency) in these database-only tests.
 _package = ModuleType("_skillcraft_history_test")
-_package.__path__ = [str(Path(__file__).resolve().parents[1] / "plugins/skillcraft")]
+_package.__path__ = [str(Path(__file__).resolve().parents[1] / "plugins/skillcraft/src/hermes")]
 sys.modules[_package.__name__] = _package
 _adapter = ModuleType(_package.__name__ + ".hermes_learning")
 _adapter.run_learning = lambda *args, **kwargs: None

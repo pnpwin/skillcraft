@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { completedModelSteps, initialCursor, learningEventPhase, learningEventTypes } from '../../plugins/skillcraft/opencode-learning.js';
+import { completedModelSteps, initialCursor, learningEventPhase, learningEventTypes } from '../../plugins/skillcraft/src/opencode/learning.js';
 
 test('learns from native OpenCode execution and inbox events without a legacy status event', () => {
   const sessionID = 'test-session';
