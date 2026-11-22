@@ -88,6 +88,21 @@ def sanitize(text):
     return SECRET.sub('[redacted]', text.strip())[:1200]
 
 
+def revision_reason(reason):
+    """Summarize a saved report without disclosing its exception text."""
+    if not isinstance(reason, str) or not reason:
+        return None
+    for prefix, label in (
+        ('Evidence does not meet', 'Insufficient independent training evidence'),
+        ('Fixture changed', 'Evaluation fixture changed'),
+        ('Validation settings are unchanged', 'The saved candidate already used these validation settings'),
+        ('Manual validation retry requires', 'A matching verified proposal is required for validation retry'),
+    ):
+        if reason.startswith(prefix):
+            return label
+    return 'See the local revision report for details'
+
+
 def prompt_key(text):
     normalized = re.sub(r'\W+', ' ', sanitize(text).casefold()).strip()
     return sha256(normalized.encode()).hexdigest() if normalized else None
@@ -518,6 +533,109 @@ def connection(config):
 
 def queue(db, witness):
     return db.execute('INSERT OR IGNORE INTO checkpoints(witness) VALUES (?)', (witness,)).rowcount != 0
+
+
+def learning_view(config):
+    """Build a read-only, metadata-only explanation of evidence and revision state."""
+    from scripts.learning_worker import model_eligible, unique_batch
+
+    groups = {}
+    current = {}
+    for name, settings in config['skills'].items():
+        try:
+            source = skill_source(config, settings)
+            current[name] = tree_hash(source)
+        except (OSError, KeyError, TypeError, ValueError, RuntimeError):
+            current[name] = None
+    with connection(config) as db:
+        evidence = db.execute('SELECT skill,version,independent,case_id,kind,reproducible,consumed '
+                              'FROM evidence ORDER BY id').fetchall()
+        for row in evidence:
+            key = (row['skill'], row['version'], row['independent'], row['case_id'])
+            group = groups.setdefault(key, {'skill': row['skill'], 'version': row['version'],
+                                              'independent_case': row['independent'],
+                                              'case_id': row['case_id'], 'evidence_count': 0,
+                                              'verdicts': {}, 'reproducible': 0, 'consumed': 0})
+            group['evidence_count'] += 1
+            group['verdicts'][row['kind']] = group['verdicts'].get(row['kind'], 0) + 1
+            group['reproducible'] += bool(row['reproducible'])
+            group['consumed'] += bool(row['consumed'])
+        rows_by_skill = {}
+        for group in groups.values():
+            rows_by_skill.setdefault((group['skill'], group['version']), []).append(group)
+
+        preview = []
+        pending = [row['witness'] for row in db.execute("SELECT witness FROM checkpoints WHERE status != 'done'")]
+        for name, settings in config['skills'].items():
+            version = current[name]
+            if version is None:
+                preview.append({'skill': name, 'version': None, 'state': 'blocked',
+                                'reason': 'Skill source is unavailable or changed',
+                                'next_action': 'check_skill_source'})
+                continue
+            selected = db.execute('SELECT * FROM evidence WHERE skill=? AND version=? AND consumed=0 ORDER BY id',
+                                  (name, version)).fetchall()
+            if not model_eligible(config, name, settings):
+                if not all(key in settings for key in ('train', 'holdout')):
+                    reason = 'Capture only until train and holdout data are configured'
+                elif config.get('selection') != 'all':
+                    reason = 'Model learning is not eligible for this skill'
+                else:
+                    try:
+                        approval = require_model_approval(config, name=name)
+                    except (OSError, KeyError, TypeError, ValueError, RuntimeError):
+                        reason = 'Model learning settings or their required approval are unavailable'
+                    else:
+                        reason = ('Approved datasets, fixtures, or harness settings changed; re-enable learning'
+                                  if not approval_still_current(config, approval, name=name)
+                                  else 'Required harness model settings are incomplete')
+                state, action = 'blocked', 'review_learning_configuration'
+            elif not unique_batch(selected):
+                state, action = 'insufficient_evidence', 'collect_independent_evidence'
+                reason = 'Need three independent cases or one reproducible correction for this skill version'
+            elif any(not witness.startswith('validation-retry:')
+                     or witness.split(':', 2)[1] == name for witness in pending):
+                state, action = 'queued', 'wait_for_worker'
+                reason = 'A checkpoint is pending; the worker will validate eligible evidence'
+            else:
+                state, action = 'waiting_for_checkpoint', 'wait_for_checkpoint'
+                reason = 'Evidence meets the minimum batch rule; the next checkpoint can review it'
+            preview.append({'skill': name, 'version': version, 'state': state, 'reason': reason,
+                            'next_action': action,
+                            'evidence_count': len(selected),
+                            'independent_cases': len({row['independent'] for row in selected}),
+                            'groups': rows_by_skill.get((name, version), [])})
+
+        history = []
+        for row in db.execute('SELECT id,skill,version,status,path FROM revisions ORDER BY id DESC LIMIT 20'):
+            item = {'id': row['id'], 'skill': row['skill'], 'version': row['version'], 'status': row['status']}
+            report_path = Path(row['path']) / 'report.json'
+            try:
+                inside = report_path.resolve().is_relative_to((config['state'] / 'revisions').resolve())
+                report = read_json(report_path) if inside and not report_path.is_symlink() else {}
+            except (OSError, TypeError, ValueError):
+                report = {}
+            if not isinstance(report, dict):
+                report = {}
+            reason = revision_reason(report.get('reason'))
+            if reason:
+                item['reason'] = reason
+            if isinstance(report.get('evidence'), list):
+                item['evidence_count'] = len(report['evidence'])
+            optimizer = report.get('optimizer')
+            if isinstance(optimizer, dict) and optimizer.get('reused_from'):
+                item['retry'] = 'reused_verified_proposal'
+            elif report.get('status') == 'retry_suppressed':
+                item['retry'] = 'suppressed'
+            validations = report.get('validations', {})
+            if isinstance(validations, dict) and validations:
+                item['validation'] = {harness: {
+                    'improved': len(data.get('improved', [])), 'regressed': len(data.get('regressed', []))}
+                    for harness, data in validations.items()
+                    if harness in ('codex', 'opencode', 'hermes') and isinstance(data, dict)
+                    and isinstance(data.get('improved', []), list) and isinstance(data.get('regressed', []), list)}
+            history.append(item)
+    return {'groups': list(groups.values()), 'preview': preview, 'history': history}
 
 
 def queue_message_checkpoint(db, *, at_boundary=False):
@@ -1298,7 +1416,7 @@ def main(argv=None):
     sync.add_argument('session')
     recovery = sub.add_parser('recover-hermes', help='Record independently verified local history observations')
     recovery.add_argument('project', type=Path)
-    for verb in ('enable', 'work', 'status', 'rollback', 'inventory'):
+    for verb in ('enable', 'work', 'status', 'preview', 'rollback', 'inventory'):
         parser = sub.add_parser(verb)
         parser.add_argument('project', type=Path)
         if verb == 'enable':
@@ -1329,7 +1447,7 @@ def main(argv=None):
     try:
         home = args.hermes_home
         if home is not None:
-            journal_commands = {'enable', 'inventory', 'observe', 'status', 'sync-hermes', 'recover-hermes'}
+            journal_commands = {'enable', 'inventory', 'observe', 'status', 'preview', 'sync-hermes', 'recover-hermes'}
             if not home.is_absolute() or args.command not in journal_commands:
                 raise ValueError('This command requires an absolute Hermes profile path and a supported journal operation')
         if args.command == 'observe':
@@ -1382,7 +1500,7 @@ def main(argv=None):
             print(json.dumps(rollback_revision(config, args.revision), ensure_ascii=False))
         else:
             with connection(config) as db:
-                print(json.dumps({
+                summary = {
                     'scope': config['scope'],
                     'selection': config['selection'],
                     'skills': sorted(config['skills']),
@@ -1393,7 +1511,13 @@ def main(argv=None):
                     'baseline_feedback': db.execute('SELECT COUNT(*) FROM baseline_feedback').fetchone()[0],
                     'checkpoints': {r[0]: r[1] for r in db.execute('SELECT status,COUNT(*) FROM checkpoints GROUP BY status')},
                     'revisions': [dict(r) for r in db.execute('SELECT * FROM revisions ORDER BY id DESC LIMIT 20')],
-                }, ensure_ascii=False))
+                }
+            view = learning_view(config)
+            summary.update(evidence_groups=view['groups'], history=view['history'], next_actions=view['preview'])
+            if args.command == 'preview':
+                print(json.dumps({'skills': view['preview'], 'evidence_groups': view['groups']}, ensure_ascii=False))
+            else:
+                print(json.dumps(summary, ensure_ascii=False))
         return 0
     except (OSError, TypeError, ValueError, KeyError, RuntimeError, sqlite3.Error) as error:
         if args.command != 'observe':

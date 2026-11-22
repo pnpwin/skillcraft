@@ -1,4 +1,5 @@
 """Local orchestration bridge. Run artifacts are outside the executor Location."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -80,7 +81,7 @@ def profile_settings(profile, skill_id=None, *, harness='opencode'):
 
 def run_model(prompt, output, model, *, mode='quality', skill=None, skill_id=None,
               attach=False, files=(), timeout=180, profile=None, operation='run', preparation=None,
-              harness='opencode', output_schema=None):
+              harness='opencode', output_schema=None, additional_instructions=None):
     model_config = model_ref(model, harness)
     selection = harness_metadata(harness)
     harness = selection['harness']
@@ -137,6 +138,10 @@ def run_model(prompt, output, model, *, mode='quality', skill=None, skill_id=Non
         write_json(output / 'run.json', result)
         return result
     system = SYSTEM + tool_instructions(cli_state)
+    if additional_instructions is not None:
+        if not isinstance(additional_instructions, str) or not additional_instructions.strip():
+            raise ValueError('Additional instructions must be nonempty text')
+        system += '\n\n' + additional_instructions
     if mode == 'judge':
         system = ('Inspect the explicitly listed input evidence with permitted tools. '
                   'Return the requested JSON as your final response; do not write output files or list the session root. '
@@ -163,6 +168,8 @@ def run_model(prompt, output, model, *, mode='quality', skill=None, skill_id=Non
         'mode': mode, 'skill_id': skill_id, 'attach_skill': attach, 'permissions': permissions,
         'controlled': controlled, 'run_id': uuid.uuid4().hex,
         'allow_delegation': settings['allow_delegation'],
+        'additional_instructions_sha256': hashlib.sha256(additional_instructions.encode('utf-8')).hexdigest()
+            if additional_instructions is not None else None,
         **({'skill_path': str(installed / 'SKILL.md'), 'skill_sha256': digest(installed / 'SKILL.md')} if installed else {}),
     }
     if harness in {'codex', 'hermes'}:

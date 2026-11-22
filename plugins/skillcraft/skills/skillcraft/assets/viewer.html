@@ -765,10 +765,10 @@
 
       // Config badge
       const badge = document.getElementById("config-badge");
-      const configMatch = (run.configuration || run.logical_id || run.id).match(/(with_skill|without_skill|previous_skill|new_skill|old_skill)/);
+      const configMatch = (run.configuration || run.logical_id || run.id).match(/(with_skill|without_skill|previous_skill|new_skill|old_skill|prompt_a|prompt_b)/);
       if (configMatch) {
         const config = configMatch[1];
-        const isBaseline = config === "without_skill" || config === "old_skill" || config === 'previous_skill';
+        const isBaseline = config === "without_skill" || config === "old_skill" || config === 'previous_skill' || config === 'prompt_a';
         badge.textContent = config.replace(/_/g, " ");
         badge.className = "config-badge " + (isBaseline ? "config-baseline" : "config-primary");
         badge.style.display = "inline-block";
@@ -1241,8 +1241,9 @@
         for (const [name, s] of Object.entries(data.run_summary)) {
           html += '<tr><td>' + escapeHtml(name) + '</td><td>' + s.runs + ' / ' + (s.planned_runs ?? 'unknown') + '</td><td>' + s.completion_rate + ' / ' + (s.planned_completion_rate ?? 'unknown') + '</td><td>' + fmt(s.pass_rate) + '</td><td>' + fmt(s.time_seconds) + '</td><td>' + fmt(s.tokens) + '</td></tr>';
         }
-        html += '</table><h3>Paired deltas: with_skill − baseline</h3><p>Positive wall seconds / executor tokens means more consumption; positive pass rate means higher quality.</p>';
-        html += '<table class="benchmark-table"><tr><th>Baseline</th><th>Quality delta</th><th>Wall seconds delta</th><th>Executor tokens delta</th></tr>';
+        const promptAB = metadata.kind === 'prompt_ab';
+        html += '</table><h3>Paired deltas: ' + (promptAB ? 'prompt_b − prompt_a' : 'with_skill − baseline') + '</h3><p>Positive wall seconds / executor tokens means more consumption; positive pass rate means higher quality.</p>';
+        html += '<table class="benchmark-table"><tr><th>' + (promptAB ? 'Comparison' : 'Baseline') + '</th><th>Quality delta</th><th>Wall seconds delta</th><th>Executor tokens delta</th></tr>';
         for (const [name, d] of Object.entries(data.deltas || {})) html += '<tr><td>' + escapeHtml(name) + '</td><td>' + fmt(d.paired_pass_rate) + '</td><td>' + fmt(d.paired_time_seconds) + '</td><td>' + fmt(d.paired_tokens) + '</td></tr>';
         html += '</table><details><summary>Pair diagnostics</summary><pre>' + escapeHtml(JSON.stringify(data.deltas, null, 2)) + '</pre></details><h3>Per-run evidence and status</h3><pre>' + escapeHtml(JSON.stringify(data.runs, null, 2)) + '</pre>';
         container.innerHTML = html;

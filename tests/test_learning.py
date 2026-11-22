@@ -1,5 +1,7 @@
 import json
 import importlib.util
+from contextlib import redirect_stdout
+from io import StringIO
 import os
 import shutil
 from collections import defaultdict
@@ -98,6 +100,66 @@ class LearningTest(unittest.TestCase):
         self.assertIsNone(learning.classify('Всё работает?'))
         self.assertEqual(learning.classify('Подтверждаю, что не работает'), 'failure')
         self.assertNotIn('sk-abcdefghijk', learning.sanitize('token: sk-abcdefghijk'))
+
+    def test_preview_groups_evidence_by_version_and_independent_case_without_notes(self):
+        self.enable()
+        version = tree_hash(self.source)
+        with learning.connection(self.config) as db:
+            learning.record(db, 'one', 'demo', version, 'feedback', 'codex', 'session-a', 'turn-a',
+                            'case-a', 'train-1', 'failure', 'Private transcript excerpt')
+            learning.record(db, 'two', 'demo', version, 'feedback', 'codex', 'session-b', 'turn-b',
+                            'case-a', 'train-1', 'correction', 'Another private transcript excerpt')
+            learning.record(db, 'old', 'demo', 'old-version', 'feedback', 'codex', 'session-c', 'turn-c',
+                            'case-b', 'train-2', 'success', 'Old version evidence')
+        view = learning.learning_view(self.config)
+        current = [item for item in view['groups'] if item['version'] == version]
+        self.assertEqual(len(current), 1)
+        self.assertEqual(current[0]['independent_case'], 'case-a')
+        self.assertEqual(current[0]['evidence_count'], 2)
+        self.assertEqual(current[0]['verdicts'], {'failure': 1, 'correction': 1})
+        self.assertEqual(len(view['groups']), 2)
+        self.assertEqual(view['preview'][0]['state'], 'insufficient_evidence')
+        self.assertEqual(view['preview'][0]['next_action'], 'collect_independent_evidence')
+        self.assertNotIn('Private transcript', json.dumps(view))
+        with learning.connection(self.config) as db:
+            for i in (2, 3):
+                learning.record(db, f'new-{i}', 'demo', version, 'feedback', 'codex', 's',
+                                't', f'case-new-{i}', f'train-{i}', 'failure', 'Observed failure')
+        self.assertEqual(learning.learning_view(self.config)['preview'][0]['state'], 'waiting_for_checkpoint')
+
+    def test_status_history_reports_only_redacted_metadata(self):
+        self.enable()
+        attempt = self.config['state'] / 'revisions' / '1' / 'demo'
+        attempt.mkdir(parents=True)
+        write_json(attempt / 'report.json', {
+            'status': 'blocked', 'reason': f'Fixture changed at {self.project}/secret.txt',
+            'evidence': [1, 2], 'optimizer': {'reused_from': str(self.project / 'prior-proposal')},
+            'transcript': 'must not appear',
+        })
+        with learning.connection(self.config) as db:
+            db.execute('INSERT INTO revisions(checkpoint,skill,version,status,path) VALUES (1,?,?,?,?)',
+                       ('demo', tree_hash(self.source), 'blocked', str(attempt)))
+        view = learning.learning_view(self.config)
+        history = view['history'][0]
+        self.assertEqual(history['reason'], 'Evaluation fixture changed')
+        self.assertEqual(history['evidence_count'], 2)
+        self.assertEqual(history['retry'], 'reused_verified_proposal')
+        self.assertNotIn(str(self.project), json.dumps(view))
+        self.assertNotIn('prior-proposal', json.dumps(view))
+        self.assertNotIn('transcript', json.dumps(view))
+        write_json(attempt / 'report.json', ['Invalid report shape'])
+        self.assertNotIn('reason', learning.learning_view(self.config)['history'][0])
+
+    def test_learning_view_never_calls_model_for_insufficient_evidence(self):
+        self.enable()
+        with patch.object(learning_worker, 'run_model', side_effect=AssertionError('status must stay local')) as model:
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(learning.main(['status', str(self.project)]), 0)
+            summary = json.loads(output.getvalue())
+            self.assertEqual(summary['next_actions'][0]['state'], 'insufficient_evidence')
+            self.assertIn('evidence_groups', summary)
+        model.assert_not_called()
 
     def test_changed_dataset_blocks_model_until_owner_reenables(self):
         self.enable()

@@ -1,6 +1,6 @@
 # SkillCraft for Codex, OpenCode v2 and Hermes Agent
 
-Create, evaluate, and refine agent skills through measured iterations.
+Create, evaluate, and refine agent skills and prompts through measured iterations.
 
 SkillCraft combines an Agent Skills-compatible authoring workflow with a Python
 evaluation toolkit for Codex and OpenCode and file-based A/B for Hermes on
@@ -25,7 +25,12 @@ for setup and verification in a local ChatGPT desktop chat.
 Live checks have been run with Codex 0.170.0 and OpenCode 2.2.7. SkillCraft records
 the versions it observes and checks the runtime interfaces it uses.
 
-## Install
+## Install and configure
+
+The Git plugin contains the same `skillcraft` skill for all three harnesses.
+Choose the installer for your harness. Authoring is available once the skill is
+discovered. Set up a runner when you want to run an evaluation, and enroll your
+project separately when you want Learning to collect feedback.
 
 **Codex CLI or local Codex in ChatGPT desktop**
 
@@ -57,6 +62,15 @@ skill authoring and an [opt-in learning journal](plugins/skillcraft/skills/skill
 For file-based quality A/B on macOS, install and sign in to the native Hermes
 Chat CLI, then follow the [Hermes runner guide](plugins/skillcraft/skills/skillcraft/references/hermes-runner.md).
 
+**Verify discovery**
+
+Open a fresh local session. In Codex, check that `skillcraft@pnpwin` is enabled
+and select `skillcraft:skillcraft` from the skill picker. In OpenCode, ask the agent to
+load `skillcraft` with the `skill` tool. In Hermes, use the registered name
+`skillcraft:skillcraft`. A successful check resolves the installed `SKILL.md`
+and can open its linked `references/authoring-guide.md`. This check needs no
+evaluation workspace or Learning enrollment.
+
 **Standalone installation**
 
 Copy the `plugins/skillcraft/skills/skillcraft/` directory from a checkout into
@@ -87,7 +101,7 @@ Ask the agent to use **SkillCraft** for a recurring workflow:
 > Preserve missing owners and deadlines rather than inventing them, and test the result.
 
 The agent can also select SkillCraft naturally for relevant authoring, evaluation,
-revision, or triggering requests. Instructions and full required guides start at
+revision, or triggering requests. Instructions and guides for each workflow start at
 [SKILL.md](plugins/skillcraft/skills/skillcraft/SKILL.md).
 
 For a compact index of learning configuration, runner settings, environment
@@ -96,7 +110,54 @@ variables and evaluation/optimization CLI options, see the
 The [workflow diagrams](plugins/skillcraft/skills/skillcraft/references/workflows.md)
 show how these options affect quality A/B, description optimization, and Learning.
 
+**Choose your setup**
+
+| Use | What to configure |
+| --- | --- |
+| Author a skill or prompt | Invoke `skillcraft` with the intended outcome and examples. |
+| Run A/B on demand | Install evaluation dependencies, sign in to the selected runner, and choose the model, cases, and repeat count. See [runner settings](plugins/skillcraft/skills/skillcraft/references/configuration.md#runner-settings). |
+| Collect feedback | Create `.skillcraft/learning.json` using the example below and enroll the project. |
+| Automatically revise a skill | Add model settings and separate training and holdout cases. Set `auto_apply` only when passing candidates may update that source. See [Learning settings](plugins/skillcraft/skills/skillcraft/references/configuration.md#per-skill-settings). |
+
+This example enrolls a local skill for feedback collection. Replace `example-skill`
+with the directory name of a skill you want to track.
+
+```json
+{
+  "schema_version": 1,
+  "enabled": true,
+  "sources": ["sessions", "evals"],
+  "skills": {
+    "example-skill": {
+      "source": ".agents/skills/example-skill",
+      "auto_apply": false
+    }
+  }
+}
+```
+
+From the project root, approve the configuration with the SkillCraft virtualenv.
+
+```sh
+"$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/learning.py" enable "$PWD"
+```
+
+For Hermes capture, also enroll the selected Hermes profile with
+`hermes skillcraft enable "$PWD"`. See the [Learning guide](plugins/skillcraft/skills/skillcraft/references/learning.md)
+for approval, status, and optional Hermes feedback forwarding.
+
+## Workflow
+
+```text
+Install from Git → select a profile → open skillcraft
+Task → draft or revision → A/B → report → decision
+Opted-in feedback → Learning → a candidate for the same A/B process
+```
+
 ## Validate and evaluate
+
+For two instruction files, see [prompt A/B](plugins/skillcraft/skills/skillcraft/references/prompt-ab-evaluation.md).
+For a native skill comparison, follow the [evaluation commands](plugins/skillcraft/skills/skillcraft/references/run-evaluations.md).
 
 ```sh
 # Validate the Agent Skills format.

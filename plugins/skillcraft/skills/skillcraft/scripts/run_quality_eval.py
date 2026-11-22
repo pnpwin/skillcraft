@@ -15,8 +15,14 @@ from scripts.utils import copy_tree, digest, load_evals, read_json, safe_id, sna
 from scripts.reporting import print_report
 
 
-def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previous=None, timeout=180, profile=None, judge_model=None, judge_profile=None, historical_baseline=None, pilot_ids=None, stop_threshold=2, harness='opencode'):
-    skill, workspace = Path(skill).resolve(), Path(workspace).resolve()
+def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previous=None, timeout=180, profile=None, judge_model=None, judge_profile=None, historical_baseline=None, pilot_ids=None, stop_threshold=2, harness='opencode', instruction_a=None, instruction_b=None):
+    prompt_pair = instruction_a is not None or instruction_b is not None
+    if prompt_pair and (instruction_a is None or instruction_b is None or skill is not None or previous is not None):
+        raise ValueError('Prompt A/B mode requires both instruction files and does not accept skill baselines')
+    if not prompt_pair and skill is None:
+        raise ValueError('A skill is required outside prompt A/B mode')
+    skill = Path(skill).resolve() if skill is not None else None
+    workspace = Path(workspace).resolve()
     model_ref(model, harness)
     if harness == 'hermes' and (judge_model or judge_profile):
         raise ValueError('Hermes file evaluation uses deterministic graders')
@@ -29,9 +35,11 @@ def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previou
     pilot_ids = list(dict.fromkeys(pilot_ids or [rows[0]['id']]))
     if not set(pilot_ids) <= {row['id'] for row in rows}:
         raise ValueError('Unknown pilot case ID')
-    profile_settings(profile, safe_id(skill.name), harness=harness)
+    skill_id = safe_id(skill.name) if skill is not None else 'prompt-ab'
+    profile_settings(profile, skill_id if skill is not None else None, harness=harness)
     profile_settings(judge_profile, harness=harness)
-    fixtures, fixture_hashes = snapshot_fixtures(rows, skill, workspace)
+    fixture_base = Path(evals).resolve().parent if prompt_pair else skill
+    fixtures, fixture_hashes = snapshot_fixtures(rows, fixture_base, workspace)
     if profile:
         fixed_profile = workspace / 'snapshots' / 'profile.json'
         write_json(fixed_profile, read_json(profile))
@@ -40,12 +48,30 @@ def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previou
         fixed_judge_profile = workspace / 'snapshots' / 'judge-profile.json'
         write_json(fixed_judge_profile, read_json(judge_profile))
         judge_profile = fixed_judge_profile
-    skill_id = safe_id(skill.name)
-    candidate = workspace / 'snapshots' / 'candidate' / skill_id
-    candidate_hash = copy_tree(skill, candidate, skill=True, readonly=True)
-    write_json(workspace / 'compliance.json', assess(candidate, harness=harness))
-    require_standard(candidate)
-    configs = {'without_skill': None, 'with_skill': candidate}
+    instruction_texts = {}
+    instruction_hashes = {}
+    if prompt_pair:
+        for label, source in [('prompt_a', Path(instruction_a)), ('prompt_b', Path(instruction_b))]:
+            raw = source.read_bytes()
+            text = raw.decode('utf-8')
+            if not text.strip():
+                raise ValueError(f'{label} instruction file is empty')
+            target = workspace / 'snapshots' / 'instructions' / f'{label}.md'
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(raw)
+            instruction_texts[label] = text
+            instruction_hashes[label] = digest(target)
+        if instruction_hashes['prompt_a'] == instruction_hashes['prompt_b']:
+            raise ValueError('Prompt A and prompt B must have different bytes')
+        candidate = None
+        candidate_hash = None
+        configs = {'prompt_a': None, 'prompt_b': None}
+    else:
+        candidate = workspace / 'snapshots' / 'candidate' / skill_id
+        candidate_hash = copy_tree(skill, candidate, skill=True, readonly=True)
+        write_json(workspace / 'compliance.json', assess(candidate, harness=harness))
+        require_standard(candidate)
+        configs = {'without_skill': None, 'with_skill': candidate}
     if previous:
         old = workspace / 'snapshots' / 'previous' / skill_id
         copy_tree(previous, old, skill=True, readonly=True)
@@ -57,10 +83,11 @@ def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previou
         configs['previous_skill'] = old
     selection = harness_metadata(harness)
     runtime = selection['harness']
-    manifest = {'schema_version': 1, 'kind': 'quality', 'skill_id': skill_id, **selection, 'model': model,
+    manifest = {'schema_version': 1, 'kind': 'prompt_ab' if prompt_pair else 'quality', 'skill_id': None if prompt_pair else skill_id, **selection, 'model': model,
                 'judge_model': judge_model, 'repeats': repeats, 'workers': workers,
                 'configurations': {k: {'role': k, 'snapshot_hash': tree_hash(v) if v else None} for k, v in configs.items()},
                 'candidate_hash': candidate_hash, 'evals': rows, 'controlled_requested': profile is None,
+                **({'instruction_files': {key: {'sha256': value, 'placement': 'appended to the shared system instructions'} for key, value in instruction_hashes.items()}} if prompt_pair else {}),
                 'learning_internal': os.environ.get('SKILLCRAFT_LEARNING_INTERNAL') == '1',
                 'fixture_hashes': fixture_hashes, 'profile_hash': digest(profile) if profile else None,
                 'judge_profile_hash': digest(judge_profile) if judge_profile else None,
@@ -82,9 +109,11 @@ def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previou
         row, snapshot, files, target, config = job
         stage, result = 'executor', {}
         try:
-            result = run_model(row['prompt'], target, model, skill=snapshot, skill_id=skill_id,
+            result = run_model(row['prompt'], target, model, skill=snapshot,
+                               skill_id=None if prompt_pair else skill_id,
                                attach=snapshot is not None, files=files, timeout=timeout, profile=profile,
-                               preparation=row.get('preparation'), harness=harness)
+                               preparation=row.get('preparation'), harness=harness,
+                               additional_instructions=instruction_texts.get(config))
             write_json(target / 'eval_metadata.json', {'eval_id': row['id'], **row, 'configuration': config,
                        'snapshot_hash': manifest['configurations'][config]['snapshot_hash']})
             if harness == 'hermes' and result['status'] != 'completed':
@@ -161,7 +190,7 @@ def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previou
     report = aggregate(workspace)
     report['compliance'] = manifest['compliance']
     write_json(workspace / 'benchmark.json', report)
-    if not manifest['learning_internal'] and runtime != 'hermes':
+    if not prompt_pair and not manifest['learning_internal'] and runtime != 'hermes':
         try:
             from scripts.learning import notify_eval
             notify_eval(workspace)
@@ -172,10 +201,12 @@ def run_quality(skill, evals, workspace, model, *, repeats=3, workers=1, previou
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--skill', type=Path, required=True)
+    p.add_argument('--skill', type=Path, help='Candidate skill for native with/without-skill comparison')
     p.add_argument('--evals', type=Path, required=True)
     p.add_argument('--workspace', type=Path, required=True)
     p.add_argument('--previous', type=Path)
+    p.add_argument('--instruction-a', type=Path, help='Instruction prompt A for a two-arm prompt comparison')
+    p.add_argument('--instruction-b', type=Path, help='Instruction prompt B for a two-arm prompt comparison')
     p.add_argument('--repeats', type=int, default=3)
     p.add_argument('--workers', type=int, default=1)
     p.add_argument('--judge-model')
@@ -188,7 +219,8 @@ def main():
     report = run_quality(args.skill, args.evals, args.workspace, args.model, repeats=args.repeats,
                         workers=args.workers, previous=args.previous, timeout=args.timeout,
                          profile=args.profile, judge_model=args.judge_model, judge_profile=args.judge_profile,
-                         pilot_ids=args.pilot_case, stop_threshold=args.stop_threshold, harness=args.harness)
+                         pilot_ids=args.pilot_case, stop_threshold=args.stop_threshold, harness=args.harness,
+                         instruction_a=args.instruction_a, instruction_b=args.instruction_b)
     print_report(report, args.workspace / 'benchmark.json', as_json=args.json)
     return 1 if report['errors'] or report['validation_errors'] else 0
 
