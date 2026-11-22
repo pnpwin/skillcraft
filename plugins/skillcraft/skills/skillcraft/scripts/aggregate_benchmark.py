@@ -75,6 +75,7 @@ def aggregate(workspace, *, selection=None, output=None):
                     'all_judge_tokens': sum(attempt_usage) if attempt_usage and all(x is not None for x in attempt_usage) else None,
                     'all_judge_cost': sum(attempt_cost) if attempt_cost and all(x is not None for x in attempt_cost) else None,
                    'model': run.get('model'), 'response_models': run.get('response_models'), 'agent': run.get('agent'), 'fixtures': run.get('fixtures'),
+                   'harness': run.get('harness'), 'profile': run.get('profile'), 'runner_hash': run.get('runner_hash'),
                    'critique_status': critique.get('status', 'not_run'),
                     'status': run['status'], 'grading_status': grading.get('status', 'missing'),
                     'error': run.get('error'), 'grading_error': grading.get('error'), 'failure_stage': grading.get('failure_stage'),
@@ -125,6 +126,49 @@ def aggregate(workspace, *, selection=None, output=None):
         deltas[baseline] = {**{f'paired_{key}': stats(values) for key, values in paired.items()},
                             'excluded_pairs': excluded,
                             'direction': 'with_skill minus baseline; positive time/tokens means more consumption'}
+    prompt_contract_mismatch = False
+    if manifest.get('kind') == 'prompt_ab':
+        by_run = {r['run']: r for r in rows}
+        paired = {key: [] for key in ['pass_rate', 'time_seconds', 'tokens']}
+        incomplete = []
+        planned_a = [f'eval-{e["id"]}/prompt_a/run-{i:03d}' for e in manifest.get('evals', [])
+                     for i in range(1, manifest.get('repeats', 0) + 1)]
+        for run_a in planned_a:
+            a = by_run.get(run_a)
+            run_b = run_a.replace('/prompt_a/', '/prompt_b/')
+            b = by_run.get(run_b)
+            reasons = []
+            if a is None:
+                reasons.append('prompt_a run missing')
+            elif not a['included']:
+                reasons.append('prompt_a run excluded')
+            if b is None:
+                reasons.append('prompt_b run missing')
+            elif not b['included']:
+                reasons.append('prompt_b run excluded')
+            if a is not None and b is not None and a['included'] and b['included']:
+                if manifest.get('environment_consistent') is False:
+                    reasons.append('runtime environment drift detected')
+                if a['status'] != 'completed' or b['status'] != 'completed':
+                    reasons.append(f"execution status: A={a['status']}, B={b['status']}")
+                if not a['quality_complete'] or not b['quality_complete']:
+                    reasons.append(f"grading incomplete: A={a['grading_status']}/{a['critique_status']}, B={b['grading_status']}/{b['critique_status']}")
+                elif (not a['rubric_hash'] or not b['rubric_hash'] or
+                      a['grading_signature'] != b['grading_signature']):
+                    reasons.append('incompatible or unknown grading contract')
+                    prompt_contract_mismatch = True
+                if (a['model'] != b['model'] or a['agent'] != b['agent'] or a['fixtures'] != b['fixtures'] or
+                        a['harness'] != b['harness'] or a['profile'] != b['profile'] or a['runner_hash'] != b['runner_hash']):
+                    reasons.append('model, agent, harness, profile, runner, or fixture identity differs')
+            if reasons:
+                incomplete.append({'pair': run_a.replace('/prompt_a/', '/prompt_a <-> prompt_b/'), 'reasons': reasons})
+                continue
+            for key in paired:
+                if a[key] is not None and b[key] is not None:
+                    paired[key].append(b[key] - a[key])
+        deltas['prompt_b_minus_a'] = {**{f'paired_{key}': stats(values) for key, values in paired.items()},
+                                      'incomplete_pairs': incomplete,
+                                      'direction': 'prompt_b minus prompt_a; positive time/tokens means more consumption'}
     actual = {r['run'] for r in rows}
     expected = {f'eval-{e["id"]}/{c}/run-{i:03d}' for e in manifest.get('evals', [])
                 for c in manifest['configurations'] for i in range(1, manifest.get('repeats', 0) + 1)}
@@ -150,7 +194,8 @@ def aggregate(workspace, *, selection=None, output=None):
         validation_errors.append('Environment drift detected between configurations')
     if rows and not any(r['included'] for r in rows):
         validation_errors.append('No runs selected for summary')
-    if any('incompatible/unknown grading contract' in x for d in deltas.values() for x in d['excluded_pairs']):
+    if prompt_contract_mismatch or any('incompatible/unknown grading contract' in x
+                                       for d in deltas.values() for x in d.get('excluded_pairs', [])):
         validation_errors.append('Selected comparison contains incompatible or unknown grading contracts (rubric/judge/profile/renderer)')
     result = {'schema_version': 1, 'metadata': manifest, 'run_summary': summary, 'deltas': deltas,
               'runs': rows, 'errors': errors + len(missing), 'missing_runs': missing, 'validation_errors': validation_errors,

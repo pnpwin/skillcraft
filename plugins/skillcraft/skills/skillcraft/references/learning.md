@@ -289,8 +289,13 @@ the candidate with a blocked report.
 
 ## Inspect and recover
 
-Use the same interpreter and script with `status "$PWD"` to list checkpoint
-counts and revision IDs. Revision directories contain the proposed diff,
+Use `status "$PWD"` to see counts, evidence grouped by independent case and
+skill version, a deterministic next action, and the latest revision outcomes.
+The `preview "$PWD"` command gives the same eligibility explanation without
+starting the worker. Both commands inspect the journal and can initialize its
+schema. The evidence and history summaries contain metadata rather than feedback
+text, transcripts or proposal contents. The existing `revisions` field also
+provides local revision paths. Revision directories contain the proposed diff,
 A/B reports, usage when available, and the promotion or rejection reason.
 The source content and permissions must still match the tested version at
 activation. The worker checks the displaced tree after exchange so a

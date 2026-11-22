@@ -6,6 +6,35 @@ Compact reference for user-facing SkillCraft settings. The [Learning guide](lear
 workflows and contracts in more detail.
 The [workflow diagrams](workflows.md) show where key options change execution.
 
+## Choose an operating mode
+
+For authoring, use the registered skill in a fresh local session. Resolve
+resources relative to its installed `SKILL.md`. For evaluation, prepare a Python
+environment outside the skill directory and choose an authorized runner. For
+Learning, enroll a project or home scope separately. `auto_apply` controls
+whether a passing revision can replace a local source.
+
+Set `SKILLCRAFT` to the absolute directory containing the loaded `SKILL.md`.
+For a standalone copy, run `export SKILLCRAFT="$PWD/.agents/skills/skillcraft"`
+from its project root. Install dependencies when you need the runner or Learning.
+
+```sh
+export SKILLCRAFT_VENV="${SKILLCRAFT_VENV:-${XDG_DATA_HOME:-$HOME/.local/share}/skillcraft/venv}"
+python3 -m venv "$SKILLCRAFT_VENV"
+"$SKILLCRAFT_VENV/bin/python" -m pip install -r "$SKILLCRAFT/requirements.txt"
+npm --prefix "$SKILLCRAFT/scripts/opencode-runner" ci  # OpenCode runner
+```
+
+Use the SkillCraft virtualenv's Python for the supplied scripts. Give each
+experiment a new workspace outside deployable resources, for example
+`<project>/.agents/skillcraft-workspaces/<skill-id>/iteration-NNN/`.
+
+For an interactive evaluation, select the harness and model with the runner CLI
+and run its guide's connection check. For automatic revisions, use the enrolled
+skill's `harnesses` and `optimizer` settings. Codex uses the selected Codex
+profile, OpenCode uses the selected server, and Hermes uses the selected signed-in
+Hermes profile. A custom permissions profile applies only to OpenCode.
+
 ## Learning configuration
 
 Put project configuration in `<project>/.skillcraft/learning.json`. Home-wide
@@ -238,8 +267,9 @@ for the full current option list.
 | `learning.py enable` | Project path positional argument | `--auto-import` for an enrolled Hermes profile, or linked-root preview/approval flags described above. |
 | `learning.py import-hermes` | Project path and `--from-profile` | Imports verified feedback from the specified Hermes profile into shared Learning. |
 | `learning.py ingest` | Evaluation workspace | `--project` selects the Learning scope. `--feedback` imports reviewed feedback. `--selection` selects the grading attempt and requires `--feedback`. |
+| `learning.py status` or `preview` | Project path | Inspect version-bound evidence, eligibility, and the next action. `status` also shows revision history. |
 | `learning.py work` | Project path | `--retry-blocked` queues validation of a saved candidate. |
-| `run_quality_eval.py` | `--skill`, `--evals`, `--workspace`, `--model` | Paired quality runs. `--repeats` (3), `--workers` (1), `--judge-model`, `--judge-profile`, repeated `--pilot-case` (defaults to first case), `--previous`, `--stop-threshold` (2), `--json`, `--timeout` (180), `--profile`, `--harness`. |
+| `run_quality_eval.py` | `--evals`, `--workspace`, `--model`, and either `--skill` or both `--instruction-a` and `--instruction-b` | Paired quality runs. `--repeats` (3), `--workers` (1), `--judge-model`, `--judge-profile`, repeated `--pilot-case` (defaults to first case), `--previous` (skill mode), `--stop-threshold` (2), `--json`, `--timeout` (180), `--profile`, `--harness`. |
 | `run_eval.py` | `--skill`, `--evals`, `--workspace`, `--model` | Trigger runs. `--repeats` (3), `--workers` (1), optional independent `--judge-model` and `--judge-profile`, `--timeout` (180), `--profile`, `--harness`. |
 | `run_loop.py` | `--skill`, `--evals` (trigger set), `--quality-evals`, `--workspace`, `--model`, `--optimizer-model` | Trigger-based description optimization plus quality regression with Codex or OpenCode. Optional `--judge-model`, `--profile`, `--judge-profile`, `--optimizer-profile`, `--iterations` (3), `--repeats` (3), `--workers` (1), `--timeout` (180), `--seed` (42), `--harness`. |
 | `improve_description.py` | `--skill`, `--training-results`, `--output`, `--model` | Training-only description proposal with Codex, OpenCode, or Hermes. Optional `--history`, `--profile`, `--timeout` (180), `--harness`. |
@@ -249,6 +279,7 @@ for the full current option list.
 | `package_skill.py` | Skill directory positional argument | Packaging requires repeated `--run [HARNESS=]PATH` for accepted runs. Optional output directory, `--verification-dir`, `--openai-plugin-version`. |
 | `quick_validate.py` | Skill directory positional argument | `--json`, `--lint`. Checks Agent Skills format only. |
 
+See [prompt A/B](prompt-ab-evaluation.md) for instruction placement and pair accounting.
 Review feedback and benchmark data default to `feedback.json` and
 `benchmark.json` in the workspace. A review with `--selection` requires
 `--static` or `--feedback-output` outside that workspace. Importing feedback

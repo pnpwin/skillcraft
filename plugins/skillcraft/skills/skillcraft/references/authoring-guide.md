@@ -257,8 +257,8 @@ and proceed; do not ask the user to repeat them or invent another approval step.
 The flow is requirements → genuine clarifications → shared understanding of the
 task/result → draft → both format/runtime checks plus agreed quality evaluation
 → delivery. Subjective human review remains a real decision; automated tests do not
-stand in for it. Future skills should load relevant resources conditionally and
-fully; SkillCraft itself retains its complete mandatory guide reading.
+stand in for it. Load the guidance for the selected task and read its relevant
+sections fully before using them.
 
 ## Authoring handoff
 

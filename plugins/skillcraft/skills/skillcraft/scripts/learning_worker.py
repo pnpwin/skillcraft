@@ -614,6 +614,7 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
             usable.append(row)
         if not unique_batch(usable):
             report['status'] = 'insufficient_training_evidence'
+            report['reason'] = 'Evidence does not meet the minimum independent-case or reproducible-correction rule'
             return report
         patterns = settings.get('editable', EDITABLE)
         if not isinstance(patterns, list) or not patterns or not all(isinstance(x, str) and x for x in patterns):
@@ -626,6 +627,7 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
         usable = list(by_signal.values())[-24:]
         if not unique_batch(usable):
             report['status'] = 'insufficient_training_evidence'
+            report['reason'] = 'Evidence does not meet the minimum independent-case or reproducible-correction rule'
             return report
         training = [{
             'kind': row['kind'], 'case_id': row['case_id'], 'evidence': row['note'],

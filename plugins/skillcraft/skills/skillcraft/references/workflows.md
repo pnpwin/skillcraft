@@ -6,15 +6,18 @@ supported combinations.
 ## Quality A/B
 
 `run_quality_eval.py` creates a new workspace and freezes the inputs, rubric,
-settings, and skill snapshots before running any arms.
+settings, and skill or instruction snapshots before running any arms.
 
 ```mermaid
 flowchart TD
-    A["Select the runtime and freeze the evaluation inputs"] --> B["Plan a clean baseline and a candidate arm"]
-    B --> C{"Previous version supplied?"}
+    A["Select the runtime and freeze the evaluation inputs"] --> B{"What is being evaluated?"}
+    B -->|Skill| S["Plan a clean baseline and a candidate arm"]
+    B -->|Prompt| P["Plan instruction A and B at the same placement"]
+    S --> C{"Previous version supplied?"}
     C -->|Yes| D["Add the previous version as a third arm"]
     C -->|No| E["Run the end-to-end pilot"]
     D --> E
+    P --> E
     E --> F{"Pilot pipeline complete?"}
     F -->|No| G["Record the failing stage and stop dispatch"]
     F -->|Yes| H["Run the planned repeats in fresh environments"]
@@ -32,6 +35,8 @@ Codex and OpenCode can use an independent judge. Hermes file A/B requires
 macOS and deterministic grading. A completed negative quality result can pass
 the pilot pipeline. A missing artifact or technical failure is reported
 separately from a scored task outcome.
+See [prompt A/B](prompt-ab-evaluation.md) for instruction placement and
+incomplete-pair accounting.
 
 ## Description optimization
 
