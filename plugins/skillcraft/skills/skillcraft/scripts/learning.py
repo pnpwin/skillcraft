@@ -537,7 +537,7 @@ def queue(db, witness):
 
 def learning_view(config):
     """Build a read-only, metadata-only explanation of evidence and revision state."""
-    from scripts.learning_worker import model_eligible, unique_batch
+    from scripts.learning_worker import complete_harness_settings, unique_batch
 
     groups = {}
     current = {}
@@ -575,20 +575,21 @@ def learning_view(config):
                 continue
             selected = db.execute('SELECT * FROM evidence WHERE skill=? AND version=? AND consumed=0 ORDER BY id',
                                   (name, version)).fetchall()
-            if not model_eligible(config, name, settings):
-                if not all(key in settings for key in ('train', 'holdout')):
-                    reason = 'Capture only until train and holdout data are configured'
-                elif config.get('selection') != 'all':
-                    reason = 'Model learning is not eligible for this skill'
+            reason = None
+            if not all(key in settings for key in ('train', 'holdout')):
+                reason = 'Capture only until train and holdout data are configured'
+            elif not complete_harness_settings(settings):
+                reason = 'Required harness model settings are incomplete'
+            else:
+                try:
+                    approval = require_model_approval(config, name=name)
+                    current_approval = approval_still_current(config, approval, name=name)
+                except (OSError, KeyError, TypeError, ValueError, RuntimeError):
+                    reason = 'Model learning settings or their required approval are unavailable'
                 else:
-                    try:
-                        approval = require_model_approval(config, name=name)
-                    except (OSError, KeyError, TypeError, ValueError, RuntimeError):
-                        reason = 'Model learning settings or their required approval are unavailable'
-                    else:
-                        reason = ('Approved datasets, fixtures, or harness settings changed; re-enable learning'
-                                  if not approval_still_current(config, approval, name=name)
-                                  else 'Required harness model settings are incomplete')
+                    if not current_approval:
+                        reason = 'Approved datasets, fixtures, or harness settings changed; re-enable learning'
+            if reason is not None:
                 state, action = 'blocked', 'review_learning_configuration'
             elif not unique_batch(selected):
                 state, action = 'insufficient_evidence', 'collect_independent_evidence'

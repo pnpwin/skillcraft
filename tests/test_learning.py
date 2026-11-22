@@ -161,6 +161,43 @@ class LearningTest(unittest.TestCase):
             self.assertIn('evidence_groups', summary)
         model.assert_not_called()
 
+    def test_preview_reports_missing_prerequisites_for_explicit_skills(self):
+        options = self.configuration['skills']['demo']
+        for removed, reason in (
+            (('train', 'holdout'), 'Capture only until train and holdout data are configured'),
+            (('harnesses',), 'Required harness model settings are incomplete'),
+        ):
+            with self.subTest(removed=removed):
+                self.configuration['skills']['demo'] = {k: v for k, v in options.items() if k not in removed}
+                write_json(self.project / learning.CONFIG, self.configuration)
+                self.config = learning.config_for(self.project, enrolling=True)
+                self.enable()
+                if removed == ('train', 'holdout'):
+                    with learning.connection(self.config) as db:
+                        for i in range(3):
+                            learning.record(db, f'capture-{i}', 'demo', tree_hash(self.source), 'session',
+                                            'codex', 's', str(i), f'case-{i}', None, 'success', 'Verified')
+                preview = learning.learning_view(self.config)['preview'][0]
+                self.assertEqual(preview['evidence_count'], 3)
+                self.assertEqual(preview['state'], 'blocked')
+                self.assertEqual(preview['reason'], reason)
+                self.assertEqual(preview['next_action'], 'review_learning_configuration')
+
+    def test_preview_reports_stale_approval_for_explicit_skills(self):
+        self.enable()
+        self.pending_model_evidence()
+        self.assertEqual(learning.learning_view(self.config)['preview'][0]['state'], 'queued')
+        write_json(self.project / 'train.json', {'evals': [{
+            'id': 'changed', 'prompt': 'Changed training data', 'expectations': ['Stable date'],
+        }]})
+        output = StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(learning.main(['status', str(self.project)]), 0)
+        preview = json.loads(output.getvalue())['next_actions'][0]
+        self.assertEqual(preview['state'], 'blocked')
+        self.assertIn('re-enable learning', preview['reason'])
+        self.assertEqual(preview['next_action'], 'review_learning_configuration')
+
     def test_changed_dataset_blocks_model_until_owner_reenables(self):
         self.enable()
         self.pending_model_evidence()
