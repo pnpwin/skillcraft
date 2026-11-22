@@ -9,10 +9,12 @@ comparisons and trigger diagnostics.
 
 ## Run a prompt comparison
 
-Provide two different, nonempty UTF-8 files and a new workspace:
+From your project, provide two different, nonempty UTF-8 files and a new
+workspace. Use the installed skill directory and evaluation environment from the
+[configuration reference](configuration.md).
 
 ```sh
-python plugins/skillcraft/skills/skillcraft/scripts/run_quality_eval.py \
+"$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/run_quality_eval.py" \
   --instruction-a evals/instructions/current.md \
   --instruction-b evals/instructions/revised.md \
   --evals evals/tasks.json \
@@ -42,8 +44,8 @@ The usual `pilot/` gate runs each arm once before repeated runs. Pilot measureme
 are preparation costs and do not enter the comparison. In `benchmark.json`, inspect
 `run_summary.prompt_a` and `run_summary.prompt_b` for per-arm quality, time and
 token summaries, and `deltas.prompt_b_minus_a` for matched differences (B minus A).
-Quality is paired only when both runs completed, both grading pipelines completed,
-and their grading signatures match. Executor task FAIL verdicts still count when
+Quality is paired only when both runs and grading pipelines completed and the
+grading contracts are known and match. Executor task FAIL verdicts still count when
 grading completed. Incomplete or missing sides appear under
 `incomplete_pairs` with reasons and remain in the planned-run denominator; they do
 not contribute to paired quality, time or token deltas. Unknown telemetry remains

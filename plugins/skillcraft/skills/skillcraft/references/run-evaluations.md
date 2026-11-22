@@ -22,11 +22,14 @@ review section for a worked policy and its limits.
 Choose explicit executor and judge models available in the selected harness. For a
 new skill compare `without_skill` against `with_skill`; for revisions also pass
 `--previous` pointing to the saved prior skill directory.
+Set `HARNESS` to `codex`, `opencode`, or `hermes` to run these commands from a
+terminal. Natural-trigger evaluation and description optimization use `codex`
+or `opencode`.
 
 ```sh
 "$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/run_quality_eval.py" \
   --skill "$CANDIDATE" --evals "$QUALITY_EVALS" --workspace "$ITERATION" \
-  --model "$EXECUTOR_MODEL" --judge-model "$JUDGE_MODEL" --repeats 3 --workers 2
+  --harness "$HARNESS" --model "$EXECUTOR_MODEL" --judge-model "$JUDGE_MODEL" --repeats 3 --workers 2
 ```
 
 For Hermes, use `--model openai-codex:MODEL` and a rubric covered entirely by
@@ -104,7 +107,7 @@ and a `group` shared by paraphrases/near-duplicates.
 ```sh
 "$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/run_eval.py" \
   --skill "$CANDIDATE" --evals "$TRIGGER_EVALS" --workspace "$TRIGGER_RUN" \
-  --model "$EXECUTOR_MODEL" --repeats 3 --workers 2
+  --harness "$HARNESS" --model "$EXECUTOR_MODEL" --repeats 3 --workers 2
 ```
 
 The prompt must not instruct the model to load the candidate or disclose its ID.
@@ -135,7 +138,7 @@ human approval. The normal optimizer below accepts only standard-valid candidate
 ```sh
 "$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/run_loop.py" \
   --skill "$CANDIDATE" --evals "$TRIGGER_EVALS" --workspace "$OPTIMIZATION" \
-  --model "$EXECUTOR_MODEL" --optimizer-model "$OPTIMIZER_MODEL" \
+  --harness "$HARNESS" --model "$EXECUTOR_MODEL" --optimizer-model "$OPTIMIZER_MODEL" \
   --quality-evals "$QUALITY_EVALS" --judge-model "$JUDGE_MODEL" --iterations 3
 ```
 
