@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import stat
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -87,6 +88,31 @@ class LearningRetryTest(unittest.TestCase):
             arm: {'excluded_pairs': [], 'paired_pass_rate': {'n': 2 * repeats}}
             for arm in ('previous_skill', 'without_skill')
         }}
+
+    def test_read_only_source_reaches_quality_check_with_modes_preserved(self):
+        original = self.markdown.read_bytes()
+        self.markdown.chmod(0o444)
+        self.configuration['skills']['demo']['auto_apply'] = False
+        self.seed()
+
+        def check_quality(candidate, evals, workspace, model, *, repeats, previous, **kwargs):
+            updated = candidate / 'SKILL.md'
+            self.assertEqual(updated.read_bytes(), original.replace(b'Old behavior.', b'Preserve the supplied date.'))
+            self.assertEqual((previous / 'SKILL.md').read_bytes(), original)
+            for path in (self.markdown, previous / 'SKILL.md', updated):
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o444)
+            return self.quality(candidate, evals, workspace, model, repeats=repeats, previous=previous, **kwargs)
+
+        with (patch.object(learning_worker, 'run_model', side_effect=self.proposal),
+              patch.object(learning_worker, 'run_quality', side_effect=check_quality) as quality):
+            learning_worker.work(self.config)
+
+        with learning.connection(self.config) as db:
+            statuses = [row['status'] for row in db.execute('SELECT status FROM revisions')]
+        self.assertEqual(statuses, ['qualified'])
+        quality.assert_called_once()
+        self.assertEqual(self.markdown.read_bytes(), original)
+        self.assertEqual(stat.S_IMODE(self.markdown.stat().st_mode), 0o444)
 
     def test_timeout_keeps_evidence_and_suppresses_same_input_without_new_signal(self):
         self.seed()

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -247,7 +248,8 @@ def apply_replacements(original, candidate, proposal, patterns):
         if name in seen or len(edit['content'].encode()) > 64000:
             raise ValueError('Duplicate or oversized file replacement')
         seen.add(name)
-        old = path.read_text(encoding='utf-8') if path.exists() else ''
+        mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else None
+        old = path.read_text(encoding='utf-8') if mode is not None else ''
         new = edit['content']
         old_lines, new_lines = old.splitlines(keepends=True), new.splitlines(keepends=True)
         line_count += sum((i2-i1)+(j2-j1) for tag, i1, i2, j1, j2 in
@@ -256,7 +258,15 @@ def apply_replacements(original, candidate, proposal, patterns):
             raise ValueError('Candidate exceeded the small-patch line budget')
         diff.extend(unified_diff(old_lines, new_lines, fromfile=f'a/{name}', tofile=f'b/{name}'))
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(new, encoding='utf-8')
+        # The copy inherits snapshot modes. Open it for editing without changing its final mode.
+        read_only = mode is not None and not (mode & stat.S_IWUSR)
+        if read_only:
+            path.chmod(mode | stat.S_IWUSR)
+        try:
+            path.write_text(new, encoding='utf-8')
+        finally:
+            if read_only:
+                path.chmod(mode)
     if not diff:
         return None
     source_metadata, _ = frontmatter(original / 'SKILL.md', required=True)
