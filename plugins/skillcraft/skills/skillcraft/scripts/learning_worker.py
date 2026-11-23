@@ -62,6 +62,17 @@ def runner_environment(harness, settings):
                 os.environ[key] = value
 
 
+def approved_codex_binary(config, binary_path, *, skill_name=None):
+    configured = str(Path(binary_path).expanduser().absolute())
+    skill_approval = (config.get('approval') or {}).get(skill_name, {})
+    automation_approval = config.get('automation_inputs') or {}
+    approved = next((record for record in (skill_approval.get('binary'), automation_approval.get('binary'))
+                     if isinstance(record, dict) and record.get('configured_path') == configured), None)
+    if approved is None:
+        raise ValueError('Explicit Codex executable requires owner approval; re-enable learning')
+    return approved
+
+
 @contextmanager
 def approved_runner(config, harness, settings, *, skill_name=None):
     if harness != 'codex' or 'binary' not in settings:
@@ -69,13 +80,7 @@ def approved_runner(config, harness, settings, *, skill_name=None):
             yield
         return
 
-    configured = str(Path(settings['binary']).expanduser().absolute())
-    skill_approval = (config.get('approval') or {}).get(skill_name, {})
-    automation_approval = config.get('automation_inputs') or {}
-    approved = next((record for record in (skill_approval.get('binary'), automation_approval.get('binary'))
-                     if isinstance(record, dict) and record.get('configured_path') == configured), None)
-    if approved is None:
-        raise ValueError('Explicit Codex executable requires scope approval')
+    approved = approved_codex_binary(config, settings['binary'], skill_name=skill_name)
     with tempfile.TemporaryDirectory(prefix='skillcraft-approved-runner-') as temporary:
         binary = stage_binary(approved, Path(temporary) / 'codex')
         with runner_environment(harness, {**settings, 'binary': str(binary)}):
@@ -226,11 +231,7 @@ def configured_runs(config, name, settings, source, attempt, approved, runtime_d
     write_json(evals, {'evals': rows})
     codex = options.get('codex', {})
     if 'binary' in codex:
-        approved_binary = approved.get(name, {}).get('binary')
-        if session_inputs is not None and approved_binary is None:
-            approved_binary = (config.get('automation_inputs') or {}).get('binary')
-        if not isinstance(approved_binary, dict):
-            raise ValueError('Explicit Codex binary requires owner approval; re-enable learning')
+        approved_binary = approved_codex_binary(config, codex['binary'], skill_name=name)
         launch_path = stage_binary(approved_binary, Path(runtime_dir) / 'codex')
         codex['binary'] = str(launch_path)
     repeats, timeout = settings.get('repeats', 3), settings.get('timeout', 180)
@@ -776,8 +777,7 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
         runtime_overrides = {}
         for key, env in RUNNER_ENV[optimizer].items():
             if optimizer == 'codex' and key == 'binary' and key in configured_optimizer:
-                runtime_overrides[env] = (approved.get(name, {}).get('binary') or
-                                          (config.get('automation_inputs') or {}).get('binary'))
+                runtime_overrides[env] = approved_codex_binary(config, configured_optimizer['binary'], skill_name=name)
             else:
                 runtime_overrides[env] = optimizer_settings.get(key, os.environ.get(env))
         if optimizer == 'hermes':

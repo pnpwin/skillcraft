@@ -735,6 +735,34 @@ class LearningTest(unittest.TestCase):
         learning_worker.rollback_revision(self.config, revision['id'])
         self.assertEqual(tree_hash(self.source), before)
 
+    def test_scheduled_revision_uses_automation_binary_with_explicit_datasets(self):
+        binary = self.home / 'bin' / 'codex'
+        binary.parent.mkdir(parents=True)
+        approved_bytes = b'\x7fELF synthetic codex bytes'
+        binary.write_bytes(approved_bytes)
+        binary.chmod(0o700)
+        self.configuration['skills']['demo'].pop('harnesses')
+        self.configuration['automation'] = {
+            'improve': True, 'harnesses': {'codex': {'model': 'gpt-test', 'binary': str(binary)}},
+        }
+        write_json(self.project / learning.CONFIG, self.configuration)
+        self.config = learning.config_for(self.project, enrolling=True)
+        self.seed_worker()
+        self.assertNotIn('binary', self.config['approval']['demo'])
+        self.assertEqual(str(binary), self.config['automation_inputs']['binary']['configured_path'])
+
+        def optimizer(_prompt, output, _model, **_kwargs):
+            staged = Path(os.environ['SKILLCRAFT_CODEX'])
+            self.assertNotEqual(binary, staged)
+            self.assertEqual(approved_bytes, staged.read_bytes())
+            write_json(output / 'response.txt', {'rationale': 'No further change', 'changes': []})
+            return {'status': 'completed'}
+
+        with patch.object(learning_worker, 'run_model', side_effect=optimizer) as run_model:
+            report = learning_worker.work(self.config)
+        self.assertEqual('no_change', report['items'][0]['result']['status'], report['items'])
+        run_model.assert_called_once()
+
     def test_interrupted_scheduled_revision_does_not_block_future_batches(self):
         from scripts.learning_batch import due, run_batch
 
