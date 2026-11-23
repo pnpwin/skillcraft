@@ -20,9 +20,19 @@ LOG = logging.getLogger(__name__)
 
 
 def run_learning(home, verb, *args, payload=None, interactive=False):
-    # The CLI owns its imports and SQLite state outside the gateway process.
-    # Hermes may add the managed dependency environment to sys.path only.
-    env = {**os.environ, 'PYTHONPATH': str(Path(yaml.__file__).resolve().parents[1])}
+    # Hermes can load its managed PyYAML outside the interpreter's normal site
+    # directories. Pass only trusted package roots without inherited Python paths.
+    # Descendant workers use `python -m scripts.hermes_runner`; safe-path mode
+    # deliberately excludes their working directory from module discovery.
+    env = {key: value for key, value in os.environ.items() if not key.startswith('PYTHON')}
+    env.update(PYTHONPATH=os.pathsep.join((str(SCRIPT.parent.parent),
+                                         str(Path(yaml.__file__).resolve().parents[1]))),
+               PYTHONNOUSERSITE='1', PYTHONSAFEPATH='1')
+    env.setdefault('HERMES_HOME', str(home.resolve()))
+    env.setdefault('SKILLCRAFT_HERMES_PYTHON', sys.executable)
+    launcher = Path(sys.executable).with_name('hermes')
+    if launcher.is_file():
+        env.setdefault('SKILLCRAFT_HERMES_BIN', str(launcher))
     command = [sys.executable, '-B', str(SCRIPT), '--hermes-home', str(home.resolve()), verb, *args]
     try:
         if interactive:
@@ -68,6 +78,7 @@ class Turn:
     inventory: dict
     auto_import: bool
     loaded: dict = field(default_factory=dict)
+    tool_events: dict = field(default_factory=dict)
     model_steps: set = field(default_factory=set)
     finished: bool = False
 
@@ -87,13 +98,17 @@ class Learning:
             return None
         return (self.get_home().resolve(), session_id)
 
-    def record(self, key, turn_id, project, role, text, *, loaded=(), target=None, uid=None, model_steps=0):
-        return run_learning(key[0], 'observe', payload={
+    def record(self, key, turn_id, project, role, text, *, loaded=(), target=None, uid=None,
+               model_steps=0, tool_events=()):
+        payload = {
             'harness': 'hermes', 'session': key[1], 'turn': turn_id,
             'project': str(project), 'role': role, 'text': text,
             'target_turn': target, 'loaded': list(loaded), 'hermes_uid': uid,
             'defer_feedback': role == 'user', 'model_steps': model_steps,
-        })['inserted']
+        }
+        if role == 'assistant':
+            payload['tool_events'] = list(tool_events)
+        return run_learning(key[0], 'observe', payload=payload)['inserted']
 
     def start(self, *, session_id=None, turn_id=None, user_message=None,
               parent_session_id=None, conversation_history=None, **kwargs):
@@ -133,10 +148,27 @@ class Learning:
 
     def tool(self, *, session_id=None, turn_id=None, tool_name=None, args=None,
              result=None, status=None, **kwargs):
-        if tool_name != 'skill_view' or status != 'ok' or not isinstance(args, dict) or args.get('file_path'):
-            return
         key = self.key(session_id, turn_id)
         if not key:
+            return
+        tool = tool_name[:128] if isinstance(tool_name, str) and tool_name else 'tool'
+        native_id = kwargs.get('tool_call_id', kwargs.get('call_id'))
+        event_id = native_id if isinstance(native_id, str) and native_id else f'unknown:{tool}'
+        event_id = event_id[:256]
+        allowed_statuses = {'ok', 'error', 'unknown', 'timeout', 'denied', 'unavailable'}
+        outcome = status if isinstance(status, str) and status in allowed_statuses else 'unknown'
+        if not isinstance(native_id, str) or not native_id:
+            outcome = 'unknown'
+        with self.lock:
+            turn = self.sessions.get(key)
+            if turn and turn.id == turn_id and not turn.finished:
+                event = {'id': event_id, 'tool': tool, 'status': outcome}
+                previous = turn.tool_events.get(event_id)
+                if previous and previous != event:
+                    turn.tool_events[event_id] = {'id': event_id, 'tool': 'tool', 'status': 'unknown'}
+                else:
+                    turn.tool_events[event_id] = event
+        if tool_name != 'skill_view' or status != 'ok' or not isinstance(args, dict) or args.get('file_path'):
             return
         try:
             view = json.loads(result) if isinstance(result, str) else result
@@ -189,7 +221,8 @@ class Learning:
                 turn.finished = self.record(key, turn.id, turn.project, 'assistant', assistant_response,
                                             loaded=turn.loaded.values(),
                                             uid=uid if isinstance(uid, str) and uid else None,
-                                            model_steps=len(turn.model_steps))
+                                            model_steps=len(turn.model_steps),
+                                            tool_events=turn.tool_events.values())
             except (OSError, RuntimeError, ValueError, KeyError):
                 LOG.debug('Could not record the Hermes reply in SkillCraft', exc_info=True)
                 return

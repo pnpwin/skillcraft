@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Conservatively observe Codex hook messages for opt-in SkillCraft learning."""
 
+import fcntl
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import subprocess
@@ -79,7 +81,7 @@ def observe(python, script, payload):
         return False
 
 
-def enabled(project):
+def enabled(project, *, automation=False):
     directory = Path(project).resolve()
     for root in (directory, *directory.parents):
         path = root / '.skillcraft/learning.json'
@@ -92,7 +94,9 @@ def enabled(project):
         except (OSError, ValueError):
             return False
         sources = config.get('sources', ['sessions', 'evals']) if isinstance(config, dict) else []
-        return isinstance(config, dict) and config.get('schema_version') == 1 and config.get('enabled') is True and isinstance(sources, list) and 'sessions' in sources
+        return (isinstance(config, dict) and config.get('schema_version') == 1
+                and config.get('enabled') is True and isinstance(sources, list) and 'sessions' in sources
+                and (not automation or isinstance(config.get('automation'), dict)))
     return False
 
 
@@ -171,6 +175,111 @@ def confirmed_reads(path, session, turn, versions):
         except (AttributeError, KeyError, OSError, TypeError, ValueError):
             continue
     return list(matches.values())
+
+
+def tool_state_path(state_path, turn):
+    key = hashlib.sha256(turn.encode()).hexdigest()
+    return state_path.with_name(f'{state_path.stem}.{key}.tools.json')
+
+
+def post_tool_use(event, state_path, turn, state):
+    if not state_path or state.get('pending_turn') != turn:
+        return
+    tool, identity = event.get('tool_name'), event.get('tool_use_id')
+    if (not isinstance(tool, str) or not re.fullmatch(r'[a-zA-Z0-9_.:-]{1,96}', tool)
+            or not isinstance(identity, str) or not 0 < len(identity) <= 256):
+        return
+    result = event.get('tool_response')
+    status = 'unknown'
+    if isinstance(result, dict):
+        if result.get('isError') is True:
+            status = 'error'
+        elif type(result.get('exit_code')) is int and tool == 'Bash':
+            status = 'ok' if result['exit_code'] == 0 else 'error'
+    path = tool_state_path(state_path, turn)
+    lock_path = path.with_suffix('.lock')
+    try:
+        with lock_path.open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            data = read_state(path)
+            if read_state(state_path).get('pending_turn') == turn and len(data) < 128:
+                data.setdefault(identity, {'id': identity, 'tool': tool, 'status': status})
+                write_state(path, data)
+    except OSError:
+        pass
+
+
+def discard_tool_state(state_path, turn):
+    if state_path and isinstance(turn, str):
+        path = tool_state_path(state_path, turn)
+        try:
+            path.unlink(missing_ok=True)
+            path.with_suffix('.lock').unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def completed_tool_events(path, session, turn):
+    """Return minimal native tool outcomes for exactly one completed Codex turn."""
+    if not isinstance(path, str):
+        return []
+    try:
+        transcript = Path(path)
+        if not transcript.is_file():
+            return []
+        with transcript.open('rb') as stream:
+            size = stream.seek(0, os.SEEK_END)
+            if size > 8 * 1024 * 1024:
+                stream.seek(-8 * 1024 * 1024, os.SEEK_END)
+                stream.readline()
+            else:
+                stream.seek(0)
+            lines = stream.read(8 * 1024 * 1024).splitlines()
+    except OSError:
+        return []
+
+    statuses = {'ok', 'error', 'unknown', 'timeout', 'denied', 'unavailable'}
+    events = {}
+    for row_index, line in enumerate(lines):
+        try:
+            row = json.loads(line)
+            payload = row.get('payload', {})
+            if (row.get('type') != 'event_msg' or payload.get('type') != 'item_completed'
+                    or payload.get('thread_id') != session or payload.get('turn_id') != turn):
+                continue
+            item = payload.get('item')
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get('type')
+            if item_type not in {'CommandExecution', 'McpToolCall', 'ToolCall', 'DynamicToolCall'}:
+                continue
+            tool = {'CommandExecution': 'command', 'McpToolCall': 'mcp'}.get(item_type, 'tool')
+            native_id = item.get('id')
+            event_id = (native_id if isinstance(native_id, str) and native_id else f'unknown-{row_index}')[:256]
+            native_status = item.get('status')
+            status_name = native_status if isinstance(native_status, str) else ''
+            status = status_name if status_name in statuses else 'unknown'
+            if status == 'unknown' and status_name in {'failed', 'failure'}:
+                status = 'error'
+            elif status == 'unknown' and status_name in {'timed_out', 'timeout'}:
+                status = 'timeout'
+            elif status == 'unknown' and status_name in {'rejected', 'denied'}:
+                status = 'denied'
+            elif status == 'unknown' and status_name in {'not_available', 'unavailable'}:
+                status = 'unavailable'
+            # A zero exit code is not a success signal. A nonzero native exit
+            # code is an explicit failure outcome when no status says otherwise.
+            if status == 'unknown' and type(item.get('exit_code')) is int and item['exit_code'] != 0:
+                status = 'error'
+            event = {'id': event_id, 'tool': tool, 'status': status}
+            previous = events.get(event_id)
+            if previous and previous != event:
+                events[event_id] = {'id': event_id, 'tool': 'tool', 'status': 'unknown'}
+            else:
+                events[event_id] = event
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+    return list(events.values())
 
 
 def completed_model_steps(path, session, turn):
@@ -286,13 +395,16 @@ def main():
     event_name = event.get('hook_event_name')
     if not script.is_file() or not isinstance(project, str) or not isinstance(session, str) or not isinstance(turn, str):
         return 0
-    if not enabled(project):
+    if not enabled(project, automation=event_name == 'PostToolUse'):
         return 0
     data_root = os.environ.get('PLUGIN_DATA')
     data_dir = Path(data_root).resolve() if data_root else None
     session_key = hashlib.sha256(session.encode()).hexdigest()
     state_path = data_dir / 'learning-capture' / f'{session_key}.json' if data_dir else None
     state = read_state(state_path) if state_path else {}
+    if event_name == 'PostToolUse':
+        post_tool_use(event, state_path, turn, state)
+        return 0
     if event_name == 'PostModelRequest':
         if state_path:
             completed_model_request(event, project, session, turn, state_path, state)
@@ -327,6 +439,7 @@ def main():
             'defer_feedback': True,
         })
         if accepted and state_path:
+            discard_tool_state(state_path, state.get('pending_turn'))
             recent_turns = [item for item in prompt_turns if isinstance(item, str)] + [turn]
             write_state(state_path, {
                 **state,
@@ -345,6 +458,13 @@ def main():
             return 0
         unchanged = [version for version in versions if version in state.get('versions', [])]
         loaded = confirmed_reads(event.get('transcript_path'), session, turn, unchanged)
+        tool_events = {}
+        if enabled(project, automation=True):
+            tool_events = {item['id']: item for item in completed_tool_events(event.get('transcript_path'), session, turn)}
+            if state_path:
+                for identity, item in read_state(tool_state_path(state_path, turn)).items():
+                    if isinstance(item, dict) and (item.get('status') != 'unknown' or identity not in tool_events):
+                        tool_events[identity] = item
         model_requests = state.get('completed_model_requests', {})
         model_requests = model_requests.get(turn, []) if isinstance(model_requests, dict) else []
         model_steps = len({item for item in model_requests if isinstance(item, str)}) if isinstance(model_requests, list) else 0
@@ -358,6 +478,7 @@ def main():
             'role': 'assistant',
             'text': text,
             'loaded': loaded,
+            'tool_events': list(tool_events.values()),
             'diagnostic': diagnostic if not loaded else None,
             **({'model_steps': model_steps} if model_steps is not None else {}),
         })
@@ -369,6 +490,7 @@ def main():
                 'last_assistant_turn': turn,
                 'prompt_turns': prompt_turns,
             })
+            discard_tool_state(state_path, turn)
     return 0
 
 

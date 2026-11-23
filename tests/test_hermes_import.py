@@ -71,8 +71,7 @@ class HermesImportTest(unittest.TestCase):
             self.assertEqual(db.execute('SELECT COUNT(*) FROM messages').fetchone()[0], 0)
             with patch.object(learning_worker, 'revise', return_value={'status': 'blocked'}) as revise:
                 learning_worker.drain(self.target, db)
-            revise.assert_called_once()
-            self.assertEqual([x['id'] for x in revise.call_args.args[5]], [1, 2, 3])
+            revise.assert_not_called()
             db.execute('UPDATE evidence SET consumed=1 WHERE id=1')
 
         copied_profile = self.profile.with_name('copied Hermes profile')

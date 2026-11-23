@@ -95,6 +95,21 @@ class LearningPromotion(unittest.TestCase):
             self.assertEqual(_tree_hash(Path(restored['backup'])), candidate_hash)
             self.assertEqual(stat.S_IMODE((source / 'SKILL.md').stat().st_mode), source_mode)
 
+    def test_exchange_and_rollback_do_not_leave_duplicate_skills_in_catalog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            skills = root / 'project/.agents/skills'
+            source = self.make_tree(skills / 'demo', {'SKILL.md': b'old'})
+            candidate = self.make_tree(root / 'candidate', {'SKILL.md': b'new'})
+            state = root / 'state'
+            before = _tree_hash(source)
+            record = promote(source, candidate, before, state)
+            self.assertEqual([source / 'SKILL.md'], list(skills.rglob('SKILL.md')))
+            self.assertTrue(learning_promotion.recover_exchange(source, record, state))
+            rollback(source, record, state)
+            self.assertEqual(before, _tree_hash(source))
+            self.assertEqual([source / 'SKILL.md'], list(skills.rglob('SKILL.md')))
+
     def test_bad_hash_and_symlink_leave_live_tree_untouched(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -170,7 +185,7 @@ class LearningPromotion(unittest.TestCase):
 
             def edit_during_staging(path, destination):
                 result = original_snapshot(path, destination)
-                if destination.parent == root:
+                if destination.name.startswith('.source.promotion-'):
                     (source / 'SKILL.md').write_bytes(b'live edit')
                 return result
 

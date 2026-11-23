@@ -5,6 +5,7 @@ from io import StringIO
 import os
 import shutil
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -80,6 +81,36 @@ class LearningTest(unittest.TestCase):
         write_json(self.project / learning.CONFIG, self.configuration)
         self.assertFalse(self.message('s', 'changed', 'user'))
 
+    def test_legacy_enrollment_cannot_activate_dormant_automation(self):
+        self.configuration['selection'] = 'all'
+        self.configuration['automation'] = {'create': True, 'harnesses': {'codex': {'model': 'test'}}}
+        write_json(self.project / learning.CONFIG, self.configuration)
+        self.config = learning.config_for(self.project, enrolling=True)
+        legacy = learning.approval_record(self.config)
+        legacy.pop('automation')
+        write_json(self.config['state'] / 'enabled', legacy)
+        self.config = learning.config_for(self.project)
+        self.assertTrue(self.message('s', 't', 'user', 'Synthetic evidence'))
+
+        with (patch('scripts.learning_batch.run_batch', return_value={'status': 'started'}) as batch,
+              patch.object(learning_worker, 'run_model') as model):
+            report = learning_worker.work(self.config)
+        batch.assert_not_called()
+        model.assert_not_called()
+        self.assertEqual('approval_required', report['status'])
+
+        stream = StringIO()
+        with redirect_stdout(stream):
+            self.assertEqual(0, learning.main(['status', str(self.project)]))
+        self.assertEqual('approval_required', json.loads(stream.getvalue())['automation']['status'])
+
+        with redirect_stdout(StringIO()):
+            self.assertEqual(0, learning.main(['enable', str(self.project)]))
+        self.config = learning.config_for(self.project)
+        with patch('scripts.learning_batch.run_batch', return_value={'status': 'started'}) as batch:
+            self.assertEqual('started', learning_worker.work(self.config)['status'])
+        batch.assert_called_once()
+
     def test_both_harnesses_attribute_corrections_to_loaded_revision(self):
         self.enable()
         for session, harness, text in [('a', 'codex', 'Проверил, всё работает'),
@@ -94,12 +125,16 @@ class LearningTest(unittest.TestCase):
         self.assertEqual([row['kind'] for row in rows], ['success', 'failure', 'correction'])
         self.assertEqual([row['harness'] for row in rows], ['codex', 'opencode', 'opencode'])
         self.assertTrue(all(row['turn'] == 'old' and row['version'] == tree_hash(self.source) for row in rows))
-        self.assertTrue(learning_worker.unique_batch(rows))
+        self.assertFalse(learning_worker.unique_batch(rows))
 
     def test_redacts_credentials_and_ignores_questions(self):
         self.assertIsNone(learning.classify('Всё работает?'))
         self.assertEqual(learning.classify('Подтверждаю, что не работает'), 'failure')
         self.assertNotIn('sk-abcdefghijk', learning.sanitize('token: sk-abcdefghijk'))
+        self.assertNotIn('github_pat_', learning.sanitize('github_pat_abcdefghijk1234567890'))
+        self.assertNotIn('synthetic-password', learning.sanitize(
+            'postgresql://alice:synthetic-password@localhost/db'))
+        self.assertNotIn('secret', learning.sanitize('https://user:secret@example.test/path'))
 
     def test_preview_groups_evidence_by_version_and_independent_case_without_notes(self):
         self.enable()
@@ -122,9 +157,8 @@ class LearningTest(unittest.TestCase):
         self.assertEqual(view['preview'][0]['next_action'], 'collect_independent_evidence')
         self.assertNotIn('Private transcript', json.dumps(view))
         with learning.connection(self.config) as db:
-            for i in (2, 3):
-                learning.record(db, f'new-{i}', 'demo', version, 'feedback', 'codex', 's',
-                                't', f'case-new-{i}', f'train-{i}', 'failure', 'Observed failure')
+            learning.record(db, 'verified-defect', 'demo', version, 'tool_check', 'codex', 's',
+                            't', 'case-new', 'train-2', 'failure', 'Reproduced defect', True)
         self.assertEqual(learning.learning_view(self.config)['preview'][0]['state'], 'waiting_for_checkpoint')
 
     def test_status_history_reports_only_redacted_metadata(self):
@@ -703,6 +737,180 @@ class LearningTest(unittest.TestCase):
         self.assertIn('Preserve the supplied date', self.markdown.read_text())
         learning_worker.rollback_revision(self.config, row['id'])
         self.assertEqual(self.markdown.read_text(), before)
+
+    def test_scheduled_revision_checks_catalog_before_finalizing_and_can_rollback(self):
+        self.configuration['automation'] = {'improve': True, 'auto_apply': True}
+        write_json(self.project / learning.CONFIG, self.configuration)
+        self.config = learning.config_for(self.project, enrolling=True)
+        self.seed_worker()
+        before = tree_hash(self.source)
+
+        def runtime_probe(_root, harness, _models):
+            return lambda path, **kwargs: {'harness': harness, 'path': str(path), 'hash': tree_hash(path)}
+
+        with (patch.object(learning_worker, 'run_model', side_effect=self.fake_proposal) as model,
+              patch.object(learning_worker, 'run_quality', side_effect=self.fake_quality),
+              patch('scripts.learning_candidates.native_catalog_probe', side_effect=runtime_probe),
+              patch('scripts.learning_candidates.render_quality_review', side_effect=lambda path: path / 'review.html')):
+            report = learning_worker.work(self.config)
+            self.assertEqual(report['candidate_count'], 1)
+            self.assertEqual(report['items'][0]['result']['status'], 'applied')
+            self.assertEqual(learning_worker.work(self.config)['status'], 'not_due')
+        model.assert_called_once()
+        with learning.connection(self.config) as db:
+            revision = db.execute("SELECT * FROM revisions WHERE status='applied'").fetchone()
+        report = json.loads((Path(revision['path']) / 'report.json').read_text())
+        self.assertTrue(report['catalogs']['codex']['verified'])
+        self.assertNotEqual(tree_hash(self.source), before)
+        learning_worker.rollback_revision(self.config, revision['id'])
+        self.assertEqual(tree_hash(self.source), before)
+
+    def test_scheduled_revision_uses_automation_binary_with_explicit_datasets(self):
+        binary = self.home / 'bin' / 'codex'
+        binary.parent.mkdir(parents=True)
+        approved_bytes = b'\x7fELF synthetic codex bytes'
+        binary.write_bytes(approved_bytes)
+        binary.chmod(0o700)
+        self.configuration['skills']['demo'].pop('harnesses')
+        self.configuration['automation'] = {
+            'improve': True, 'harnesses': {'codex': {'model': 'gpt-test', 'binary': str(binary)}},
+        }
+        write_json(self.project / learning.CONFIG, self.configuration)
+        self.config = learning.config_for(self.project, enrolling=True)
+        self.seed_worker()
+        self.assertNotIn('binary', self.config['approval']['demo'])
+        self.assertEqual(str(binary), self.config['automation_inputs']['binary']['configured_path'])
+
+        def optimizer(_prompt, output, _model, **_kwargs):
+            staged = Path(os.environ['SKILLCRAFT_CODEX'])
+            self.assertNotEqual(binary, staged)
+            self.assertEqual(approved_bytes, staged.read_bytes())
+            write_json(output / 'response.txt', {'rationale': 'No further change', 'changes': []})
+            return {'status': 'completed'}
+
+        with patch.object(learning_worker, 'run_model', side_effect=optimizer) as run_model:
+            report = learning_worker.work(self.config)
+        self.assertEqual('no_change', report['items'][0]['result']['status'], report['items'])
+        run_model.assert_called_once()
+
+    def test_scheduled_revision_preserves_owner_editable_patterns(self):
+        private = self.source / 'references' / 'policy.txt'
+        private.parent.mkdir()
+        private.write_text('Excluded local policy text')
+        self.configuration['skills']['demo']['editable'] = ['SKILL.md']
+        self.configuration['automation'] = {'improve': True, 'auto_apply': True}
+        write_json(self.project / learning.CONFIG, self.configuration)
+        self.config = learning.config_for(self.project, enrolling=True)
+        self.seed_worker()
+        original = tree_hash(self.source)
+        prompts = []
+
+        def optimizer(prompt, output, _model, **_kwargs):
+            prompts.append(prompt)
+            write_json(output / 'response.txt', {'rationale': 'Try to replace the excluded resource',
+                                                 'changes': [{'path': 'references/policy.txt', 'content': 'Replacement'}]})
+            return {'status': 'completed'}
+
+        with (patch.object(learning_worker, 'run_model', side_effect=optimizer) as model,
+              patch.object(learning_worker, 'run_quality') as quality):
+            report = learning_worker.work(self.config)
+        model.assert_called_once()
+        self.assertNotIn('Excluded local policy text', prompts[0])
+        quality.assert_not_called()
+        item = report['items'][0]['result']['candidate']
+        self.assertEqual('blocked', item['status'])
+        self.assertIn('unapproved path', json.loads(Path(item['report']).read_text())['reason'])
+        self.assertEqual(original, tree_hash(self.source))
+
+    def test_interrupted_scheduled_revision_does_not_block_future_batches(self):
+        from scripts.learning_batch import due, run_batch
+
+        self.configuration['automation'] = {'improve': True}
+        write_json(self.project / learning.CONFIG, self.configuration)
+        self.config = learning.config_for(self.project, enrolling=True)
+        self.seed_worker()
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        next_window = now + timedelta(days=7)
+        original = tree_hash(self.source)
+
+        with learning.connection(self.config) as db:
+            def update(name, settings, rows, batch_id):
+                return learning_worker.scheduled_candidate(self.config, db, name, settings, rows, batch_id)
+
+            with patch.object(learning_worker, 'revise', side_effect=KeyboardInterrupt) as revise:
+                with self.assertRaises(KeyboardInterrupt):
+                    run_batch(self.config, db, update=update, now=now)
+                self.assertTrue(due(db, self.config['automation'], now=now))
+                recovered = run_batch(self.config, db, update=update, now=now)
+                self.assertEqual('interrupted', recovered['status'])
+                result = recovered['items'][0]['result']
+                self.assertEqual('interrupted', result['status'])
+                self.assertTrue(result['candidate']['reason'])
+                self.assertEqual('interrupted', db.execute('SELECT status FROM revisions').fetchone()[0])
+                self.assertFalse(due(db, self.config['automation'], now=now))
+                revise.assert_called_once()
+
+            learning.record(db, 'new-evidence', 'demo', original, 'feedback', 'codex', 's', 't3',
+                            'case:fail-new', 'fail', 'correction', 'Retain the date again.', True)
+            db.commit()
+            with patch.object(learning_worker, 'revise', return_value={'status': 'no_change'}) as revise:
+                report = run_batch(self.config, db, update=update, now=next_window)
+            self.assertNotEqual(recovered['batch_id'], report['batch_id'])
+            self.assertEqual('done', report['status'])
+            self.assertEqual('no_change', report['items'][0]['result']['status'])
+            revise.assert_called_once()
+        self.assertEqual(original, tree_hash(self.source))
+
+    def test_worker_reloads_enrollment_before_the_next_batch_item(self):
+        self.configuration['selection'] = 'all'
+        self.configuration['automation'] = {'create': True, 'improve': True}
+        write_json(self.project / learning.CONFIG, self.configuration)
+        self.config = learning.config_for(self.project, enrolling=True)
+        self.enable()
+        with learning.connection(self.config) as db:
+            db.executemany(
+                "INSERT INTO observations(witness,harness,session,turn,kind,topic,independent,excerpt,details) "
+                "VALUES(?,'codex','session',?,'success',?,?,?,?)",
+                [(topic, topic, topic, topic, 'Confirmed output', '{"check":{"file":"result.txt"}}')
+                 for topic in ('new-topic', 'other-topic')],
+            )
+            db.commit()
+
+        def withdraw_after_first(_config, _db, name, _settings, _rows, _batch_id):
+            self.assertEqual('new-topic', name)
+            self.configuration['automation']['create'] = False
+            write_json(self.project / learning.CONFIG, self.configuration)
+            write_json(self.config['state'] / 'enabled', learning.approval_record(
+                learning.config_for(self.project, enrolling=True, trusted_internal=True)))
+            return {'status': 'staged'}
+
+        with patch.object(learning_worker, 'scheduled_candidate', side_effect=withdraw_after_first) as callback:
+            report = learning_worker.work(self.config)
+        callback.assert_called_once()
+        self.assertEqual(['staged', 'approval_changed'], [item['result']['status'] for item in report['items']])
+
+    def test_session_holdout_fixture_cannot_be_an_optimizer_resource(self):
+        settings = self.config['skills']['demo']
+        train = {'id': 'train', 'prompt': 'Training prompt'}
+        for directory in ('references', 'evals'):
+            with self.subTest(directory=directory):
+                relative = f'{directory}/heldout.txt'
+                fixture = self.source / relative
+                fixture.parent.mkdir()
+                fixture.write_text('Private holdout fixture')
+                holdout = {'id': 'holdout', 'prompt': 'Unseen prompt', 'files': [str(fixture)],
+                           'session_fixture_hashes': {fixture.name: digest(fixture)}}
+                args = (self.config, 'demo', settings, self.source, self.home / directory, {}, None)
+                if directory == 'references':
+                    with self.assertRaisesRegex(ValueError, 'Place holdout material outside'):
+                        learning_worker.configured_runs(*args, session_inputs=([train], [holdout]))
+                else:
+                    _, (_, frozen), _, _, _, _, excluded, _ = learning_worker.configured_runs(
+                        *args, session_inputs=([train], [holdout]))
+                    self.assertEqual({relative}, excluded)
+                    self.assertEqual(fixture.read_text(), Path(frozen[0]['files'][0]).read_text())
+                    files = learning_worker.selected_files(self.source, ['SKILL.md', 'evals/*'], excluded)
+                    self.assertEqual({'SKILL.md'}, files.keys())
 
     def test_changed_approval_blocks_activation(self):
         self.seed_worker()

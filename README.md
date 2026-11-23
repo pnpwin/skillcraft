@@ -117,7 +117,8 @@ show how these options affect quality A/B, description optimization, and Learnin
 | Author a skill or prompt | Invoke `skillcraft` with the intended outcome and examples. |
 | Run A/B on demand | Install evaluation dependencies, sign in to the selected runner, and choose the model, cases, and repeat count. See [runner settings](plugins/skillcraft/skills/skillcraft/references/configuration.md#runner-settings). |
 | Collect feedback | Create `.skillcraft/learning.json` using the example below and enroll the project. |
-| Automatically revise a skill | Add model settings and separate training and holdout cases. Set `auto_apply` only when passing candidates may update that source. See [Learning settings](plugins/skillcraft/skills/skillcraft/references/configuration.md#per-skill-settings). |
+| Create or improve skills in batches | Enable [scheduled Learning](plugins/skillcraft/skills/skillcraft/references/learning.md#scheduled-learning) for the project or home. |
+| Automatically revise a skill on new evidence | Add model settings and separate training and holdout cases. Set `auto_apply` only when passing candidates may update that source. See [Learning settings](plugins/skillcraft/skills/skillcraft/references/configuration.md#per-skill-settings). |
 
 This example enrolls a local skill for feedback collection. Replace `example-skill`
 with the directory name of a skill you want to track.
@@ -147,6 +148,19 @@ For Hermes capture, also enroll the selected Hermes profile with
 for approval, status, and optional Hermes feedback forwarding.
 
 ## Workflow
+
+In a chat, ask SkillCraft to create a skill from the relevant turns or improve an
+existing skill from a correction. It prepares a candidate with examples and
+checks. Ask to **check now** to run A/B and get a report, or **apply** to publish
+the staged candidate. See [session candidates](plugins/skillcraft/skills/skillcraft/references/learning.md#session-candidates).
+
+Scheduled Learning collects feedback in the enrolled project or home scope.
+Use `selection: "all"` to discover local skills without listing each skill.
+The default interval is seven days and the configurable limit is three
+candidates per project or home batch. One verifiable case can queue a draft.
+Automatic publication also needs an independent holdout case. The batch
+status includes a resource report for generation, A/B, judging and trigger
+checks. [Configuration and examples](plugins/skillcraft/skills/skillcraft/references/learning.md#scheduled-learning)
 
 ```text
 Install from Git → select a profile → open skillcraft
