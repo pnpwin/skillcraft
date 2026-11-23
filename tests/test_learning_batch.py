@@ -258,6 +258,52 @@ class LearningBatchTests(unittest.TestCase):
         self.assertNotIn("TASK-2", captured[0])
         apply.assert_not_called()
 
+    def test_false_trigger_keeps_quality_evidence_and_blocks_publication(self):
+        from scripts.learning_batch import create_candidate
+
+        self.config["automation"]["auto_apply"] = True
+        settings = {"harnesses": {"opencode": {"model": "provider/test"}}}
+        train = {"id": "train", "prompt": "Create a receipt for order 14."}
+        holdout = {"id": "holdout", "prompt": "Create a receipt for order 21."}
+        observations = [{"id": 1, "case_id": "train", "independent": "training",
+                         "kind": "success", "excerpt": "Verified receipt",
+                         "details": json.dumps({"prompt": train["prompt"]})}]
+        counts = {"tp": 1, "fp": 1, "tn": 0, "fn": 0, "valid": 2, "errors": 0}
+        quality = {"improved": [{"case_id": "holdout"}]}
+
+        def draft(_prompt, output, _model, **_kwargs):
+            output.mkdir()
+            (output / "response.txt").write_text(json.dumps({
+                "skill_md": "---\nname: receipt\ndescription: Create order receipts.\n---\n# Steps\n",
+            }), encoding="utf-8")
+            return {"status": "completed"}
+
+        def trigger(_skill, _evals, workspace, _model, **_kwargs):
+            workspace.mkdir()
+            (workspace / "report.html").write_text("<p>Trigger results</p>", encoding="utf-8")
+            return {"summary": {**counts, "controlled": True}}
+
+        with (patch("scripts.learning_observations.derived_cases", return_value=([train], [holdout])),
+              patch("scripts.runtime.run_model", side_effect=draft),
+              patch("scripts.learning_candidates.stage_candidate", return_value={
+                  "id": "draft", "candidate_path": "draft",
+              }),
+              patch("scripts.learning_candidates.verify_candidate", return_value={
+                  "trusted_pass": True, "candidate": {"verification": {"quality_evidence": quality}},
+              }),
+              patch("scripts.learning_candidates._check_matrix", return_value=(
+                  {("holdout", "receipt"): {"with_skill": [True]}}, None)),
+              patch("scripts.run_eval.run_eval", side_effect=trigger),
+              patch("scripts.learning_batch.publish_creation") as publish):
+            result = create_candidate(self.config, self.db, "receipt", settings, observations, 1)
+
+        self.assertEqual("blocked", result["status"])
+        self.assertEqual("failed", result["trigger_validation"])
+        self.assertEqual("opencode", result["trigger_harness"])
+        self.assertEqual(counts, result["trigger_counts"])
+        self.assertEqual(quality, result["verification_results"][0]["quality_evidence"])
+        publish.assert_not_called()
+
 
     def test_creation_rechecks_consent_after_the_optimizer(self):
         from scripts.learning_batch import create_candidate

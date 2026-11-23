@@ -21,9 +21,12 @@ LOG = logging.getLogger(__name__)
 
 def run_learning(home, verb, *args, payload=None, interactive=False):
     # Hermes can load its managed PyYAML outside the interpreter's normal site
-    # directories. Pass that dependency location without inherited Python paths.
+    # directories. Pass only trusted package roots without inherited Python paths.
+    # Descendant workers use `python -m scripts.hermes_runner`; safe-path mode
+    # deliberately excludes their working directory from module discovery.
     env = {key: value for key, value in os.environ.items() if not key.startswith('PYTHON')}
-    env.update(PYTHONPATH=str(Path(yaml.__file__).resolve().parents[1]),
+    env.update(PYTHONPATH=os.pathsep.join((str(SCRIPT.parent.parent),
+                                         str(Path(yaml.__file__).resolve().parents[1]))),
                PYTHONNOUSERSITE='1', PYTHONSAFEPATH='1')
     env.setdefault('HERMES_HOME', str(home.resolve()))
     env.setdefault('SKILLCRAFT_HERMES_PYTHON', sys.executable)

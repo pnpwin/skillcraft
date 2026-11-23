@@ -129,8 +129,19 @@ class HermesLearningTest(unittest.TestCase):
         dependency_root = str(Path(yaml.__file__).resolve().parents[1])
         self.assertEqual(2, launch.call_count)
         for call in launch.call_args_list:
-            self.assertEqual(dependency_root, call.kwargs['env']['PYTHONPATH'])
+            environment = call.kwargs['env']
+            self.assertEqual(environment['PYTHONPATH'].split(os.pathsep),
+                             [str(hermes_learning.SCRIPT.parent.parent), dependency_root])
+            self.assertEqual(environment['PYTHONSAFEPATH'], '1')
             self.assertNotIn('PYTHONHOME', call.kwargs['env'])
+        # Exercise the same module import from an unrelated cwd with the actual
+        # sanitized environment inherited by a model-runner subprocess.
+        result = subprocess.run([str(bare / 'bin/python'), '-B', '-c',
+                                 'import scripts.hermes_runner; print(scripts.hermes_runner.__file__)'],
+                                cwd=self.project, env=environment, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(Path(result.stdout.strip()),
+                         hermes_learning.SCRIPT.parent / 'hermes_runner.py')
 
     def test_hermes_normalized_skill_read_preserves_raw_version(self):
         self.markdown.write_bytes(b'\xef\xbb\xbf' + self.content.replace('\n', '\r\n').encode())

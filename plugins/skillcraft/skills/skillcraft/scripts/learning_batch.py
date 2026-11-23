@@ -490,7 +490,12 @@ def create_candidate(config, db, name, settings, observations, batch_id):
         if (not summary.get("controlled") or summary.get("errors") or
                 summary.get("tp", 0) < 1 or summary.get("tn", 0) < 1 or
                 not (trigger_workspace / "report.html").is_file()):
+            counts = {key: summary[key] for key in ("tp", "fp", "tn", "fn", "valid", "errors")
+                      if key in summary}
             return {"status": "blocked", "candidate": candidate,
+                    "verification_results": verification_results,
+                    "trigger_validation": "failed", "trigger_harness": eval_harness,
+                    "trigger_counts": counts,
                     "trigger_report": str(trigger_workspace / "report.html"),
                     "reason": f"Native {eval_harness} trigger positive/negative gate failed"}
         trigger_reports[eval_harness] = str(trigger_workspace / "report.html")
