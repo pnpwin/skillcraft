@@ -141,29 +141,11 @@ def batch_status(config, db):
     }
 
 
-@contextmanager
-def approved_runner(config, harness, settings):
-    from scripts.learning_worker import runner_environment
-
-    if harness != 'codex' or 'binary' not in settings:
-        with runner_environment(harness, settings):
-            yield
-        return
-    from scripts.approved_binary import stage
-
-    approved = (config.get('automation_inputs') or {}).get('binary')
-    if not isinstance(approved, dict):
-        raise ValueError('Explicit Codex executable requires scope approval')
-    with tempfile.TemporaryDirectory(prefix='skillcraft-batch-runtime-') as temporary:
-        binary = stage(approved, Path(temporary) / 'codex')
-        with runner_environment(harness, {**settings, 'binary': str(binary)}):
-            yield
-
-
 def publish_creation(config, candidate, harnesses, collision_roots):
     from scripts.learning import config_for
     from scripts.learning_automation import automation_approval
     from scripts.learning_candidates import apply_candidate, native_catalog_probe
+    from scripts.learning_worker import approved_runner
 
     current = config_for(config['root'], trusted_internal=True)
     if (not current or current['fingerprint'] != config['fingerprint']
@@ -233,7 +215,7 @@ def create_candidate(config, db, name, settings, observations, batch_id):
     from scripts.learning_candidates import load_candidate, stage_candidate, verify_candidate
     from scripts.learning import dataset_snapshot, local_path, sanitize
     from scripts.inputs import input_specs
-    from scripts.learning_worker import families
+    from scripts.learning_worker import approved_runner, families
     from scripts.runtime import run_model
     from scripts.utils import parse_frontmatter, parse_json_response, write_json
 

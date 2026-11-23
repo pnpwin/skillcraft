@@ -1,11 +1,12 @@
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts import learning, learning_observations, learning_promotion, learning_worker
+from scripts import approved_binary, learning, learning_observations, learning_promotion, learning_worker
 
 
 class ScheduledPublicationRecovery(unittest.TestCase):
@@ -195,6 +196,55 @@ class ScheduledPublicationRecovery(unittest.TestCase):
 
         self.assertEqual(report["status"], "blocked")
         self.assertEqual(learning_promotion._tree_hash(source), before_hash)
+
+    def test_scheduled_catalog_uses_approved_codex_snapshot(self):
+        for case in ('approved-per-skill', 'approved-automation', 'changed'):
+            with self.subTest(case=case):
+                root = self.root / case
+                source = root / 'skill'
+                source.mkdir(parents=True)
+                (source / 'SKILL.md').write_text('before')
+                before = learning_promotion._tree_hash(source)
+                candidate = root / 'candidate'
+                candidate.mkdir()
+                (candidate / 'SKILL.md').write_text('after')
+                after = learning_promotion._tree_hash(candidate)
+                state = root / 'state'
+                promotion = learning_promotion.promote(source, candidate, before, state)
+                attempt = root / 'attempt'
+                attempt.mkdir()
+                binary = root / 'codex'
+                enrolled_bytes = b'\x7fELF synthetic approved bytes'
+                binary.write_bytes(enrolled_bytes)
+                binary.chmod(0o700)
+                approved = {'binary': approved_binary.describe(binary)}
+                config = {'root': root, 'state': state, 'fingerprint': 'policy'}
+                if case == 'approved-automation':
+                    config['automation_inputs'] = approved
+                else:
+                    config['approval'] = {'example': approved}
+                if case == 'changed':
+                    binary.write_bytes(b'\x7fELF different synthetic bytes')
+                report = {'policy_hash': 'policy', 'promotion': promotion}
+                settings = {'harnesses': {'codex': {'model': 'unused', 'binary': str(binary)}}}
+
+                def catalog_probe(*_args):
+                    staged = Path(os.environ['SKILLCRAFT_CODEX'])
+                    self.assertNotEqual(staged, binary)
+                    self.assertEqual(staged.read_bytes(), enrolled_bytes)
+                    return lambda path, **_kwargs: {'harness': 'codex', 'path': str(path), 'hash': after}
+
+                with patch('scripts.learning_candidates.native_catalog_probe', side_effect=catalog_probe) as probe:
+                    learning_worker.finish_scheduled_promotion(config, settings, source, report, attempt, name='example')
+                if case == 'changed':
+                    probe.assert_not_called()
+                    self.assertEqual('blocked', report['status'])
+                    self.assertIn('differs from owner approval', report['reason'])
+                    self.assertEqual(before, learning_promotion._tree_hash(source))
+                else:
+                    probe.assert_called_once()
+                    self.assertEqual('applied', report['status'])
+                    self.assertEqual(after, learning_promotion._tree_hash(source))
 
     def test_catalog_failure_preserves_external_third_hash(self):
         source = self.root / "skill"

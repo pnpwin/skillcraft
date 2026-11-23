@@ -63,6 +63,26 @@ def runner_environment(harness, settings):
 
 
 @contextmanager
+def approved_runner(config, harness, settings, *, skill_name=None):
+    if harness != 'codex' or 'binary' not in settings:
+        with runner_environment(harness, settings):
+            yield
+        return
+
+    configured = str(Path(settings['binary']).expanduser().absolute())
+    skill_approval = (config.get('approval') or {}).get(skill_name, {})
+    automation_approval = config.get('automation_inputs') or {}
+    approved = next((record for record in (skill_approval.get('binary'), automation_approval.get('binary'))
+                     if isinstance(record, dict) and record.get('configured_path') == configured), None)
+    if approved is None:
+        raise ValueError('Explicit Codex executable requires scope approval')
+    with tempfile.TemporaryDirectory(prefix='skillcraft-approved-runner-') as temporary:
+        binary = stage_binary(approved, Path(temporary) / 'codex')
+        with runner_environment(harness, {**settings, 'binary': str(binary)}):
+            yield
+
+
+@contextmanager
 def project_lock(config, inherited=None):
     config['state'].mkdir(parents=True, exist_ok=True, mode=0o700)
     path = config['state'] / 'worker.lock'
@@ -625,7 +645,7 @@ def finish_scheduled_promotion(config, settings, source, report, attempt, *, db=
         if config['fingerprint'] != report.get('policy_hash'):
             raise ValueError('Owner configuration changed before catalog verification')
         for harness, models in settings['harnesses'].items():
-            with runner_environment(harness, models):
+            with approved_runner(config, harness, models, skill_name=name or report.get('skill')):
                 probe = native_catalog_probe(config['root'], harness, {harness: models['model']})
                 evidence = verify_catalog(source, harness=harness, catalog_probe=probe)
             report['catalogs'][harness] = evidence

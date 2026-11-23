@@ -274,10 +274,12 @@ def _environment(candidate, skills, controlled, version, mode="quality"):
             "background": background, "plugins": [], "configuration_fingerprint": fingerprint}
 
 
-def _isolated_home():
+def _isolated_home(*, catalog_only=False):
     root = Path(tempfile.mkdtemp(prefix="skillcraft-codex-home-"))
     home = root / "codex"
     home.mkdir(mode=0o700)
+    if catalog_only:
+        return root, home
     source = os.environ.get("SKILLCRAFT_CODEX_HOME")
     if source:
         source_path = Path(source).expanduser().resolve()
@@ -478,7 +480,7 @@ def run_request(r):
     version = None
     items = []
     try:
-        isolated_root, isolated_home = _isolated_home()
+        isolated_root, isolated_home = _isolated_home(catalog_only=operation == "probe")
         codex_command = os.environ.get("SKILLCRAFT_CODEX", "codex")
         codex_found = shutil.which(codex_command)
         if not codex_found:
@@ -490,7 +492,7 @@ def run_request(r):
         _configure_home(isolated_home, Path(r["directory"]), collector.server_port, r["mode"], codex_binary)
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(isolated_root),
                "CODEX_HOME": str(isolated_home), "TMPDIR": str(isolated_root)}
-        if os.environ.get("CODEX_API_KEY"):
+        if operation != "probe" and os.environ.get("CODEX_API_KEY"):
             env["CODEX_API_KEY"] = os.environ["CODEX_API_KEY"]
         version = _read_cli_version(codex_binary, r["directory"], env)
         command = [str(codex_binary), "app-server", "--listen", "stdio://"]
