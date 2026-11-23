@@ -131,7 +131,7 @@ belongs in `skills` only.
 | `harnesses.codex.binary` | Optional absolute path | Pins a Codex executable/package. Re-run `enable` after changing it. |
 | `harnesses.opencode.server` | Optional endpoint URL | Selects an OpenCode server for background runs. |
 | `harnesses.hermes.home` | Optional absolute path | Selects a Hermes profile. |
-| `harnesses.hermes.python` | Optional absolute Python path | Native hook runs reuse the active Hermes interpreter. Set this for manual workers invoked through a shell-wrapper installation. |
+| `harnesses.hermes.python` | Optional absolute Python path | Native hook runs reuse the active Hermes interpreter. Set this for manual workers invoked through a shell-wrapper installation. Use an installed interpreter protected from project, group, and other-user writes. |
 | `optimizer` | Optional object: `{"harness":"hermes","model":"provider:model","home":"/absolute/profile"}` | Explicit cross-runtime optimizer. Only `hermes` is accepted here. `home` is optional. |
 | `auto_apply` | Boolean. Default false | Automatic promotion requires true. Linked sources force false. |
 | `editable` | List of skill-relative globs. Default `SKILL.md`, `references/*`, `assets/*`, `scripts/*`, `agents/*` | Limits files an optimizer may change. |

@@ -6,6 +6,7 @@ Callers provide a skill directory and the scope in which it may be published.
 
 from __future__ import annotations
 
+from collections import deque
 from contextlib import contextmanager
 import hashlib
 import json
@@ -758,12 +759,16 @@ def _probe_hermes(root: Path, target: Path) -> dict:
     import subprocess
     import shlex
     try:
-        from scripts.hermes_runner import binary
-        launcher = Path(binary())
+        project_root = Path(root).resolve()
         interpreter = os.environ.get("SKILLCRAFT_HERMES_PYTHON")
         if not interpreter:
+            launcher_path = shutil.which(os.environ.get("SKILLCRAFT_HERMES_BIN", "hermes"))
+            if not launcher_path:
+                raise ValueError("Hermes CLI is unavailable")
+            launcher = _trusted_hermes_executable(launcher_path, project_root)
             try:
-                first_line = launcher.open(encoding="utf-8").readline().strip()
+                with launcher.open("rb") as handle:
+                    first_line = handle.readline(4096).decode("utf-8").strip()
             except (OSError, UnicodeError):
                 first_line = ""
             if first_line.startswith("#!"):
@@ -772,8 +777,10 @@ def _probe_hermes(root: Path, target: Path) -> dict:
                                          Path(command[0]).name == "env" else
                                          command[0] if command else "")
                 if Path(interpreter_candidate).name.startswith("python"):
-                    interpreter = interpreter_candidate
+                    interpreter = (shutil.which(interpreter_candidate) if not Path(interpreter_candidate).is_absolute()
+                                   else interpreter_candidate)
             interpreter = interpreter or sys.executable
+        interpreter = str(_trusted_hermes_executable(interpreter, project_root))
         program = (
             "import hashlib, json, sys; "
             "from tools.skills_tool import _skill_catalog, skill_view, skills_list; "
@@ -787,16 +794,13 @@ def _probe_hermes(root: Path, target: Path) -> dict:
             "'directory': view.get('skill_dir'), 'content_hash': "
             "hashlib.sha256(content.encode()).hexdigest() if isinstance(content, str) else None}))"
         )
-        environment = os.environ.copy()
         profile = os.environ.get("SKILLCRAFT_HERMES_HOME") or os.environ.get("HERMES_HOME")
-        if profile:
-            environment["HERMES_HOME"] = str(Path(profile).expanduser().resolve())
-        # Hermes resolves a terminal workdir before the process cwd.
-        environment["TERMINAL_CWD"] = str(root)
-        # Keep Python from importing repository-controlled modules from the
-        # enrolled project or a caller-provided PYTHONPATH.
-        environment.pop("PYTHONPATH", None)
-        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        profile = str(Path(profile).expanduser().resolve()) if profile else str(Path.home() / ".hermes")
+        # Catalog inspection needs no provider credentials. Keep dynamic-loader,
+        # Python startup, and credential variables from the caller out of scope.
+        environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                       "HOME": str(Path.home()), "HERMES_HOME": profile,
+                       "TERMINAL_CWD": str(project_root)}
         result = subprocess.run([interpreter, "-I", "-B", "-c", program, target.name], cwd=Path("/"), env=environment,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, timeout=45, check=False)
@@ -813,6 +817,69 @@ def _probe_hermes(root: Path, target: Path) -> dict:
         return {"catalog": "Hermes skills_list/skill_view", "enabled": True, "content_hash": expected}
     except (ImportError, OSError, ValueError, TypeError, KeyError, IndexError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError("hermes_native_catalog_probe_unavailable") from exc
+
+
+def _trusted_hermes_executable(value: str | Path, project_root: Path) -> Path:
+    """Accept only executable paths protected from project and other-user writes.
+
+    Hermes installations are user managed, so owner-owned private venvs remain
+    valid. Validate both the configured path's parents and its canonical target
+    because venv Python is commonly a symlink to a base interpreter.
+    """
+    configured = Path(value).expanduser()
+    if not configured.is_absolute():
+        raise ValueError("Hermes runtime path must be absolute")
+    project_root = Path(project_root).resolve()
+    owners = {0, os.geteuid()}
+    lexical = Path(os.path.abspath(configured))
+    home = Path.home().resolve()
+
+    def enrolled_path(path: Path) -> bool:
+        return path.is_relative_to(project_root) and not (
+            project_root == home and path.is_relative_to(home / ".hermes"))
+
+    if enrolled_path(lexical):
+        raise ValueError("Hermes runtime cannot be inside the enrolled project")
+
+    # Walk every symlink hop. Looking only at the final realpath would miss
+    # intermediary directories that can replace a link before execution.
+    current = Path(lexical.anchor)
+    pending = deque(lexical.parts[1:])
+    links = 0
+    while pending:
+        part = pending.popleft()
+        if part == "..":
+            current = current.parent
+            continue
+        entry = current / part
+        if project_root != home and enrolled_path(entry):
+            raise ValueError("Hermes runtime cannot be inside the enrolled project")
+        info = entry.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            if info.st_uid not in owners or links >= 40:
+                raise ValueError("Hermes runtime path has an untrusted symlink")
+            links += 1
+            link = entry.readlink()
+            if link.is_absolute():
+                current = Path(link.anchor)
+            pending.extendleft(reversed(link.parts[1:] if link.is_absolute() else link.parts))
+        else:
+            if pending:
+                sticky_root = info.st_uid == 0 and info.st_mode & stat.S_ISVTX
+                if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in owners
+                        or (info.st_mode & 0o022 and not sticky_root)):
+                    raise ValueError("Hermes runtime has an untrusted parent directory")
+            current = entry
+
+    if enrolled_path(current):
+        raise ValueError("Hermes runtime cannot be inside the enrolled project")
+    info = current.stat()
+    if (not stat.S_ISREG(info.st_mode) or not info.st_mode & 0o111
+            or info.st_uid not in owners or info.st_mode & 0o022):
+        raise ValueError("Hermes runtime executable is not trusted")
+    # Keep the lexical venv path as argv[0]. Python uses it to locate the venv's
+    # site-packages even when the executable itself is a symlink to base Python.
+    return lexical
 
 
 def apply_candidate(*, candidate_id: str, state_dir: Path, project_root: Path,
