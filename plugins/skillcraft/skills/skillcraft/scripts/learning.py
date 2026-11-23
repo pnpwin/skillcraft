@@ -23,6 +23,10 @@ PROJECT_MARKERS = ('.git', '.hg', '.svn', 'AGENTS.md')
 MESSAGE_INTERVAL = 15
 MODEL_STEP_INTERVAL = 15
 VERDICTS = {'success', 'failure', 'correction'}
+AUTOMATION_APPROVAL_REQUIRED = {
+    'status': 'approval_required',
+    'reason': 'Run enable from the project or home root to approve scheduled Learning',
+}
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -359,12 +363,22 @@ def config_for(project, *, enrolling=False, trusted_internal=False, hermes_home=
         discovery_home = discovery_hermes_home(root, raw, scope, selection, hermes_home)
         skills = selected_skills(root, raw, scope, selection, linked_roots, hermes_home=discovery_home)
         from scripts.learning_automation import parse_automation
-        automation = parse_automation(raw)
+        # Profile-local Hermes markers authorize collection only. The shared
+        # worker must see the automation section of a current owner approval.
+        needs_automation_approval = (
+            'automation' in raw and not enrolling and hermes_home is None
+            and not (isinstance(automation_inputs, dict)
+                     and isinstance(automation_inputs.get('cases'), dict)
+                     and 'binary' in automation_inputs
+                     and (automation_inputs['binary'] is None or isinstance(automation_inputs['binary'], dict)))
+        )
+        automation = None if needs_automation_approval else parse_automation(raw)
         return {'root': root, 'state': state, 'skills': skills, 'sources': sources,
                 'scope': scope, 'selection': selection, 'linked_skill_roots': linked_roots,
                 'fingerprint': fingerprint, 'approval': approval, 'hermes': hermes_home is not None,
                 'hermes_skill_home': discovery_home, 'auto_import': auto_import,
                 'automation': automation, 'automation_inputs': automation_inputs,
+                'automation_needs_approval': needs_automation_approval,
                 'excluded_skills': raw.get('exclude', [])}
     return None
 
@@ -660,6 +674,8 @@ def queue_message_checkpoint(db, *, at_boundary=False):
 
 
 def wake(config):
+    if config.get('automation_needs_approval'):
+        return
     # Hand the lock to the child before returning, so repeated delivery while a
     # worker is active cannot create a backlog of redundant processes.
     import fcntl
@@ -1693,7 +1709,9 @@ def main(argv=None):
                     'checkpoints': {r[0]: r[1] for r in db.execute('SELECT status,COUNT(*) FROM checkpoints GROUP BY status')},
                     'revisions': [dict(r) for r in db.execute('SELECT * FROM revisions ORDER BY id DESC LIMIT 20')],
                 }
-                if config.get('automation') is not None and home is None:
+                if config.get('automation_needs_approval'):
+                    summary['automation'] = AUTOMATION_APPROVAL_REQUIRED.copy()
+                elif config.get('automation') is not None and home is None:
                     from scripts.learning_batch import batch_status
                     summary['automation'] = batch_status(config, db)
             if home is None:

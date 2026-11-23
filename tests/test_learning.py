@@ -81,6 +81,36 @@ class LearningTest(unittest.TestCase):
         write_json(self.project / learning.CONFIG, self.configuration)
         self.assertFalse(self.message('s', 'changed', 'user'))
 
+    def test_legacy_enrollment_cannot_activate_dormant_automation(self):
+        self.configuration['selection'] = 'all'
+        self.configuration['automation'] = {'create': True, 'harnesses': {'codex': {'model': 'test'}}}
+        write_json(self.project / learning.CONFIG, self.configuration)
+        self.config = learning.config_for(self.project, enrolling=True)
+        legacy = learning.approval_record(self.config)
+        legacy.pop('automation')
+        write_json(self.config['state'] / 'enabled', legacy)
+        self.config = learning.config_for(self.project)
+        self.assertTrue(self.message('s', 't', 'user', 'Synthetic evidence'))
+
+        with (patch('scripts.learning_batch.run_batch', return_value={'status': 'started'}) as batch,
+              patch.object(learning_worker, 'run_model') as model):
+            report = learning_worker.work(self.config)
+        batch.assert_not_called()
+        model.assert_not_called()
+        self.assertEqual('approval_required', report['status'])
+
+        stream = StringIO()
+        with redirect_stdout(stream):
+            self.assertEqual(0, learning.main(['status', str(self.project)]))
+        self.assertEqual('approval_required', json.loads(stream.getvalue())['automation']['status'])
+
+        with redirect_stdout(StringIO()):
+            self.assertEqual(0, learning.main(['enable', str(self.project)]))
+        self.config = learning.config_for(self.project)
+        with patch('scripts.learning_batch.run_batch', return_value={'status': 'started'}) as batch:
+            self.assertEqual('started', learning_worker.work(self.config)['status'])
+        batch.assert_called_once()
+
     def test_both_harnesses_attribute_corrections_to_loaded_revision(self):
         self.enable()
         for session, harness, text in [('a', 'codex', 'Проверил, всё работает'),

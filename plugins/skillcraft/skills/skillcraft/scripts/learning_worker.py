@@ -18,7 +18,7 @@ import time
 from scripts.compliance import require_standard
 from scripts.harness import model_ref
 from scripts.approved_binary import stage as stage_binary
-from scripts.learning import (CONFIG, INTERNAL, _reject_out_of_project_fixtures, approval_still_current,
+from scripts.learning import (AUTOMATION_APPROVAL_REQUIRED, CONFIG, INTERNAL, _reject_out_of_project_fixtures, approval_still_current,
                               connection, dataset_snapshot, local_path, skill_source,
                               prompt_key, require_model_approval, sanitize, wake)
 from scripts.runtime import require_model_consent, run_model
@@ -1244,6 +1244,8 @@ def scheduled_candidate(config, db, name, settings, rows, batch_id):
 
 
 def work(config, *, lock_fd=None):
+    if config.get('automation_needs_approval'):
+        return AUTOMATION_APPROVAL_REQUIRED.copy()
     previous = os.environ.get(INTERNAL)
     os.environ[INTERNAL] = '1'
     try:

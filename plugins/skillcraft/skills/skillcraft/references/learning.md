@@ -363,6 +363,9 @@ Add an `automation` block to the enrolled Learning policy. For example, this
 project discovers eligible skills, drafts new skills or revisions, and prepares
 reports for review. Apply the revised configuration with the same `enable`
 command used for initial enrollment.
+An older enrollment with no automation approval keeps collecting the session
+journal. Run `enable` again when `status` reports `approval_required` to start
+scheduled model work.
 
 ```json
 {
