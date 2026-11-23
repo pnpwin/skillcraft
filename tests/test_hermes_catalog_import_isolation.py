@@ -97,7 +97,7 @@ class HermesCatalogImportIsolationTest(unittest.TestCase):
             interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             interpreter.chmod(0o700)
             with self.assertRaisesRegex(ValueError, "untrusted parent"):
-                learning_candidates._trusted_hermes_executable(interpreter, Path(temporary) / "project")
+                learning_candidates._trusted_catalog_executable(interpreter, Path(temporary) / "project")
 
             protected = Path(temporary) / "private-runtime"
             protected.mkdir(mode=0o700)
@@ -110,7 +110,7 @@ class HermesCatalogImportIsolationTest(unittest.TestCase):
             alias.symlink_to(intermediate)
             self.assertEqual(alias.resolve(), actual_interpreter.resolve())
             with self.assertRaisesRegex(ValueError, "untrusted parent"):
-                learning_candidates._trusted_hermes_executable(alias, Path(temporary) / "project")
+                learning_candidates._trusted_catalog_executable(alias, Path(temporary) / "project")
 
 
 if __name__ == "__main__":

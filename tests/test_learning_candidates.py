@@ -372,10 +372,14 @@ class LearningCandidates(unittest.TestCase):
 
     def test_opencode_catalog_probe_uses_isolated_native_service_and_exact_target(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             target = self.tree(root / "project" / ".agents" / "skills" / "demo", "candidate\n")
             cli = root / "opencode-cli"
             cli.write_text("synthetic executable")
+            cli.chmod(0o700)
+            node = root / "node"
+            node.write_text("synthetic node executable")
+            node.chmod(0o700)
             calls = []
 
             class FakeService:
@@ -438,7 +442,7 @@ class LearningCandidates(unittest.TestCase):
                                           "SKILLCRAFT_HEADERS": "{}", "OPENAI_API_KEY": "secret",
                                           "NODE_OPTIONS": "--require unsafe.js",
                                           "SKILLCRAFT_OPENCODE_BINARY": str(cli)}),
-                  patch("shutil.which", side_effect=lambda name: "/usr/bin/git" if name == "git" else None),
+                  patch("shutil.which", side_effect={"git": "/usr/bin/git", "node": str(node)}.get),
                   patch.object(Path, "is_file", new=runner_dependency_is_file),
                   patch("subprocess.run", side_effect=run),
                   patch("subprocess.Popen", return_value=FakeService()),
@@ -453,6 +457,31 @@ class LearningCandidates(unittest.TestCase):
             self.assertEqual(evidence["cli_version"], "2.2.7")
             self.assertTrue(evidence["isolated_profile"])
             self.assertEqual(evidence["catalog_source"], ".agents/skills")
+
+    def test_catalog_rejects_project_runtime_before_launch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            target = self.tree(root / ".agents" / "skills" / "demo", "candidate\n")
+            cli = root / "opencode-cli"
+            cli.write_text("synthetic executable")
+            cli.chmod(0o700)
+            actual_is_file = Path.is_file
+
+            def runner_dependency_is_file(path):
+                return path.name == "tsx" or actual_is_file(path)
+
+            with (patch.dict(os.environ, {"SKILLCRAFT_OPENCODE_BINARY": str(cli), "SKILLCRAFT_CODEX": str(cli)}),
+                  patch("shutil.which", return_value=str(cli)),
+                  patch.object(Path, "is_file", new=runner_dependency_is_file),
+                  patch("subprocess.run", side_effect=AssertionError("native command called")) as run,
+                  patch("subprocess.Popen") as popen):
+                for harness in ("opencode", "codex"):
+                    with self.subTest(harness=harness):
+                        probe = learning_candidates.native_catalog_probe(root, harness)
+                        with self.assertRaisesRegex(RuntimeError, "inside the enrolled project"):
+                            probe(target, harness=harness)
+            run.assert_not_called()
+            popen.assert_not_called()
 
     def test_opencode_catalog_probe_fails_closed_for_unsupported_skill_roots(self):
         with tempfile.TemporaryDirectory() as tmp:

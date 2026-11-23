@@ -598,6 +598,13 @@ def _probe_codex(root: Path, target: Path, models: dict) -> dict:
     import subprocess
     script_root = Path(__file__).resolve().parent
     skill_file = target / "SKILL.md"
+    launcher = shutil.which(os.environ.get("SKILLCRAFT_CODEX", "codex"))
+    if not launcher:
+        raise RuntimeError("codex_native_catalog_probe_unavailable: installed Codex CLI missing")
+    try:
+        binary = _trusted_catalog_executable(launcher, root, home_installs=(".local", ".cargo", ".codex"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"codex_native_catalog_probe_unavailable: {exc}") from exc
     with tempfile.TemporaryDirectory(prefix="skillcraft-catalog-codex-") as tmp:
         base = Path(tmp)
         output = base / "out"
@@ -610,8 +617,9 @@ def _probe_codex(root: Path, target: Path, models: dict) -> dict:
                    "attach_skill": True, "controlled": False, "timeout_seconds": 90,
                    "run_id": uuid.uuid4().hex}
         request_path.write_text(json.dumps(request), encoding="utf-8")
-        result = subprocess.run([sys.executable, "-B", str(script_root / "codex_runner.py"), str(request_path)],
-                               cwd=script_root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        env = {"PATH": os.defpath, "TMPDIR": str(base), "SKILLCRAFT_CODEX": str(binary)}
+        result = subprocess.run([sys.executable, "-I", "-B", str(script_root / "codex_runner.py"), str(request_path)],
+                               cwd=script_root, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True, timeout=120, check=False)
         env_file = output / "environment.json"
         if result.returncode or not env_file.is_file():
@@ -642,10 +650,16 @@ def _probe_opencode(root: Path, target: Path, models: dict) -> dict:
     cli = (os.environ.get("SKILLCRAFT_OPENCODE_BINARY")
            or shutil.which("opencode")
            or "/Applications/OpenCode.app/Contents/Resources/opencode-cli")
-    cli_path = Path(cli).expanduser()
-    if not cli_path.is_absolute() or not cli_path.is_file():
-        raise RuntimeError("opencode_native_catalog_probe_unavailable: installed OpenCode CLI missing")
-    cli_path = cli_path.resolve(strict=True)
+    try:
+        cli_path = _trusted_catalog_executable(cli, root, home_installs=(".opencode", ".local"))
+        git = "/usr/bin/git" if Path("/usr/bin/git").is_file() else shutil.which("git")
+        node = shutil.which("node")
+        if not git or not node:
+            raise ValueError("Git and Node.js are required for the private OpenCode catalog")
+        git = _trusted_catalog_executable(git, root, home_installs=(".local",))
+        node = _trusted_catalog_executable(node, root, home_installs=(".local", ".nvm", ".volta", ".asdf"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"opencode_native_catalog_probe_unavailable: {exc}") from exc
     with tempfile.TemporaryDirectory(prefix="skillcraft-catalog-opencode-") as tmp:
         base = Path(tmp)
         profile = base / "profile"
@@ -653,10 +667,12 @@ def _probe_opencode(root: Path, target: Path, models: dict) -> dict:
         project = base / "project"
         project.mkdir()
         home.mkdir(parents=True)
-        allowed_environment = {"PATH", "USER", "LOGNAME", "TMPDIR", "TMP", "TEMP", "LANG",
+        allowed_environment = {"USER", "LOGNAME", "TMPDIR", "TMP", "TEMP", "LANG",
                                "LC_ALL", "LC_CTYPE", "TERM", "NO_COLOR"}
         isolated = {key: value for key, value in os.environ.items() if key in allowed_environment}
         isolated["HOME"] = str(home)
+        native_path = [str(git.parent), str(node.parent), *os.defpath.split(os.pathsep)]
+        isolated["PATH"] = os.pathsep.join(dict.fromkeys(native_path))
         for key in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
             directory = profile / key.lower()
             directory.mkdir(parents=True)
@@ -667,10 +683,7 @@ def _probe_opencode(root: Path, target: Path, models: dict) -> dict:
             {"plugins": ["-*", "opencode.skill", "opencode.config.skill",
                          "opencode.config.compatibility", "opencode.vcs.git"],
              "update": "disable"}), encoding="utf-8")
-        git = "/usr/bin/git" if Path("/usr/bin/git").is_file() else shutil.which("git")
-        if not git:
-            raise RuntimeError("opencode_native_catalog_probe_unavailable: git missing for isolated project")
-        initialized = subprocess.run([git, "init", "--quiet"], cwd=project, env=isolated,
+        initialized = subprocess.run([str(git), "init", "--quiet"], cwd=project, env=isolated,
                                      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE, text=True, timeout=15, check=False)
         if initialized.returncode:
@@ -720,7 +733,7 @@ def _probe_opencode(root: Path, target: Path, models: dict) -> dict:
             runner_env = {**isolated, "SKILLCRAFT_SERVER": server_url,
                           "SKILLCRAFT_HEADERS": json.dumps({"authorization": "Basic " +
                                                             b64encode(f"opencode:{password}".encode()).decode()})}
-            result = subprocess.run([str(executable), str(runner / "src" / "main.ts"), str(request_path)],
+            result = subprocess.run([str(node), str(executable), str(runner / "src" / "main.ts"), str(request_path)],
                                     cwd=Path("/"), env=runner_env, stdin=subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120, check=False)
             env_file = output / "environment.json"
@@ -765,7 +778,7 @@ def _probe_hermes(root: Path, target: Path) -> dict:
             launcher_path = shutil.which(os.environ.get("SKILLCRAFT_HERMES_BIN", "hermes"))
             if not launcher_path:
                 raise ValueError("Hermes CLI is unavailable")
-            launcher = _trusted_hermes_executable(launcher_path, project_root)
+            launcher = _trusted_catalog_executable(launcher_path, project_root, home_installs=(".hermes",))
             try:
                 with launcher.open("rb") as handle:
                     first_line = handle.readline(4096).decode("utf-8").strip()
@@ -780,7 +793,7 @@ def _probe_hermes(root: Path, target: Path) -> dict:
                     interpreter = (shutil.which(interpreter_candidate) if not Path(interpreter_candidate).is_absolute()
                                    else interpreter_candidate)
             interpreter = interpreter or sys.executable
-        interpreter = str(_trusted_hermes_executable(interpreter, project_root))
+        interpreter = str(_trusted_catalog_executable(interpreter, project_root, home_installs=(".hermes",)))
         program = (
             "import hashlib, json, sys; "
             "from tools.skills_tool import _skill_catalog, skill_view, skills_list; "
@@ -798,7 +811,7 @@ def _probe_hermes(root: Path, target: Path) -> dict:
         profile = str(Path(profile).expanduser().resolve()) if profile else str(Path.home() / ".hermes")
         # Catalog inspection needs no provider credentials. Keep dynamic-loader,
         # Python startup, and credential variables from the caller out of scope.
-        environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        environment = {"PATH": os.defpath,
                        "HOME": str(Path.home()), "HERMES_HOME": profile,
                        "TERMINAL_CWD": str(project_root)}
         result = subprocess.run([interpreter, "-I", "-B", "-c", program, target.name], cwd=Path("/"), env=environment,
@@ -819,27 +832,38 @@ def _probe_hermes(root: Path, target: Path) -> dict:
         raise RuntimeError("hermes_native_catalog_probe_unavailable") from exc
 
 
-def _trusted_hermes_executable(value: str | Path, project_root: Path) -> Path:
+def _trusted_catalog_executable(value: str | Path, project_root: Path, *, home_installs=()) -> Path:
     """Accept only executable paths protected from project and other-user writes.
 
-    Hermes installations are user managed, so owner-owned private venvs remain
-    valid. Validate both the configured path's parents and its canonical target
-    because venv Python is commonly a symlink to a base interpreter.
+    Validate configured paths and all symlink hops. Preserve the launcher's
+    lexical location so a linked Python executable can still find its venv.
     """
     configured = Path(value).expanduser()
     if not configured.is_absolute():
-        raise ValueError("Hermes runtime path must be absolute")
+        raise ValueError("Catalog runtime path must be absolute")
     project_root = Path(project_root).resolve()
     owners = {0, os.geteuid()}
     lexical = Path(os.path.abspath(configured))
     home = Path.home().resolve()
+    admin_gid = None
+    if sys.platform == "darwin":
+        import grp
+        try:
+            admin_gid = grp.getgrnam("admin").gr_gid
+        except KeyError:
+            pass
 
     def enrolled_path(path: Path) -> bool:
         return path.is_relative_to(project_root) and not (
-            project_root == home and path.is_relative_to(home / ".hermes"))
+            project_root == home and any(path.is_relative_to(home / install) for install in home_installs))
+
+    def trusted_writes(info):
+        # macOS administrators already control desktop and Homebrew installs.
+        return (not info.st_mode & stat.S_IWOTH
+                and (not info.st_mode & stat.S_IWGRP or info.st_gid == admin_gid))
 
     if enrolled_path(lexical):
-        raise ValueError("Hermes runtime cannot be inside the enrolled project")
+        raise ValueError("Catalog runtime cannot be inside the enrolled project")
 
     # Walk every symlink hop. Looking only at the final realpath would miss
     # intermediary directories that can replace a link before execution.
@@ -853,11 +877,11 @@ def _trusted_hermes_executable(value: str | Path, project_root: Path) -> Path:
             continue
         entry = current / part
         if project_root != home and enrolled_path(entry):
-            raise ValueError("Hermes runtime cannot be inside the enrolled project")
+            raise ValueError("Catalog runtime cannot be inside the enrolled project")
         info = entry.lstat()
         if stat.S_ISLNK(info.st_mode):
             if info.st_uid not in owners or links >= 40:
-                raise ValueError("Hermes runtime path has an untrusted symlink")
+                raise ValueError("Catalog runtime path has an untrusted symlink")
             links += 1
             link = entry.readlink()
             if link.is_absolute():
@@ -867,16 +891,16 @@ def _trusted_hermes_executable(value: str | Path, project_root: Path) -> Path:
             if pending:
                 sticky_root = info.st_uid == 0 and info.st_mode & stat.S_ISVTX
                 if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in owners
-                        or (info.st_mode & 0o022 and not sticky_root)):
-                    raise ValueError("Hermes runtime has an untrusted parent directory")
+                        or (not trusted_writes(info) and not sticky_root)):
+                    raise ValueError("Catalog runtime has an untrusted parent directory")
             current = entry
 
     if enrolled_path(current):
-        raise ValueError("Hermes runtime cannot be inside the enrolled project")
+        raise ValueError("Catalog runtime cannot be inside the enrolled project")
     info = current.stat()
     if (not stat.S_ISREG(info.st_mode) or not info.st_mode & 0o111
-            or info.st_uid not in owners or info.st_mode & 0o022):
-        raise ValueError("Hermes runtime executable is not trusted")
+            or info.st_uid not in owners or not trusted_writes(info)):
+        raise ValueError("Catalog runtime executable is not trusted")
     # Keep the lexical venv path as argv[0]. Python uses it to locate the venv's
     # site-packages even when the executable itself is a symlink to base Python.
     return lexical

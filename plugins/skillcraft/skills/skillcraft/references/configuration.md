@@ -131,7 +131,7 @@ belongs in `skills` only.
 | `harnesses.codex.binary` | Optional absolute path | Pins a Codex executable/package. Re-run `enable` after changing it. |
 | `harnesses.opencode.server` | Optional endpoint URL | Selects an OpenCode server for background runs. |
 | `harnesses.hermes.home` | Optional absolute path | Selects a Hermes profile. |
-| `harnesses.hermes.python` | Optional absolute Python path | Native hook runs reuse the active Hermes interpreter. Set this for manual workers invoked through a shell-wrapper installation. Use an installed interpreter protected from project, group, and other-user writes. |
+| `harnesses.hermes.python` | Optional absolute Python path | Native hook runs reuse the active Hermes interpreter. Set this for manual workers invoked through a shell-wrapper installation. Use an interpreter from a trusted local installation. |
 | `optimizer` | Optional object: `{"harness":"hermes","model":"provider:model","home":"/absolute/profile"}` | Explicit cross-runtime optimizer. Only `hermes` is accepted here. `home` is optional. |
 | `auto_apply` | Boolean. Default false | Automatic promotion requires true. Linked sources force false. |
 | `editable` | List of skill-relative globs. Default `SKILL.md`, `references/*`, `assets/*`, `scripts/*`, `agents/*` | Limits files an optimizer may change. |
@@ -247,7 +247,7 @@ require Codex or OpenCode.
 | `SKILLCRAFT_VENV` | Python virtual environment path. Keep writable and outside the skill directory. Defaults under `${XDG_DATA_HOME:-$HOME/.local/share}/skillcraft/venv`. |
 | `SKILLCRAFT_SERVER` | Explicit OpenCode server endpoint. Otherwise discover the local server. |
 | `SKILLCRAFT_HEADERS` | Optional JSON object of HTTP headers for an explicit OpenCode server. Treat as secret. Do not put it in config or experiment files. |
-| `SKILLCRAFT_OPENCODE_BINARY` | Optional absolute path to the local OpenCode v2 CLI for publication catalog checks. SkillCraft also checks `PATH` and the macOS desktop bundle. |
+| `SKILLCRAFT_OPENCODE_BINARY` | Optional absolute path to a trusted local OpenCode v2 CLI for publication catalog checks. SkillCraft also checks `PATH` and the macOS desktop bundle. |
 | `SKILLCRAFT_TEMP` | Temporary execution parent. Otherwise the system temporary directory is used. |
 | `SKILLCRAFT_CODEX_HOME` | Codex profile home for file-backed authentication. |
 | `SKILLCRAFT_CODEX` | Optional Codex executable override. Normally leave unset when using `PATH` discovery. |
@@ -263,6 +263,10 @@ disabled external plugins. They verify discovery of `.agents/skills` and
 `.opencode/skills` and match the installed package path and hash. These checks
 require a local CLI even when model runs use a remote service. Hermes file A/B
 runs require macOS.
+
+Native publication probes reject runtimes in enrolled projects and paths whose
+owner or mode permits untrusted writes. The check treats macOS administrators
+as trusted so standard desktop and Homebrew installations can be used.
 
 ## Evaluation and optimization CLI
 

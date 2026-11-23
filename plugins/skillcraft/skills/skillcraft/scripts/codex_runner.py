@@ -490,7 +490,8 @@ def run_request(r):
         collector_thread = threading.Thread(target=collector.serve_forever, daemon=True)
         collector_thread.start()
         _configure_home(isolated_home, Path(r["directory"]), collector.server_port, r["mode"], codex_binary)
-        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(isolated_root),
+        exec_path = os.defpath if operation == "probe" else os.environ.get("PATH", os.defpath)
+        env = {"PATH": exec_path, "HOME": str(isolated_root),
                "CODEX_HOME": str(isolated_home), "TMPDIR": str(isolated_root)}
         if operation != "probe" and os.environ.get("CODEX_API_KEY"):
             env["CODEX_API_KEY"] = os.environ["CODEX_API_KEY"]
