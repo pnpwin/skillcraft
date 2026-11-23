@@ -802,6 +802,29 @@ class LearningTest(unittest.TestCase):
         callback.assert_called_once()
         self.assertEqual(['staged', 'approval_changed'], [item['result']['status'] for item in report['items']])
 
+    def test_session_holdout_fixture_cannot_be_an_optimizer_resource(self):
+        settings = self.config['skills']['demo']
+        train = {'id': 'train', 'prompt': 'Training prompt'}
+        for directory in ('references', 'evals'):
+            with self.subTest(directory=directory):
+                relative = f'{directory}/heldout.txt'
+                fixture = self.source / relative
+                fixture.parent.mkdir()
+                fixture.write_text('Private holdout fixture')
+                holdout = {'id': 'holdout', 'prompt': 'Unseen prompt', 'files': [str(fixture)],
+                           'session_fixture_hashes': {fixture.name: digest(fixture)}}
+                args = (self.config, 'demo', settings, self.source, self.home / directory, {}, None)
+                if directory == 'references':
+                    with self.assertRaisesRegex(ValueError, 'Place holdout material outside'):
+                        learning_worker.configured_runs(*args, session_inputs=([train], [holdout]))
+                else:
+                    _, (_, frozen), _, _, _, _, excluded, _ = learning_worker.configured_runs(
+                        *args, session_inputs=([train], [holdout]))
+                    self.assertEqual({relative}, excluded)
+                    self.assertEqual(fixture.read_text(), Path(frozen[0]['files'][0]).read_text())
+                    files = learning_worker.selected_files(self.source, ['SKILL.md', 'evals/*'], excluded)
+                    self.assertEqual({'SKILL.md'}, files.keys())
+
     def test_changed_approval_blocks_activation(self):
         self.seed_worker()
         before = self.markdown.read_text()

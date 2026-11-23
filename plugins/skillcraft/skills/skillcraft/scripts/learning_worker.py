@@ -92,6 +92,18 @@ def families(rows):
     return result
 
 
+def holdout_exclusions(source, paths):
+    excluded = set()
+    for path in paths:
+        if not path.is_relative_to(source):
+            continue
+        relative = path.relative_to(source)
+        if not relative.parts or relative.parts[0] not in {'evals', 'tests'}:
+            raise ValueError('Place holdout material outside the deployable skill package')
+        excluded.add(relative.as_posix())
+    return excluded
+
+
 def configured_runs(config, name, settings, source, attempt, approved, runtime_dir, *, session_inputs=None):
     options = settings.get('harnesses')
     if not isinstance(options, dict) or not options or set(options) - {'codex', 'opencode', 'hermes'}:
@@ -112,16 +124,20 @@ def configured_runs(config, name, settings, source, attempt, approved, runtime_d
                     raise ValueError(f'{harness}.{key} must resolve to an absolute path')
                 value[key] = str(path)
     if session_inputs is not None:
-        inputs = session_inputs
+        inputs = [[dict(row) for row in cases] for cases in session_inputs]
         rows = inputs[0] + inputs[1]
-        excluded = set()
         approved_hashes = {row['id']: row.pop('session_fixture_hashes', {}) for row in rows}
         approved_roots = (config['root'].resolve(), config['state'].resolve())
-        for row in rows:
-            for item in input_specs(row.get('files', []), config['root']):
-                path = Path(item['source']).resolve(strict=True)
-                if not any(path.is_relative_to(root) for root in approved_roots):
-                    raise ValueError('Session fixture is outside the approved project and private snapshots')
+        private = set()
+        for split, cases in zip(('train', 'holdout'), inputs):
+            for row in cases:
+                for item in input_specs(row.get('files', []), config['root']):
+                    path = Path(item['source'])
+                    if not any(path.is_relative_to(root) for root in approved_roots):
+                        raise ValueError('Session fixture is outside the approved project and private snapshots')
+                    if split == 'holdout':
+                        private.add(path)
+        excluded = holdout_exclusions(source, private)
         frozen, frozen_hashes = snapshot_fixtures(rows, config['root'], attempt)
         if frozen_hashes != approved_hashes:
             raise ValueError('Session fixtures differ from the verified tool evidence')
@@ -148,13 +164,7 @@ def configured_runs(config, name, settings, source, attempt, approved, runtime_d
             raise ValueError('Training and holdout cases must have distinct IDs, prompts, and families')
         private = {paths[1]}
         private.update(Path(item['source']) for row in inputs[1] for item in input_specs(row.get('files', []), source))
-        excluded = set()
-        for path in private:
-            if path.is_relative_to(source):
-                relative = path.relative_to(source)
-                if relative.parts[0] not in {'evals', 'tests'}:
-                    raise ValueError('Place holdout material outside the deployable skill package')
-                excluded.add(relative.as_posix())
+        excluded = holdout_exclusions(source, private)
         rows = inputs[0] + inputs[1]
         fixture_expectations = {
             (item['split'], item['case_id'], item['destination']): item
