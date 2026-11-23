@@ -1,6 +1,7 @@
 import tempfile
 import hashlib
 import json
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -368,6 +369,106 @@ class LearningCandidates(unittest.TestCase):
             html = review.read_text(encoding="utf-8")
             self.assertIn("evidence.txt", html)
             self.assertIn("observed run evidence", html)
+
+    def test_opencode_catalog_probe_uses_isolated_native_service_and_exact_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = self.tree(root / "project" / ".agents" / "skills" / "demo", "candidate\n")
+            cli = root / "opencode-cli"
+            cli.write_text("synthetic executable")
+            calls = []
+
+            class FakeService:
+                def __init__(self):
+                    read_fd, write_fd = os.pipe()
+                    os.write(write_fd, b"server password disposable\nserver listening on http://127.0.0.1:4312\n")
+                    os.close(write_fd)
+                    self.stdout = os.fdopen(read_fd, "rb")
+                    self.stopped = False
+
+                def poll(self):
+                    return 0 if self.stopped else None
+
+                def terminate(self):
+                    self.stopped = True
+                    self.stdout.close()
+
+                def wait(self, timeout=None):
+                    return 0
+
+            def run(command, **kwargs):
+                calls.append((command, kwargs))
+                if command[-2:] == ["init", "--quiet"]:
+                    self.assertEqual(Path(kwargs["cwd"]).name, "project")
+                    return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+                if command[-1] == "--version":
+                    return type("Completed", (), {"returncode": 0, "stdout": "2.2.7", "stderr": ""})()
+                request = json.loads(Path(command[-1]).read_text())
+                isolated_project = Path(request["directory"])
+                config = json.loads((isolated_project / "opencode.json").read_text())
+                self.assertEqual(config["plugins"], ["-*", "opencode.skill", "opencode.config.skill",
+                                                      "opencode.config.compatibility", "opencode.vcs.git"])
+                self.assertNotIn("skills", config)
+                link = isolated_project / target.resolve().relative_to((root / "project").resolve())
+                self.assertTrue(link.is_symlink())
+                self.assertEqual((link / "SKILL.md").resolve(), (target / "SKILL.md").resolve())
+                self.assertEqual(Path(request["directory"]).name, "project")
+                self.assertNotEqual(Path(request["directory"]).resolve(), root / "project")
+                self.assertEqual(kwargs["env"]["SKILLCRAFT_SERVER"].split("://", 1)[0], "http")
+                self.assertNotIn("OPENAI_API_KEY", kwargs["env"])
+                self.assertNotIn("NODE_OPTIONS", kwargs["env"])
+                output = Path(request["output"])
+                output.mkdir(parents=True)
+                (output / "environment.json").write_text(json.dumps({
+                    "server_version": "2.2.7",
+                    "candidate": {"path": str(target / "SKILL.md"),
+                                  "realpath": str((target / "SKILL.md").resolve()), "autoinvoke": True},
+                    "plugins": ["opencode.skill"],
+                }))
+                return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+            original_is_file = Path.is_file
+
+            def runner_dependency_is_file(path):
+                if path.name == "tsx" and "opencode-runner" in path.parts:
+                    return True
+                return original_is_file(path)
+
+            with (patch.dict(os.environ, {"SKILLCRAFT_SERVER": "https://existing.invalid",
+                                          "SKILLCRAFT_HEADERS": "{}", "OPENAI_API_KEY": "secret",
+                                          "NODE_OPTIONS": "--require unsafe.js",
+                                          "SKILLCRAFT_OPENCODE_BINARY": str(cli)}),
+                  patch("shutil.which", side_effect=lambda name: "/usr/bin/git" if name == "git" else None),
+                  patch.object(Path, "is_file", new=runner_dependency_is_file),
+                  patch("subprocess.run", side_effect=run),
+                  patch("subprocess.Popen", return_value=FakeService()),
+                  patch.object(learning_candidates, "_configured_model",
+                               return_value={"providerID": "openai", "id": "demo"})):
+                evidence = learning_candidates._probe_opencode(root / "project", target,
+                                                               {"opencode": "openai/demo"})
+
+            self.assertEqual(len(calls), 3)
+            self.assertEqual(calls[1][0], [str(cli.resolve()), "--version"])
+            self.assertEqual(evidence["cli_path"], str(cli.resolve()))
+            self.assertEqual(evidence["cli_version"], "2.2.7")
+            self.assertTrue(evidence["isolated_profile"])
+            self.assertEqual(evidence["catalog_source"], ".agents/skills")
+
+    def test_opencode_catalog_probe_fails_closed_for_unsupported_skill_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            root.mkdir()
+            target = self.tree(root / ".codex" / "skills" / "demo", "candidate\n")
+            cli = Path(tmp) / "opencode-cli"
+            cli.write_text("synthetic executable")
+            with (patch.dict(os.environ, {"SKILLCRAFT_OPENCODE_BINARY": str(cli)}),
+                  patch("shutil.which", return_value=None),
+                  patch("subprocess.run") as run,
+                  patch("subprocess.Popen") as popen):
+                with self.assertRaisesRegex(RuntimeError, "unsupported_target"):
+                    learning_candidates._probe_opencode(root, target, {})
+            run.assert_not_called()
+            popen.assert_not_called()
 
 
 if __name__ == "__main__":

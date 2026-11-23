@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import selectors
 import shutil
 import stat
 import sys
@@ -19,6 +20,7 @@ import tempfile
 import time
 import uuid
 import ctypes
+from base64 import b64encode
 from typing import Callable, Sequence
 
 from scripts import learning_promotion
@@ -626,33 +628,130 @@ def _probe_opencode(root: Path, target: Path, models: dict) -> dict:
     script_root = Path(__file__).resolve().parent
     runner = script_root / "opencode-runner"
     executable = runner / "node_modules" / ".bin" / "tsx"
+    skill_file = target / "SKILL.md"
+    try:
+        relative_target = target.resolve().relative_to(root.resolve())
+    except ValueError as exc:
+        raise RuntimeError("opencode_native_catalog_probe_unsupported_target: target is outside the project root") from exc
+    source_prefix = relative_target.parts[:2]
+    if source_prefix not in {(".agents", "skills"), (".opencode", "skills")}:
+        raise RuntimeError("opencode_native_catalog_probe_unsupported_target: expected project .agents/skills or .opencode/skills")
     if not executable.is_file():
         raise RuntimeError("opencode_native_catalog_probe_unavailable: runner dependencies missing")
-    skill_file = target / "SKILL.md"
+    cli = (os.environ.get("SKILLCRAFT_OPENCODE_BINARY")
+           or shutil.which("opencode")
+           or "/Applications/OpenCode.app/Contents/Resources/opencode-cli")
+    cli_path = Path(cli).expanduser()
+    if not cli_path.is_absolute() or not cli_path.is_file():
+        raise RuntimeError("opencode_native_catalog_probe_unavailable: installed OpenCode CLI missing")
+    cli_path = cli_path.resolve(strict=True)
     with tempfile.TemporaryDirectory(prefix="skillcraft-catalog-opencode-") as tmp:
         base = Path(tmp)
-        output = base / "out"
-        request_path = base / "request.json"
-        request = {"schema_version": 1, "operation": "probe", "directory": str(root),
-                   "output": str(output), "prompt": "", "model": _configured_model(models, "opencode"),
-                   "agent": "build", "timeout_seconds": 90, "mode": "quality",
-                   "skill_id": target.name, "skill_path": str(skill_file),
-                   "skill_sha256": hashlib.sha256(skill_file.read_bytes()).hexdigest(),
-                   "attach_skill": True, "permissions": [], "controlled": False,
-                   "run_id": uuid.uuid4().hex}
-        request_path.write_text(json.dumps(request), encoding="utf-8")
-        result = subprocess.run([str(executable), str(runner / "src" / "main.ts"), str(request_path)],
-                               cwd=Path("/"), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, text=True, timeout=120, check=False)
-        env_file = output / "environment.json"
-        if result.returncode or not env_file.is_file():
-            raise RuntimeError("opencode_native_catalog_probe_failed")
-        environment = _read_json(env_file)
-        candidate = environment.get("candidate") or {}
-        if Path(candidate.get("path", "")).resolve() != skill_file.resolve():
-            raise ValueError("opencode_native_catalog_candidate_mismatch")
-        return {"catalog": "skill.list", "server_version": environment.get("server_version"),
-                "enabled": candidate.get("autoinvoke")}
+        profile = base / "profile"
+        home = profile / "home"
+        project = base / "project"
+        project.mkdir()
+        home.mkdir(parents=True)
+        allowed_environment = {"PATH", "USER", "LOGNAME", "TMPDIR", "TMP", "TEMP", "LANG",
+                               "LC_ALL", "LC_CTYPE", "TERM", "NO_COLOR"}
+        isolated = {key: value for key, value in os.environ.items() if key in allowed_environment}
+        isolated["HOME"] = str(home)
+        for key in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
+            directory = profile / key.lower()
+            directory.mkdir(parents=True)
+            isolated[key] = str(directory)
+        # The disposable location has no project extension directories; only
+        # OpenCode's native catalog/configuration plugins are allowlisted.
+        (project / "opencode.json").write_text(json.dumps(
+            {"plugins": ["-*", "opencode.skill", "opencode.config.skill",
+                         "opencode.config.compatibility", "opencode.vcs.git"],
+             "update": "disable"}), encoding="utf-8")
+        git = "/usr/bin/git" if Path("/usr/bin/git").is_file() else shutil.which("git")
+        if not git:
+            raise RuntimeError("opencode_native_catalog_probe_unavailable: git missing for isolated project")
+        initialized = subprocess.run([git, "init", "--quiet"], cwd=project, env=isolated,
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True, timeout=15, check=False)
+        if initialized.returncode:
+            raise RuntimeError("opencode_native_catalog_probe_unavailable: isolated project init failed")
+        native_target = project / relative_target
+        native_target.parent.mkdir(parents=True)
+        native_target.symlink_to(target.resolve(), target_is_directory=True)
+        version = subprocess.run([str(cli_path), "--version"], cwd=Path("/"), env=isolated,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True, timeout=15, check=False)
+        cli_version = version.stdout.strip()
+        if version.returncode or not cli_version:
+            raise RuntimeError("opencode_native_catalog_probe_unavailable: installed CLI version could not be verified")
+
+        service = subprocess.Popen([str(cli_path), "serve", "--hostname", "127.0.0.1", "--port", "0"],
+                                   cwd=project, env=isolated, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        try:
+            # Standalone serve prints a generated password; keep it in memory only.
+            with selectors.DefaultSelector() as selector:
+                selector.register(service.stdout, selectors.EVENT_READ)
+                startup_deadline = time.monotonic() + 15
+                output = b""
+                password = None
+                server_url = None
+                while time.monotonic() < startup_deadline and service.poll() is None and not (password and server_url):
+                    if selector.select(timeout=min(1, max(0, startup_deadline - time.monotonic()))):
+                        output += os.read(service.stdout.fileno(), 4096)
+                        password_match = re.search(rb"server password ([^\r\n]+)\r?\n", output)
+                        url_match = re.search(rb"on\s+(http://127\.0\.0\.1:\d+)\r?\n", output)
+                        if password_match:
+                            password = password_match.group(1).decode("utf-8")
+                        if url_match:
+                            server_url = url_match.group(1).decode("ascii")
+                if not password or not server_url:
+                    raise RuntimeError("opencode_native_catalog_probe_unavailable: isolated server did not start")
+            output = base / "out"
+            request_path = base / "request.json"
+            request = {"schema_version": 1, "operation": "probe", "directory": str(project),
+                       "output": str(output), "prompt": "", "model": _configured_model(models, "opencode"),
+                       "agent": "build", "timeout_seconds": 90, "mode": "quality",
+                       "skill_id": target.name, "skill_path": str(skill_file),
+                       "skill_sha256": hashlib.sha256(skill_file.read_bytes()).hexdigest(),
+                       "attach_skill": True, "permissions": [], "controlled": False,
+                       "run_id": uuid.uuid4().hex}
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+            runner_env = {**isolated, "SKILLCRAFT_SERVER": server_url,
+                          "SKILLCRAFT_HEADERS": json.dumps({"authorization": "Basic " +
+                                                            b64encode(f"opencode:{password}".encode()).decode()})}
+            result = subprocess.run([str(executable), str(runner / "src" / "main.ts"), str(request_path)],
+                                    cwd=Path("/"), env=runner_env, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120, check=False)
+            env_file = output / "environment.json"
+            if result.returncode or not env_file.is_file():
+                raise RuntimeError("opencode_native_catalog_probe_failed")
+            environment = _read_json(env_file)
+            candidate = environment.get("candidate") or {}
+            server_version = environment.get("server_version")
+            cli_release = re.fullmatch(r"(?:opencode v)?(\d+\.\d+\.\d+(?:-[\w.-]+)?)", cli_version)
+            if not cli_release or cli_release.group(1) != server_version:
+                raise RuntimeError("opencode_native_catalog_probe_failed: CLI and private server versions differ")
+            if Path(candidate.get("path", "")).resolve() != skill_file.resolve():
+                raise ValueError("opencode_native_catalog_candidate_mismatch")
+            return {"catalog": "skill.list", "server_version": server_version,
+                    "enabled": candidate.get("autoinvoke"), "cli_path": str(cli_path),
+                    "cli_version": cli_version, "isolated_profile": True,
+                    "native_catalog_path": candidate.get("path"),
+                    "native_catalog_realpath": candidate.get("realpath"),
+                    "plugins": environment.get("plugins"),
+                    "catalog_source": "/".join(source_prefix),
+                    "catalog_scope": "native project discovery at the target's original relative path; disposable symlink must resolve to installed target",
+                    "project_plugins_absent": True, "builtin_plugins_allowlisted": True}
+        finally:
+            if service.poll() is None:
+                service.terminate()
+                try:
+                    service.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    service.kill()
+                    service.wait(timeout=5)
+            if service.stdout:
+                service.stdout.close()
 
 
 def _probe_hermes(root: Path, target: Path) -> dict:

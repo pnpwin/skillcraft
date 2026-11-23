@@ -57,6 +57,28 @@ async function messages(client: Client, sessionID: string): Promise<SessionMessa
 
 async function audit(client: Client, r: Request) {
   const location = { directory: r.directory };
+  if (r.operation === 'probe') {
+    // Publication probes use a disposable server/profile and allowlisted
+    // built-ins only; wait for that isolated native registry before validation.
+    const readyDeadline = Date.now() + 15000;
+    let skills = await client.skill.list({ location });
+    let plugins = await client.plugin.list({ location });
+    let matches = skills.data.filter(s => s.id === r.skill_id);
+    while (!matches.length && Date.now() < readyDeadline) {
+      await delay(150);
+      [skills, plugins] = await Promise.all([client.skill.list({ location }), client.plugin.list({ location })]);
+      matches = skills.data.filter(s => s.id === r.skill_id);
+    }
+    if (plugins.data.some(plugin => plugin.source.type !== 'builtin')) throw Error('Unexpected non-builtin plugin in isolated catalog profile');
+    if (matches.length !== 1) throw Error(`Candidate missing or ambiguous in skill catalog (${matches.length} matching entries; ${skills.data.length} listed)`);
+    const candidate = matches[0]!;
+    if (!r.skill_path || await realpath(candidate.path) !== await realpath(r.skill_path)) throw Error('Candidate missing or shadowed in skill catalog');
+    if (hash(await readFile(candidate.path, 'utf8')) !== r.skill_sha256) throw Error('Candidate snapshot hash mismatch');
+    return { catalog: 'skill.list', candidate: { id: candidate.id, path: candidate.path,
+      realpath: await realpath(candidate.path), description: candidate.description, autoinvoke: candidate.autoinvoke },
+      plugins: plugins.data.map(plugin => plugin.id).sort(),
+      configuration_sources: ['isolated project config', 'disposable profile'] };
+  }
   // Location plugin activation is asynchronous; an initial empty catalog is not authoritative.
   const readyDeadline = Date.now() + 15000;
   while (true) {

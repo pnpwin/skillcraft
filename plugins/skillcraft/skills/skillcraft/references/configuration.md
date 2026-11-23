@@ -247,6 +247,7 @@ require Codex or OpenCode.
 | `SKILLCRAFT_VENV` | Python virtual environment path. Keep writable and outside the skill directory. Defaults under `${XDG_DATA_HOME:-$HOME/.local/share}/skillcraft/venv`. |
 | `SKILLCRAFT_SERVER` | Explicit OpenCode server endpoint. Otherwise discover the local server. |
 | `SKILLCRAFT_HEADERS` | Optional JSON object of HTTP headers for an explicit OpenCode server. Treat as secret. Do not put it in config or experiment files. |
+| `SKILLCRAFT_OPENCODE_BINARY` | Optional absolute path to the local OpenCode v2 CLI for publication catalog checks. SkillCraft also checks `PATH` and the macOS desktop bundle. |
 | `SKILLCRAFT_TEMP` | Temporary execution parent. Otherwise the system temporary directory is used. |
 | `SKILLCRAFT_CODEX_HOME` | Codex profile home for file-backed authentication. |
 | `SKILLCRAFT_CODEX` | Optional Codex executable override. Normally leave unset when using `PATH` discovery. |
@@ -256,8 +257,12 @@ require Codex or OpenCode.
 | `SKILLCRAFT_TEST_IMAGE` | Optional image name for isolated checks of executable skill changes. Must already exist in local Docker or Podman. No default. |
 
 Keep credentials in the authorized runtime profile or process environment.
-OpenCode defaults to local service discovery and authentication. SkillCraft does
-not restart or start the server. Hermes file A/B runs require macOS.
+OpenCode model runs use the configured or discovered service. Publication
+catalog checks use a disposable local v2 service with an empty profile and
+disabled external plugins. They verify discovery of `.agents/skills` and
+`.opencode/skills` and match the installed package path and hash. These checks
+require a local CLI even when model runs use a remote service. Hermes file A/B
+runs require macOS.
 
 ## Evaluation and optimization CLI
 
