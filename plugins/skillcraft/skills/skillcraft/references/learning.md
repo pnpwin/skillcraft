@@ -401,6 +401,8 @@ The worker reloads approval before starting each item and before each model
 run, including A/B, judging and trigger checks. Stale items report
 `approval_changed`. A revision that stopped before saving a verified proposal
 reports `interrupted`, leaving later items and scheduled batches eligible.
+Scheduled revisions edit `SKILL.md` and Markdown, text, or CSV files under
+`references/` that the skill's `editable` patterns also allow.
 
 Confirmed feedback belongs to the previous completed turn. A failed tool result
 can explain where a task went wrong, and a successful repeat can corroborate a

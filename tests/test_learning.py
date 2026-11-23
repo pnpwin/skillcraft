@@ -763,6 +763,35 @@ class LearningTest(unittest.TestCase):
         self.assertEqual('no_change', report['items'][0]['result']['status'], report['items'])
         run_model.assert_called_once()
 
+    def test_scheduled_revision_preserves_owner_editable_patterns(self):
+        private = self.source / 'references' / 'policy.txt'
+        private.parent.mkdir()
+        private.write_text('Excluded local policy text')
+        self.configuration['skills']['demo']['editable'] = ['SKILL.md']
+        self.configuration['automation'] = {'improve': True, 'auto_apply': True}
+        write_json(self.project / learning.CONFIG, self.configuration)
+        self.config = learning.config_for(self.project, enrolling=True)
+        self.seed_worker()
+        original = tree_hash(self.source)
+        prompts = []
+
+        def optimizer(prompt, output, _model, **_kwargs):
+            prompts.append(prompt)
+            write_json(output / 'response.txt', {'rationale': 'Try to replace the excluded resource',
+                                                 'changes': [{'path': 'references/policy.txt', 'content': 'Replacement'}]})
+            return {'status': 'completed'}
+
+        with (patch.object(learning_worker, 'run_model', side_effect=optimizer) as model,
+              patch.object(learning_worker, 'run_quality') as quality):
+            report = learning_worker.work(self.config)
+        model.assert_called_once()
+        self.assertNotIn('Excluded local policy text', prompts[0])
+        quality.assert_not_called()
+        item = report['items'][0]['result']['candidate']
+        self.assertEqual('blocked', item['status'])
+        self.assertIn('unapproved path', json.loads(Path(item['report']).read_text())['reason'])
+        self.assertEqual(original, tree_hash(self.source))
+
     def test_interrupted_scheduled_revision_does_not_block_future_batches(self):
         from scripts.learning_batch import due, run_batch
 
