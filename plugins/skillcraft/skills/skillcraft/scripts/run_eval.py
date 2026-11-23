@@ -2,6 +2,7 @@
 """Natural triggering: advertise a native skill and observe successful tool loads."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from pathlib import Path
 import sys
 
@@ -80,7 +81,8 @@ def run_eval(skill, evals, workspace, model, *, repeats=3, workers=1, timeout=18
                 'capability': row.get('capability', 'unspecified'), 'repeat': repeat, 'prompt': row['prompt'],
                 'should_trigger': row['should_trigger'], 'diagnostics': diagnostics, **result}
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        results = list(pool.map(execute, jobs))
+        futures = [pool.submit(copy_context().run, execute, job) for job in jobs]
+        results = [future.result() for future in futures]
     environments = [r['environment'] for r in results if r.get('environment')]
     signatures = {(e.get('server_version'), str(e['background']), str(e['plugins']),
                    e['configuration_fingerprint']) for e in environments}

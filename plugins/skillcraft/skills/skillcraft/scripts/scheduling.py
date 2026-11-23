@@ -1,5 +1,6 @@
 """Bounded dispatch with durable states and repeated infrastructure-error stops."""
 from collections import Counter
+import contextvars
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import re
 
@@ -12,6 +13,7 @@ def failure_fingerprint(stage, status, error):
 
 
 def bounded_dispatch(jobs, execute, *, workers, threshold, persist):
+    dispatch_context = contextvars.copy_context()
     states = {key: {'status': 'planned'} for key, _ in jobs}
     results, counts, stop = {}, Counter(), None
     iterator = iter(jobs)
@@ -30,7 +32,8 @@ def bounded_dispatch(jobs, execute, *, workers, threshold, persist):
                 key, job = item
                 states[key] = {'status': 'started'}
                 save()
-                active[pool.submit(execute, job)] = key
+                context = dispatch_context.copy()
+                active[pool.submit(context.run, execute, job)] = key
         fill()
         while active:
             try:

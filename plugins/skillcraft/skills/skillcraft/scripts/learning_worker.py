@@ -21,7 +21,7 @@ from scripts.approved_binary import stage as stage_binary
 from scripts.learning import (CONFIG, INTERNAL, _reject_out_of_project_fixtures, approval_still_current,
                               connection, dataset_snapshot, local_path, skill_source,
                               prompt_key, require_model_approval, sanitize, wake)
-from scripts.runtime import run_model
+from scripts.runtime import require_model_consent, run_model
 from scripts.run_quality_eval import run_quality
 from scripts.inputs import input_specs, serial_inputs
 from scripts.learning_promotion import write_recovery_record
@@ -856,6 +856,7 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
         for harness, models in options.items():
             workspace = attempt / f'ab-{harness}'
             verify_frozen(evals, evals_hash, frozen_rows, frozen_hashes)
+            require_model_consent()
             with runner_environment(harness, models):
                 quality = run_quality(candidate, evals, workspace, models['model'], repeats=repeats, previous=original,
                                       judge_model=models.get('judge_model'), timeout=timeout, harness=harness)

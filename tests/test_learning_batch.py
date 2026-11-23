@@ -259,6 +259,66 @@ class LearningBatchTests(unittest.TestCase):
         apply.assert_not_called()
 
 
+    def test_creation_rechecks_consent_after_the_optimizer(self):
+        from scripts.learning_batch import create_candidate
+        from scripts.learning_observations import SCHEMA
+
+        self.db.executescript(SCHEMA)
+        self.config['automation']['harnesses'] = {'codex': {'model': 'test'}}
+        self.config['automation']['auto_apply'] = True
+        current = self.config
+        for index in range(2):
+            case = {'prompt': f'Produce fixture {index}',
+                    'check': {'type': 'contains', 'text': 'Check a label', 'file': 'out.txt', 'value': str(index)}}
+            self.db.execute(
+                "INSERT INTO observations(witness,harness,session,turn,kind,topic,independent,excerpt,details) "
+                "VALUES(?,'codex','session',?,'success','draft-demo',?,'Confirmed',?)",
+                (f'w{index}', f't{index}', f'case-{index}', json.dumps(case)),
+            )
+
+        def generate(_prompt, output, _model, **_kwargs):
+            nonlocal current
+            output.mkdir(parents=True)
+            (output / 'response.txt').write_text(json.dumps({
+                'skill_md': '---\nname: draft-demo\ndescription: Create the fixture.\n---\n\nCheck the label.\n',
+            }))
+            current = None
+            return {'status': 'completed'}
+
+        with (patch('scripts.runtime.run_model', side_effect=generate) as optimizer,
+              patch('scripts.learning_candidates.verify_candidate', return_value={'trusted_pass': False}) as verify,
+              patch('scripts.learning_batch.publish_creation') as publish):
+            report = run_batch(self.config, self.db, reload_config=lambda: current, now=self.now,
+                               update=lambda *args: create_candidate(self.config, self.db, *args))
+        optimizer.assert_called_once()
+        verify.assert_not_called()
+        publish.assert_not_called()
+        self.assertEqual('blocked', report['status'])
+        self.assertIn('approval changed', report['items'][0]['error'])
+
+    def test_model_launch_rechecks_consent_after_local_preparation(self):
+        from scripts.runtime import model_consent, run_model
+
+        allowed = True
+
+        def check():
+            if not allowed:
+                raise PermissionError('Learning approval changed')
+
+        def prepare(*_args):
+            nonlocal allowed
+            allowed = False
+            return {}
+
+        with (model_consent(check),
+              patch.dict('os.environ', {'SKILLCRAFT_TEMP': str(self.root / 'runtime')}),
+              patch('scripts.preparation.prepare_fixture', side_effect=prepare),
+              patch('scripts.runtime.subprocess.run'),
+              patch('scripts.runtime.subprocess.Popen') as launch):
+            with self.assertRaisesRegex(PermissionError, 'Learning approval changed'):
+                run_model('Synthetic fixture', self.root / 'run', 'test', harness='codex')
+        launch.assert_not_called()
+
     def test_creation_recovery_reuses_only_the_exact_verified_evaluation(self):
         from scripts.learning_batch import resume_verified_creation
         from scripts.utils import digest, write_json

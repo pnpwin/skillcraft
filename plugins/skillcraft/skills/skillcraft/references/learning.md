@@ -397,7 +397,8 @@ repeats, creation runs the executor eight times and revision runs it twelve
 times. Generation, judging and trigger checks add separate runs. The batch
 summary and candidate reports include stage-by-stage usage, elapsed time and
 provider-reported cost when available.
-The worker reloads approval before starting each item. Stale items report
+The worker reloads approval before starting each item and before each model
+run, including A/B, judging and trigger checks. Stale items report
 `approval_changed`. A revision that stopped before saving a verified proposal
 reports `interrupted`, leaving later items and scheduled batches eligible.
 

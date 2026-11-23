@@ -216,7 +216,7 @@ def create_candidate(config, db, name, settings, observations, batch_id):
     from scripts.learning import dataset_snapshot, local_path, sanitize
     from scripts.inputs import input_specs
     from scripts.learning_worker import approved_runner, families
-    from scripts.runtime import run_model
+    from scripts.runtime import require_model_consent, run_model
     from scripts.utils import parse_frontmatter, parse_json_response, write_json
 
     harnesses = settings.get("harnesses") or config.get("automation", {}).get("harnesses", {})
@@ -421,6 +421,7 @@ def create_candidate(config, db, name, settings, observations, batch_id):
             return {"status": "blocked", "candidate": candidate, "reason": "A validation model is missing"}
         verification = resume_verified_creation(candidate, attempt, all_cases, eval_harness, eval_model, settings, models)
         if verification is None:
+            require_model_consent()
             with approved_runner(config, eval_harness, models):
                 verification = verify_candidate(
                     candidate_id=candidate["id"], state_dir=config["state"], evals=evals,
@@ -480,6 +481,7 @@ def create_candidate(config, db, name, settings, observations, batch_id):
         if saved_trigger.is_file() and (trigger_workspace / "report.html").is_file():
             trigger_report = read_json(saved_trigger)
         else:
+            require_model_consent()
             with approved_runner(config, eval_harness, models):
                 trigger_report = run_eval(candidate["candidate_path"], trigger_evals, trigger_workspace,
                                           models["model"], repeats=1, timeout=settings.get("timeout", 180),
@@ -744,8 +746,11 @@ def run_batch(config, db, *, update=None, reload_config=None, now=None):
     `update(name, settings, observations, batch_id)` receives only eligible,
     sanitized journal rows. Its implementation is responsible for approved
     training/holdout routing and candidate staging.
-    The worker supplies `reload_config` to check enrollment between items.
+    The worker supplies `reload_config` to check enrollment before each model run.
     """
+    from threading import Event
+    from scripts.runtime import model_consent
+
     automation = config.get("automation", {})
     _ensure_schema(db)
     if not due(db, automation, now=now):
@@ -804,15 +809,25 @@ def run_batch(config, db, *, update=None, reload_config=None, now=None):
             db.execute("UPDATE learning_batches SET updated_at=?,report=? WHERE id=?",
                        (_stamp(), _json(interim), batch_id))
             db.commit()
-            current = config
-            if reload_config is not None:
-                try:
-                    current = reload_config()
-                except (OSError, ValueError):
-                    current = None
-            if (not current or current["root"] != config["root"]
-                    or item_row["scope_hash"] != scope_hash or _scope_hash(current) != scope_hash
-                    or (current.get("automation") or {}).get(item_row["operation"]) is not True):
+            revoked = Event()
+            operation = item_row["operation"]
+
+            def require_approval():
+                if not revoked.is_set():
+                    try:
+                        current = reload_config() if reload_config is not None else config
+                    except (OSError, ValueError):
+                        current = None
+                    if (not current or current["root"] != config["root"]
+                            or item_row["scope_hash"] != scope_hash or _scope_hash(current) != scope_hash
+                            or (current.get("automation") or {}).get(operation) is not True):
+                        revoked.set()
+                if revoked.is_set():
+                    raise PermissionError("Learning approval changed before model launch")
+
+            try:
+                require_approval()
+            except PermissionError:
                 result = {"status": "approval_changed", "reason": "Item is outside the current automation approval"}
                 db.execute(
                     "UPDATE learning_batch_items SET status='done',result=?,error=NULL,updated_at=? WHERE id=?",
@@ -842,7 +857,8 @@ def run_batch(config, db, *, update=None, reload_config=None, now=None):
                 if approved.get("binary") is not None:
                     settings["approved_binary"] = approved["binary"]
             try:
-                result = update(item_row["name"], settings, rows, batch_id)
+                with model_consent(require_approval):
+                    result = update(item_row["name"], settings, rows, batch_id)
                 status = result.get("status", "candidate_created") if isinstance(result, dict) else "candidate_created"
                 db.execute(
                     "UPDATE learning_batch_items SET status='done',result=?,updated_at=? WHERE id=?",

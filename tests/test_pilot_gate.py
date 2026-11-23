@@ -1,3 +1,4 @@
+import contextvars
 import json
 from pathlib import Path
 import tempfile
@@ -113,6 +114,25 @@ class PilotGate(unittest.TestCase):
         self.assertEqual(len(started), 2)
         self.assertEqual(len(outcomes), 2)
         self.assertEqual(sum(s['status'] == 'not_started_after_stop' for s in queue['jobs'].values()), 6)
+
+    def test_refilled_jobs_keep_calling_context_without_worker_leakage(self):
+        request_id = contextvars.ContextVar('request_id', default=None)
+        token = request_id.set('caller-context')
+        observed = []
+
+        def execute(job):
+            observed.append((job, request_id.get()))
+            if job == 0:
+                request_id.set('worker-mutation')
+            return {'complete': True}
+
+        try:
+            bounded_dispatch([(str(i), i) for i in range(3)], execute, workers=1, threshold=2,
+                             persist=lambda state: None)
+            self.assertEqual(observed, [(0, 'caller-context'), (1, 'caller-context'), (2, 'caller-context')])
+            self.assertEqual(request_id.get(), 'caller-context')
+        finally:
+            request_id.reset(token)
 
     def test_review_failure_blocks_main(self):
         with tempfile.TemporaryDirectory() as tmp:
