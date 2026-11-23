@@ -4,6 +4,7 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+import subprocess
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
@@ -119,9 +120,17 @@ class HermesLearningTest(unittest.TestCase):
         # The Hermes launcher can add its managed packages only to the host process.
         bare = self.home.with_name('bare-python')
         EnvBuilder(with_pip=False).create(bare)
-        with patch('plugins.skillcraft.src.hermes.hermes_learning.sys.executable', str(bare / 'bin/python')):
+        inherited = os.pathsep.join((str(self.project / 'extra-packages'), ''))
+        with (patch('plugins.skillcraft.src.hermes.hermes_learning.sys.executable', str(bare / 'bin/python')),
+              patch.dict(os.environ, {'PYTHONPATH': inherited, 'PYTHONHOME': str(self.project)}),
+              patch.object(hermes_learning.subprocess, 'run', wraps=subprocess.run) as launch):
             self.command('enable')
             self.assertEqual(self.command('status')['messages'], 0)
+        dependency_root = str(Path(yaml.__file__).resolve().parents[1])
+        self.assertEqual(2, launch.call_count)
+        for call in launch.call_args_list:
+            self.assertEqual(dependency_root, call.kwargs['env']['PYTHONPATH'])
+            self.assertNotIn('PYTHONHOME', call.kwargs['env'])
 
     def test_hermes_normalized_skill_read_preserves_raw_version(self):
         self.markdown.write_bytes(b'\xef\xbb\xbf' + self.content.replace('\n', '\r\n').encode())

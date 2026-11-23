@@ -20,14 +20,11 @@ LOG = logging.getLogger(__name__)
 
 
 def run_learning(home, verb, *args, payload=None, interactive=False):
-    # The CLI owns its imports and SQLite state outside the gateway process.
-    # Keep managed runtime imports and let scheduled catalog checks use the
-    # same interpreter that dispatched the native hook.
-    env = os.environ.copy()
-    paths = [str(Path(yaml.__file__).resolve().parents[1])]
-    if inherited := env.get('PYTHONPATH'):
-        paths.append(inherited)
-    env['PYTHONPATH'] = os.pathsep.join(paths)
+    # Hermes can load its managed PyYAML outside the interpreter's normal site
+    # directories. Pass that dependency location without inherited Python paths.
+    env = {key: value for key, value in os.environ.items() if not key.startswith('PYTHON')}
+    env.update(PYTHONPATH=str(Path(yaml.__file__).resolve().parents[1]),
+               PYTHONNOUSERSITE='1', PYTHONSAFEPATH='1')
     env.setdefault('HERMES_HOME', str(home.resolve()))
     env.setdefault('SKILLCRAFT_HERMES_PYTHON', sys.executable)
     launcher = Path(sys.executable).with_name('hermes')
