@@ -5,6 +5,7 @@ from io import StringIO
 import os
 import shutil
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -733,6 +734,73 @@ class LearningTest(unittest.TestCase):
         self.assertNotEqual(tree_hash(self.source), before)
         learning_worker.rollback_revision(self.config, revision['id'])
         self.assertEqual(tree_hash(self.source), before)
+
+    def test_interrupted_scheduled_revision_does_not_block_future_batches(self):
+        from scripts.learning_batch import due, run_batch
+
+        self.configuration['automation'] = {'improve': True}
+        write_json(self.project / learning.CONFIG, self.configuration)
+        self.config = learning.config_for(self.project, enrolling=True)
+        self.seed_worker()
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        next_window = now + timedelta(days=7)
+        original = tree_hash(self.source)
+
+        with learning.connection(self.config) as db:
+            def update(name, settings, rows, batch_id):
+                return learning_worker.scheduled_candidate(self.config, db, name, settings, rows, batch_id)
+
+            with patch.object(learning_worker, 'revise', side_effect=KeyboardInterrupt) as revise:
+                with self.assertRaises(KeyboardInterrupt):
+                    run_batch(self.config, db, update=update, now=now)
+                self.assertTrue(due(db, self.config['automation'], now=now))
+                recovered = run_batch(self.config, db, update=update, now=now)
+                self.assertEqual('interrupted', recovered['status'])
+                result = recovered['items'][0]['result']
+                self.assertEqual('interrupted', result['status'])
+                self.assertTrue(result['candidate']['reason'])
+                self.assertEqual('interrupted', db.execute('SELECT status FROM revisions').fetchone()[0])
+                self.assertFalse(due(db, self.config['automation'], now=now))
+                revise.assert_called_once()
+
+            learning.record(db, 'new-evidence', 'demo', original, 'feedback', 'codex', 's', 't3',
+                            'case:fail-new', 'fail', 'correction', 'Retain the date again.', True)
+            db.commit()
+            with patch.object(learning_worker, 'revise', return_value={'status': 'no_change'}) as revise:
+                report = run_batch(self.config, db, update=update, now=next_window)
+            self.assertNotEqual(recovered['batch_id'], report['batch_id'])
+            self.assertEqual('done', report['status'])
+            self.assertEqual('no_change', report['items'][0]['result']['status'])
+            revise.assert_called_once()
+        self.assertEqual(original, tree_hash(self.source))
+
+    def test_worker_reloads_enrollment_before_the_next_batch_item(self):
+        self.configuration['selection'] = 'all'
+        self.configuration['automation'] = {'create': True, 'improve': True}
+        write_json(self.project / learning.CONFIG, self.configuration)
+        self.config = learning.config_for(self.project, enrolling=True)
+        self.enable()
+        with learning.connection(self.config) as db:
+            db.executemany(
+                "INSERT INTO observations(witness,harness,session,turn,kind,topic,independent,excerpt,details) "
+                "VALUES(?,'codex','session',?,'success',?,?,?,?)",
+                [(topic, topic, topic, topic, 'Confirmed output', '{"check":{"file":"result.txt"}}')
+                 for topic in ('new-topic', 'other-topic')],
+            )
+            db.commit()
+
+        def withdraw_after_first(_config, _db, name, _settings, _rows, _batch_id):
+            self.assertEqual('new-topic', name)
+            self.configuration['automation']['create'] = False
+            write_json(self.project / learning.CONFIG, self.configuration)
+            write_json(self.config['state'] / 'enabled', learning.approval_record(
+                learning.config_for(self.project, enrolling=True, trusted_internal=True)))
+            return {'status': 'staged'}
+
+        with patch.object(learning_worker, 'scheduled_candidate', side_effect=withdraw_after_first) as callback:
+            report = learning_worker.work(self.config)
+        callback.assert_called_once()
+        self.assertEqual(['staged', 'approval_changed'], [item['result']['status'] for item in report['items']])
 
     def test_changed_approval_blocks_activation(self):
         self.seed_worker()

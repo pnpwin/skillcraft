@@ -397,9 +397,9 @@ repeats, creation runs the executor eight times and revision runs it twelve
 times. Generation, judging and trigger checks add separate runs. The batch
 summary and candidate reports include stage-by-stage usage, elapsed time and
 provider-reported cost when available.
-If approval changed while a batch was interrupted, stale items report
-`approval_changed`. The next scheduled batch selects evidence under the current
-approval.
+The worker reloads approval before starting each item. Stale items report
+`approval_changed`. A revision that stopped before saving a verified proposal
+reports `interrupted`, leaving later items and scheduled batches eligible.
 
 Confirmed feedback belongs to the previous completed turn. A failed tool result
 can explain where a task went wrong, and a successful repeat can corroborate a

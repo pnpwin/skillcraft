@@ -756,12 +756,13 @@ def _report(batch, items, config=None):
     return report
 
 
-def run_batch(config, db, *, update=None, now=None):
+def run_batch(config, db, *, update=None, reload_config=None, now=None):
     """Run or resume one scheduled batch; `update` performs approved model work.
 
     `update(name, settings, observations, batch_id)` receives only eligible,
     sanitized journal rows. Its implementation is responsible for approved
     training/holdout routing and candidate staging.
+    The worker supplies `reload_config` to check enrollment between items.
     """
     automation = config.get("automation", {})
     _ensure_schema(db)
@@ -808,14 +809,6 @@ def run_batch(config, db, *, update=None, now=None):
         for item_row in db.execute(
                 "SELECT * FROM learning_batch_items WHERE batch_id=? AND status!='done' ORDER BY ordinal",
                 (batch_id,)).fetchall():
-            if item_row["scope_hash"] != scope_hash or automation.get(item_row["operation"]) is not True:
-                result = {"status": "approval_changed", "reason": "Item is outside the current automation approval"}
-                db.execute(
-                    "UPDATE learning_batch_items SET status='done',result=?,error=NULL,updated_at=? WHERE id=?",
-                    (_json(result), _stamp(), item_row["id"]),
-                )
-                db.commit()
-                continue
             db.execute(
                 "UPDATE learning_batch_items SET status='running',error=NULL,updated_at=? WHERE id=?",
                 (_stamp(), item_row["id"]),
@@ -829,6 +822,22 @@ def run_batch(config, db, *, update=None, now=None):
             db.execute("UPDATE learning_batches SET updated_at=?,report=? WHERE id=?",
                        (_stamp(), _json(interim), batch_id))
             db.commit()
+            current = config
+            if reload_config is not None:
+                try:
+                    current = reload_config()
+                except (OSError, ValueError):
+                    current = None
+            if (not current or current["root"] != config["root"]
+                    or item_row["scope_hash"] != scope_hash or _scope_hash(current) != scope_hash
+                    or (current.get("automation") or {}).get(item_row["operation"]) is not True):
+                result = {"status": "approval_changed", "reason": "Item is outside the current automation approval"}
+                db.execute(
+                    "UPDATE learning_batch_items SET status='done',result=?,error=NULL,updated_at=? WHERE id=?",
+                    (_json(result), _stamp(), item_row["id"]),
+                )
+                db.commit()
+                continue
             rows = _rows_for_item(db, item_row)
             if not rows or update is None:
                 status = "no_evidence" if not rows else "blocked"
@@ -854,9 +863,8 @@ def run_batch(config, db, *, update=None, now=None):
                 result = update(item_row["name"], settings, rows, batch_id)
                 status = result.get("status", "candidate_created") if isinstance(result, dict) else "candidate_created"
                 db.execute(
-                    "UPDATE learning_batch_items SET status=?,result=?,updated_at=? WHERE id=?",
-                    ("running" if status == "interrupted" else "done",
-                     _json({"status": status, "candidate": result}), _stamp(), item_row["id"]),
+                    "UPDATE learning_batch_items SET status='done',result=?,updated_at=? WHERE id=?",
+                    (_json({"status": status, "candidate": result}), _stamp(), item_row["id"]),
                 )
             except (OSError, TypeError, ValueError, KeyError, RuntimeError, sqlite3.Error) as error:
                 db.execute(
@@ -878,6 +886,7 @@ def run_batch(config, db, *, update=None, now=None):
                     pass
         status = ("running" if unfinished else
                   "blocked" if "blocked" in result_statuses else
+                  "interrupted" if "interrupted" in result_statuses else
                   "awaiting_checks" if "awaiting_checks" in result_statuses else "done")
         batch_obj = dict(db.execute("SELECT * FROM learning_batches WHERE id=?", (batch_id,)).fetchone())
         report = _report({**batch_obj, "status": status, "updated_at": _stamp()}, items, config)

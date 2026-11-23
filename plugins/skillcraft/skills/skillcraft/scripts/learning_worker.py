@@ -1153,14 +1153,20 @@ def scheduled_revision(config, db, name, settings, rows, batch_id):
     existing = db.execute('SELECT * FROM revisions WHERE checkpoint=? AND skill=?', (job_id, name)).fetchone()
     if existing:
         attempt = Path(existing['path'])
-        if existing['status'] == 'running':
+        report_path = attempt / 'report.json'
+        report = {}
+        status = existing['status']
+        if status == 'running':
             status = recover_attempt(attempt, source, config['state'], linked=is_linked,
                                      config=config, settings=settings, db=db, name=name)
-            report = read_json(attempt / 'report.json') if (attempt / 'report.json').is_file() else {}
+            report = read_json(report_path) if report_path.is_file() else {}
             record_revision_outcome(db, existing['id'], status, report)
-        else:
-            status = existing['status']
-        return {'status': status, 'revision': existing['id'], 'report': str(attempt / 'report.json')}
+        result = {'status': status, 'revision': existing['id']}
+        if report_path.is_file():
+            result['report'] = str(report_path)
+        if status == 'interrupted':
+            result['reason'] = report.get('reason', 'Worker stopped before saving a verified optimizer proposal')
+        return result
 
     if not complete_harness_settings(settings):
         return {'status': 'blocked', 'reason': 'Configure a model for scheduled revisions'}
@@ -1210,12 +1216,16 @@ def work(config, *, lock_fd=None):
     try:
         with project_lock(config, lock_fd), connection(config) as db:
             if config.get('automation') is not None:
+                from scripts.learning import config_for
                 from scripts.learning_batch import run_batch
                 # Message/step checkpoints keep their accounting, while only the batch may call models.
                 db.execute("UPDATE checkpoints SET status='done' WHERE status!='done'")
                 db.commit()
-                return run_batch(config, db, update=lambda name, settings, rows, batch_id:
-                                 scheduled_candidate(config, db, name, settings, rows, batch_id))
+                return run_batch(
+                    config, db, reload_config=lambda: config_for(config['root'], trusted_internal=True),
+                    update=lambda name, settings, rows, batch_id:
+                    scheduled_candidate(config, db, name, settings, rows, batch_id),
+                )
             while True:
                 drain(config, db)
                 enqueue_changed_validation_retries(config, db)
