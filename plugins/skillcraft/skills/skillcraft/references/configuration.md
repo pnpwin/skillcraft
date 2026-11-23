@@ -66,6 +66,7 @@ This project configuration enables capture for one skill.
 | `enabled` | Must be `true` to collect. Absent behaves as disabled | Set false to suspend collection. |
 | `scope` | `project` (default) or `home` | `home` is valid only in the home configuration. |
 | `sources` | List of `sessions` and `evals`. Default both. | `["evals"]` collects evaluation evidence only. An empty list collects neither. Hermes enrollment requires `sessions`. |
+| `automation` | Optional scheduled Learning object. | See [scheduled Learning](learning.md#scheduled-learning). |
 | `selection` | `explicit` (default) or `all` | `explicit` requires at least one `skills` entry. `all` discovers eligible local skills on each call. |
 | `skills` | Object keyed by exact skill ID. Default `{}` | Pins/overrides settings for IDs. With `selection: explicit`, each entry needs `source`. With `all`, `source` pins a duplicate ID to one discovered path, including an approved symlink. |
 | `exclude` | List of exact skill IDs. Default `[]` | Only valid with `selection: all`. |
@@ -130,6 +131,7 @@ belongs in `skills` only.
 | `harnesses.codex.binary` | Optional absolute path | Pins a Codex executable/package. Re-run `enable` after changing it. |
 | `harnesses.opencode.server` | Optional endpoint URL | Selects an OpenCode server for background runs. |
 | `harnesses.hermes.home` | Optional absolute path | Selects a Hermes profile. |
+| `harnesses.hermes.python` | Optional absolute Python path | Native hook runs reuse the active Hermes interpreter. Set this for manual workers invoked through a shell-wrapper installation. |
 | `optimizer` | Optional object: `{"harness":"hermes","model":"provider:model","home":"/absolute/profile"}` | Explicit cross-runtime optimizer. Only `hermes` is accepted here. `home` is optional. |
 | `auto_apply` | Boolean. Default false | Automatic promotion requires true. Linked sources force false. |
 | `editable` | List of skill-relative globs. Default `SKILL.md`, `references/*`, `assets/*`, `scripts/*`, `agents/*` | Limits files an optimizer may change. |
@@ -265,9 +267,14 @@ for the full current option list.
 | Script | Required inputs | Main options |
 |---|---|---|
 | `learning.py enable` | Project path positional argument | `--auto-import` for an enrolled Hermes profile, or linked-root preview/approval flags described above. |
+| `learning.py stage` | Project path and draft folder | Use `--source PATH` for an existing skill. |
+| `learning.py verify-now` | Project path, candidate ID, `--evals`, `--model` | Takes `--harness`, `--judge-model`, `--workspace`, `--repeats`, and `--timeout`. Returns A/B evidence. |
+| `learning.py verify-artifact` | Project path, then either harness, session and turn IDs or `--topic TOPIC --case CASE_ID` | Verifies local outputs against an approved train case. The standalone form stores proof without attributing it to a session or installed version. |
+| `learning.py apply` | Project path and candidate ID | Explicit owner publication. Undo with `rollback PROJECT --candidate ID`. |
 | `learning.py import-hermes` | Project path and `--from-profile` | Imports verified feedback from the specified Hermes profile into shared Learning. |
 | `learning.py ingest` | Evaluation workspace | `--project` selects the Learning scope. `--feedback` imports reviewed feedback. `--selection` selects the grading attempt and requires `--feedback`. |
 | `learning.py status` or `preview` | Project path | Inspect version-bound evidence, eligibility, and the next action. `status` also shows revision history. |
+| `learning.py repair-exchanges` | Enrolled project path | Archives verified exchange copies from previous releases outside the native skill catalog. Reports unverified matches. |
 | `learning.py work` | Project path | `--retry-blocked` queues validation of a saved candidate. |
 | `run_quality_eval.py` | `--evals`, `--workspace`, `--model`, and either `--skill` or both `--instruction-a` and `--instruction-b` | Paired quality runs. `--repeats` (3), `--workers` (1), `--judge-model`, `--judge-profile`, repeated `--pilot-case` (defaults to first case), `--previous` (skill mode), `--stop-threshold` (2), `--json`, `--timeout` (180), `--profile`, `--harness`. |
 | `run_eval.py` | `--skill`, `--evals`, `--workspace`, `--model` | Trigger runs. `--repeats` (3), `--workers` (1), optional independent `--judge-model` and `--judge-profile`, `--timeout` (180), `--profile`, `--harness`. |

@@ -286,20 +286,45 @@ def _verify_exchange(source: Path, stage: Path, record: dict) -> None:
         raise RuntimeError("promotion_integrity_error: promoted content hash differs")
 
 
+def _exchange_parent(source: Path, state: Path) -> Path:
+    """Keep exchange snapshots off the skill catalog while staying on its volume."""
+    if source.parent.stat().st_dev == state.stat().st_dev:
+        directory = state.resolve() / "exchanges"
+    else:
+        archive = source.parent / ".archive"
+        _reject_symlink(archive, "exchange archive")
+        directory = archive / "skillcraft-exchanges"
+    _reject_symlink(directory, "exchange directory")
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return directory
+
+
+def _valid_exchange_path(source: Path, stage: Path, state: Path, operation: str) -> bool:
+    parent = source.parent.resolve()
+    allowed = {parent, state.resolve() / "exchanges", parent / ".archive" / "skillcraft-exchanges"}
+    return (stage.parent in allowed and stage.parent.resolve() == stage.parent
+            and stage.name.startswith(f".{source.name}.{operation}-"))
+
+
 def recover_exchange(source: Path, record: dict, state: Path) -> bool:
     """Reconcile a recorded operation if its candidate is currently active."""
     source = Path(source).resolve(strict=True)
     stage = Path(record["exchange_stage"])
-    if (record["source"] != str(source) or stage.parent != source.parent
-            or not stage.name.startswith(f".{source.name}.promotion-")):
+    if record["source"] != str(source) or not _valid_exchange_path(source, stage, state, "promotion"):
         raise ValueError("promotion_record_mismatch: record does not belong to this source")
     descriptor = _lock(state)
     try:
         if not _matches_tree(source, record["after_hash"], record.get("after_modes")):
             return False
+        if stage.parent == source.parent and not stage.exists() and not stage.is_symlink():
+            stage = _exchange_parent(source, state) / stage.name
+            if not _matches_tree(stage, record["before_hash"], record.get("before_modes")):
+                raise ValueError("promotion_archive_mismatch: archived exchange copy changed")
         _verify_exchange(source, stage, record)
         try:
             _fsync_directory(source.parent)
+            if stage.parent != source.parent:
+                _fsync_directory(stage.parent)
         except OSError:
             record["durability"] = "unknown"
         return True
@@ -343,7 +368,7 @@ def _promote_locked(source: Path, candidate: Path, expected_hash: str, state: Pa
     if _snapshot(candidate, candidate_snapshot) != candidate_hash or tree_modes(candidate_snapshot) != candidate_modes:
         raise ValueError("candidate_hash_mismatch: candidate changed while snapshotting")
     _fsync_directory(snapshots)
-    stage = source.parent / f".{source.name}.promotion-{uuid.uuid4().hex}"
+    stage = _exchange_parent(source, state) / f".{source.name}.promotion-{uuid.uuid4().hex}"
     if _snapshot(candidate, stage) != candidate_hash or not _matches_tree(candidate, candidate_hash, candidate_modes):
         raise ValueError("candidate_hash_mismatch: candidate changed while staging")
     record = {"source": str(source), "before_hash": before_hash,
@@ -396,13 +421,8 @@ def rollback(source: Path, record: dict, state: Path, *, record_path: Path | Non
         if backup_hash != record.get("backup_hash") or (
                 record.get("before_modes") is not None and tree_modes(backup) != record["before_modes"]):
             raise ValueError("rollback_backup_mismatch: backup snapshot changed")
-        temporary = source.parent / f".{source.name}.rollback-{uuid.uuid4().hex}"
-        shutil.copytree(backup, temporary, symlinks=False, copy_function=shutil.copy2)
-        restored_hash = _tree_hash(temporary)
-        if restored_hash != backup_hash:
-            raise ValueError("rollback_backup_mismatch: copied snapshot changed")
-        return _promote_locked(source, temporary, record.get("after_hash", ""), state,
-                               restored_hash, record_path,
+        return _promote_locked(source, backup, record.get("after_hash", ""), state,
+                               backup_hash, record_path,
                                expected_source_modes=record.get("after_modes"),
                                expected_candidate_modes=record.get("before_modes"))
     finally:

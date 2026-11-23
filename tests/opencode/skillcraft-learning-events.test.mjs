@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { completedModelSteps, initialCursor, learningEventPhase, learningEventTypes } from '../../plugins/skillcraft/src/opencode/learning.js';
+import { completedModelSteps, completedToolEvents, initialCursor, learningEventPhase, learningEventTypes } from '../../plugins/skillcraft/src/opencode/learning.js';
 
 test('learns from native OpenCode execution and inbox events without a legacy status event', () => {
   const sessionID = 'test-session';
@@ -50,4 +50,23 @@ test('counts distinct successful completed model messages, including successful 
     { type: 'assistant', id: 'filtered', time: { completed: 7 }, finish: 'content-filter' },
   ]), 4);
   assert.equal(completedModelSteps([]), 0);
+});
+
+test('captures minimal OpenCode tool outcomes once per native call ID', () => {
+  assert.deepEqual(completedToolEvents([
+    { type: 'assistant', id: 'assistant-1', content: [
+      { type: 'tool', id: 'call-1', name: 'bash', state: { status: 'completed', output: 'private output' } },
+      { type: 'tool', id: 'call-1', name: 'bash', state: { status: 'completed' } },
+      { type: 'tool', id: 'call-2', name: 'read', state: { status: 'error', error: 'private error' } },
+      { type: 'tool', name: 'unknown', state: { status: 'running' } },
+    ] },
+    { type: 'assistant', id: 'assistant-2', content: [
+      { type: 'tool', id: 'call-3', name: 'mcp', state: { status: 'running' } },
+    ] },
+  ]), [
+    { id: 'call-1', tool: 'bash', status: 'ok' },
+    { id: 'call-2', tool: 'read', status: 'error' },
+    { id: 'assistant-1:3', tool: 'unknown', status: 'unknown' },
+    { id: 'call-3', tool: 'mcp', status: 'unknown' },
+  ]);
 });

@@ -107,11 +107,14 @@ def check_requests(rows, request, session, home, *, block):
         if not turn or not key:
             raise ValueError('Missing native turn or request ID')
         if row['phase'] == 'request':
-            if (key in requests or row.get('catalog') != skill or 'block_sha256' not in row
+            if (key in responses or (key in requests and requests[key] != row)
+                    or row.get('catalog') != skill or 'block_sha256' not in row
                     or row['block_sha256'] != block or row.get('skill_sha256') != request.get('skill_sha256')
                     or not {'read_file', 'write_file', 'terminal'} <= set(row.get('tools', []))
                     or set(row['tools']) - worker.ADVERTISED_TOOLS):
                 raise ValueError('Invalid native request receipt')
+            # Hermes can repeat the receipt for an identical provider attempt.
+            # Every retry must keep the original catalog and preload evidence.
             requests[key] = row
         elif row['phase'] == 'response':
             if key in responses or key not in requests or requests[key]['turn_id'] != turn:
@@ -414,6 +417,12 @@ def run(request):
                 # CLI failures can carry credential/provider details in stderr.
                 raise ValueError(f'Native Hermes CLI exited with status {code}; inspect stream events')
             final, parts = native_events(read_lines(events))
+            usage = final.get('tokens') or {}
+            executor = {'agent_role': 'executor', 'total_tokens': usage.get('total'), 'cost': None,
+                        'tokens': {'input': usage.get('input'), 'output': usage.get('output'),
+                                   'cache': {'read': usage.get('cache_read'), 'write': usage.get('cache_write')}}}
+            write_json(output / 'usage.json', {'schema_version': 1, 'executor': executor, 'root_executor': executor})
+            write_json(output / 'timing.json', {'total_duration_seconds': time.monotonic() - started})
             if final.get('exit_code') != 0:
                 raise ValueError('Hermes did not complete the native turn')
             if request.get('output_schema') is not None:
@@ -436,12 +445,6 @@ def run(request):
                 {'id': proof['turn_id'], 'type': 'user', 'content': [{'type': 'text', 'text': request['prompt']}]},
                 {'id': session, 'type': 'assistant', 'content': parts}])
             (output / 'response.txt').write_text(final.get('text') or '', encoding='utf-8')
-            usage = final.get('tokens') or {}
-            executor = {'agent_role': 'executor', 'total_tokens': usage.get('total'), 'cost': None,
-                        'tokens': {'input': usage.get('input'), 'output': usage.get('output'),
-                                   'cache': {'read': usage.get('cache_read'), 'write': usage.get('cache_write')}}}
-            write_json(output / 'usage.json', {'schema_version': 1, 'executor': executor, 'root_executor': executor})
-            write_json(output / 'timing.json', {'total_duration_seconds': time.monotonic() - started})
             response.update(status='completed', environment=environment, attached=bool(request.get('skill_path')),
                             session_id=session, turn_id=proof['turn_id'], profile_home=str(home),
                             response_models=proof['response_models'],

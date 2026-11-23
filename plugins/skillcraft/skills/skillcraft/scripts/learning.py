@@ -78,8 +78,9 @@ SUCCESS = re.compile(
 CASE_TAG = re.compile(r'\[skillcraft-case:([a-zA-Z0-9_-]+)\]')
 SECRET = re.compile(
     r'-----BEGIN [^-\n]+ PRIVATE KEY-----[\s\S]*?(?:-----END [^-\n]+ PRIVATE KEY-----|$)'
-    r'|\b(?:sk-[a-zA-Z0-9_-]{8,}|gh[pousr]_[a-zA-Z0-9_]{8,}|AKIA[0-9A-Z]{16})\b'
+    r'|\b(?:sk-[a-zA-Z0-9_-]{8,}|gh[pousr]_[a-zA-Z0-9_]{8,}|github_pat_[a-zA-Z0-9_]{8,}|AKIA[0-9A-Z]{16})\b'
     r'|\bbearer\s+[^\s,;]+'
+    r'|\b([a-z][a-z0-9+.-]*://)[^\s/@]+@'
     r'''|\b(?:api[_ -]?key|pass(?:word)?|(?:access[_ -]?)?token|secret)["']?\s*[:=]\s*'''
     r'''(?:"[^"\n]*"|'[^'\n]*'|[^\s,;]+)''', re.I)
 
@@ -341,6 +342,7 @@ def config_for(project, *, enrolling=False, trusted_internal=False, hermes_home=
             raise ValueError('Learning sources must be sessions and/or evals')
         state = learning_state(root, hermes_home)
         approval = None
+        automation_inputs = None
         auto_import = False
         if not enrolling:
             try:
@@ -350,15 +352,20 @@ def config_for(project, *, enrolling=False, trusted_internal=False, hermes_home=
             if marker is None:
                 return None
             approval = marker.get('validation')
+            automation_inputs = marker.get('automation')
             auto_import = hermes_home is not None and marker.get('auto_import') is True
         selection = raw.get('selection', 'explicit')
         linked_roots = configured_linked_roots(raw, selection)
         discovery_home = discovery_hermes_home(root, raw, scope, selection, hermes_home)
         skills = selected_skills(root, raw, scope, selection, linked_roots, hermes_home=discovery_home)
+        from scripts.learning_automation import parse_automation
+        automation = parse_automation(raw)
         return {'root': root, 'state': state, 'skills': skills, 'sources': sources,
                 'scope': scope, 'selection': selection, 'linked_skill_roots': linked_roots,
                 'fingerprint': fingerprint, 'approval': approval, 'hermes': hermes_home is not None,
-                'hermes_skill_home': discovery_home, 'auto_import': auto_import}
+                'hermes_skill_home': discovery_home, 'auto_import': auto_import,
+                'automation': automation, 'automation_inputs': automation_inputs,
+                'excluded_skills': raw.get('exclude', [])}
     return None
 
 
@@ -421,7 +428,11 @@ def _reject_out_of_project_fixtures(items, base, root):
 
 
 def approval_record(config):
-    return {'config_sha256': config['fingerprint'], 'validation': approval_inputs(config)}
+    record = {'config_sha256': config['fingerprint'], 'validation': approval_inputs(config)}
+    if config.get('automation') is not None:
+        from scripts.learning_automation import automation_approval
+        record['automation'] = automation_approval(config)
+    return record
 
 
 def same_approved_source(settings, approval):
@@ -520,6 +531,9 @@ def connection(config):
     with closing(sqlite3.connect(state / 'journal.sqlite', timeout=10)) as db:
         db.row_factory = sqlite3.Row
         db.executescript(SCHEMA)
+        if config.get('automation') is not None:
+            from scripts.learning_observations import SCHEMA as OBSERVATIONS
+            db.executescript(OBSERVATIONS)
         if config.get('hermes'):
             db.execute("""CREATE TABLE IF NOT EXISTS hermes_replies (
                 session TEXT NOT NULL, turn TEXT NOT NULL, uid TEXT NOT NULL,
@@ -593,7 +607,7 @@ def learning_view(config):
                 state, action = 'blocked', 'review_learning_configuration'
             elif not unique_batch(selected):
                 state, action = 'insufficient_evidence', 'collect_independent_evidence'
-                reason = 'Need three independent cases or one reproducible correction for this skill version'
+                reason = 'Need one reproducible defect for this skill version'
             elif any(not witness.startswith('validation-retry:')
                      or witness.split(':', 2)[1] == name for witness in pending):
                 state, action = 'queued', 'wait_for_worker'
@@ -735,8 +749,8 @@ def record(db, witness, skill, version, origin, harness, session, turn, independ
 
 
 
-def record_feedback(db, harness, session, turn, target_turn, text):
-    kind = classify(text)
+def record_feedback(db, harness, session, turn, target_turn, text, *, kind=None):
+    kind = kind or classify(text)
     if kind:
         prior = db.execute(
             'SELECT turn,bindings,excerpt FROM messages WHERE harness=? AND session=? AND role=\'assistant\' '
@@ -791,7 +805,7 @@ def add_model_steps(db, harness, session, turn, steps, *, schedule):
 
 def observe(project, harness, session, turn, role, text, loaded, *, target_turn=None,
             diagnostic=None, hermes_home=None, hermes_uid=None,
-            model_steps=0, defer_feedback=False):
+            model_steps=0, defer_feedback=False, tool_events=None, artifact_snapshot=True):
     config = config_for(project, hermes_home=hermes_home)
     if not config or 'sessions' not in config['sources']:
         return False
@@ -802,9 +816,15 @@ def observe(project, harness, session, turn, role, text, loaded, *, target_turn=
         raise ValueError('Messages need durable session and turn identities')
     if type(model_steps) is not int or not 0 <= model_steps <= 2**31 - 1 or (model_steps and role != 'assistant'):
         raise ValueError('Invalid completed model step count')
+    if type(artifact_snapshot) is not bool:
+        raise ValueError('artifact_snapshot must be a boolean')
+    from scripts.learning_observations import (observation_kind, retained_text, save_artifact_snapshot,
+                                               save_completed_turn, save_feedback)
+
+    auto = config.get('automation') is not None
     labels = binding(config, loaded)
     case_key = prompt_key(text) if role == 'user' else None
-    excerpt = sanitize(text)[:500] if role == 'assistant' and labels else None
+    excerpt = retained_text(text) if auto else (sanitize(text)[:500] if role == 'assistant' and labels else None)
     with connection(config) as db:
         uid = sha256(hermes_uid.encode()).hexdigest() if hermes_home and isinstance(hermes_uid, str) and hermes_uid else None
         if uid and role == 'user':
@@ -823,24 +843,31 @@ def observe(project, harness, session, turn, role, text, loaded, *, target_turn=
             (harness, session, turn, role, json.dumps(labels), sanitize(diagnostic) if diagnostic else None,
              case_key, excerpt),
         ).rowcount
-        if inserted and uid and role == 'assistant' and labels:
+        if inserted and uid and role == 'assistant' and (labels or auto):
             db.execute('INSERT OR IGNORE INTO hermes_replies(session,turn,uid) VALUES (?,?,?)',
                        (session, turn, uid))
         if inserted and role == 'user' and defer_feedback:
             db.execute('DELETE FROM pending_feedback WHERE harness=? AND session=?', (harness, session))
-        if inserted and role == 'user' and target_turn and classify(text):
-            if defer_feedback:
+        if inserted and role == 'user' and auto and artifact_snapshot:
+            save_artifact_snapshot(db, config, harness, session, turn, text)
+        if inserted and role == 'user' and target_turn and observation_kind(text, config):
+            if defer_feedback or auto:
                 db.execute('INSERT INTO pending_feedback VALUES (?,?,?,?,?)',
                            (harness, session, turn, target_turn, sanitize(text)))
             else:
                 record_feedback(db, harness, session, turn, target_turn, text)
         if inserted and role == 'assistant':
+            if auto:
+                save_completed_turn(db, harness, session, turn, text, labels, tool_events, config=config)
             feedback = db.execute(
                 'DELETE FROM pending_feedback WHERE harness=? AND session=? AND turn=? RETURNING target,text',
                 (harness, session, turn),
             ).fetchone()
             if feedback:
-                record_feedback(db, harness, session, turn, feedback['target'], feedback['text'])
+                kind = observation_kind(feedback['text'], config)
+                record_feedback(db, harness, session, turn, feedback['target'], feedback['text'], kind=kind)
+                if auto and kind:
+                    save_feedback(db, harness, session, turn, feedback['target'], feedback['text'], kind)
             if model_steps and db.execute(
                 "SELECT 1 FROM messages WHERE harness=? AND session=? AND turn=? AND role='user'",
                 (harness, session, turn),
@@ -850,6 +877,9 @@ def observe(project, harness, session, turn, role, text, loaded, *, target_turn=
             queue_message_checkpoint(db, at_boundary=role == 'user')
         pending = hermes_home is None and db.execute(
             "SELECT 1 FROM checkpoints WHERE status != 'done' LIMIT 1").fetchone()
+        if auto and inserted and role == 'assistant' and hermes_home is None:
+            from scripts.learning_batch import due
+            pending = bool(pending) or due(db, config['automation'])
     if pending:
         wake(config)
     return bool(inserted)
@@ -1053,6 +1083,9 @@ def import_hermes(project, profile, *, completed_session=None, automatic=False):
     if journal.resolve() != journal:
         raise ValueError('The Hermes journal must be inside the selected profile')
     counts = {'imported': 0, 'duplicates': 0, 'skipped': 0}
+    learns_unbound = target.get('automation') is not None and source.get('automation') is not None
+    if learns_unbound:
+        counts['observations'] = 0
     if not journal.exists():
         return counts
     if not journal.is_file():
@@ -1072,6 +1105,11 @@ def import_hermes(project, profile, *, completed_session=None, automatic=False):
             ORDER BY e.id
         """, (completed_session, completed_session))
         with connection(target) as db:
+            if learns_unbound and {'observations', 'observed_turns'} <= source_tables:
+                from scripts.learning_batch import due
+                from scripts.learning_observations import import_observations
+                counts['observations'] = import_observations(db, hermes, completed_session, target)
+                checkpoint |= (counts['observations'] > 0 or automatic) and due(db, target['automation'])
             for entry in rows:
                 try:
                     witness = json.loads(entry['witness'])
@@ -1407,17 +1445,117 @@ def enable_learning(args, home):
     return {'enabled': str(root), 'journal': str(config['state'])}
 
 
+def candidate_action(args, config):
+    from scripts.harness import resolve_harness
+    from scripts.learning_candidates import apply_candidate, load_candidate, rollback_candidate, stage_candidate, verify_candidate
+
+    root = config['root']
+    state = config['state']
+    home_root = root if config['scope'] == 'home' else None
+    collision_roots = [root / path for path in ('.agents/skills', '.codex/skills', '.opencode/skills',
+                                                'opencode/skills', '.hermes/skills', '.config/opencode/skills')]
+    if config.get('hermes_skill_home'):
+        collision_roots.append(config['hermes_skill_home'] / 'skills')
+    if args.command == 'stage':
+        draft = args.draft.resolve(strict=True)
+        source = None
+        if args.source:
+            supplied = args.source if args.source.is_absolute() else Path.cwd() / args.source
+            source = local_path(root, supplied.absolute().relative_to(root).as_posix(), directory=True)
+        return stage_candidate(content_path=draft, state_dir=state, project_root=root, name=draft.name,
+                               kind='revision' if source else 'new', source_path=source,
+                               collision_roots=collision_roots, home_root=home_root)
+    candidate_id = args.candidate
+    if args.command == 'verify-now':
+        candidate, _ = load_candidate(candidate_id=candidate_id, state_dir=state)
+        if candidate.get('status', '').startswith('applied'):
+            raise ValueError('Prepare a new candidate to re-evaluate an applied version')
+        previous = os.environ.get(INTERNAL)
+        os.environ[INTERNAL] = '1'
+        try:
+            result = verify_candidate(candidate_id=candidate_id, state_dir=state, evals=args.evals,
+                                      workspace=args.workspace, model=args.model, harness=resolve_harness(args.harness),
+                                      repeats=args.repeats, timeout=args.timeout, judge_model=args.judge_model)
+        finally:
+            if previous is None:
+                os.environ.pop(INTERNAL, None)
+            else:
+                os.environ[INTERNAL] = previous
+        return {key: result[key] for key in ('candidate', 'trusted_pass', 'reason')}
+    if args.command == 'apply':
+        return apply_candidate(candidate_id=candidate_id, state_dir=state, project_root=root, manual=True,
+                               home_root=home_root, collision_roots=collision_roots)
+    return rollback_candidate(candidate_id=candidate_id, state_dir=state)
+
+
+def candidate_config(project):
+    root = Path(project).resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError('Choose an existing project directory')
+    return {'root': root, 'state': learning_state(root), 'scope': 'home' if root == Path.home().resolve() else 'project'}
+
+
+def verify_artifact(project, harness=None, session=None, turn=None, *, topic=None, case_id=None):
+    """Verify either a captured native turn or an explicit standalone approved case."""
+    config = config_for(project)
+    if not config or config.get('automation') is None or 'sessions' not in config['sources']:
+        raise ValueError('Artifact verification requires enrolled session automation')
+    from scripts.learning_observations import verify_saved_artifact
+    native = (harness, session, turn)
+    if any(value is not None for value in native):
+        if not all(value is not None for value in native) or harness not in HARNESSES or topic is not None:
+            raise ValueError('Native verification requires harness, session and turn, without --topic')
+        with connection(config) as db:
+            return verify_saved_artifact(db, config, harness, session, turn, case_id=case_id)
+    if not isinstance(topic, str) or not topic or not isinstance(case_id, str) or not case_id:
+        raise ValueError('Standalone verification requires an approved --topic and --case')
+    from scripts.learning_observations import verify_standalone_artifact
+    with connection(config) as db:
+        return verify_standalone_artifact(db, config, topic, case_id)
+
+
+def staged_candidates(state):
+    root = state / 'candidates'
+    if not root.is_dir() or root.is_symlink():
+        return []
+    records = []
+    for directory in root.iterdir():
+        if not directory.is_dir() or directory.is_symlink():
+            continue
+        try:
+            snapshot = read_regular(directory / 'candidate.json')
+            record = json.loads(snapshot[0]) if snapshot else {}
+            if not isinstance(record, dict) or record.get('id') != directory.name:
+                continue
+            details = {key: record.get(key) for key in
+                       ('id', 'name', 'kind', 'status', 'candidate_hash', 'source_hash', 'created_at', 'catalog')}
+            verification = record.get('verification') or {}
+            details['verification'] = {key: verification.get(key) for key in
+                                       ('trusted_pass', 'reason', 'workspace')}
+            records.append(details)
+        except (OSError, TypeError, ValueError):
+            continue
+    return sorted(records, key=lambda item: item['created_at'] or 0, reverse=True)[:20]
+
+
 def main(argv=None):
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument('--hermes-home', type=Path, help=argparse.SUPPRESS)
     sub = cli.add_subparsers(dest='command', required=True)
     sub.add_parser('observe', help='Read one native message envelope from stdin')
+    verify = sub.add_parser('verify-artifact', help='Recheck captured tool work against approved train checks')
+    verify.add_argument('project', type=Path)
+    verify.add_argument('harness', nargs='?', choices=HARNESSES)
+    verify.add_argument('session', nargs='?')
+    verify.add_argument('turn', nargs='?')
+    verify.add_argument('--topic', help='Approved automation.cases topic for standalone no-hooks verification')
+    verify.add_argument('--case', dest='case_id', help='Require this exact approved case ID')
     sync = sub.add_parser('sync-hermes')
     sync.add_argument('project', type=Path)
     sync.add_argument('session')
     recovery = sub.add_parser('recover-hermes', help='Record independently verified local history observations')
     recovery.add_argument('project', type=Path)
-    for verb in ('enable', 'work', 'status', 'preview', 'rollback', 'inventory'):
+    for verb in ('enable', 'work', 'status', 'preview', 'rollback', 'inventory', 'repair-exchanges'):
         parser = sub.add_parser(verb)
         parser.add_argument('project', type=Path)
         if verb == 'enable':
@@ -1431,11 +1569,32 @@ def main(argv=None):
             parser.add_argument('--linked-roots-preview-sha256', metavar='DIGEST',
                                 help='Match the preview_sha256 returned by --preview-linked-roots')
         if verb == 'rollback':
-            parser.add_argument('revision', type=int)
+            parser.add_argument('revision', nargs='?', type=int)
+            parser.add_argument('--candidate', help='Undo a staged candidate that has been applied')
         if verb == 'work':
             parser.add_argument('--lock-fd', type=int, help=argparse.SUPPRESS)
             parser.add_argument('--retry-blocked', action='store_true',
                                 help='Queue one durable validation-only retry for saved blocked proposals')
+    for verb, description in (
+        ('stage', 'Save a prepared skill folder as a separate candidate'),
+        ('verify-now', 'Run a fresh A/B for a staged candidate without applying it'),
+        ('apply', 'Apply a staged candidate by explicit owner request'),
+    ):
+        parser = sub.add_parser(verb, help=description)
+        parser.add_argument('project', type=Path)
+        if verb == 'stage':
+            parser.add_argument('draft', type=Path)
+            parser.add_argument('--source', type=Path, help='Existing source for a revision')
+        else:
+            parser.add_argument('candidate')
+        if verb == 'verify-now':
+            parser.add_argument('--evals', type=Path, required=True)
+            parser.add_argument('--workspace', type=Path)
+            parser.add_argument('--harness', choices=HARNESSES)
+            parser.add_argument('--model', required=True)
+            parser.add_argument('--judge-model')
+            parser.add_argument('--repeats', type=int, default=3)
+            parser.add_argument('--timeout', type=int, default=180)
     hermes_import = sub.add_parser('import-hermes', help='Import verified conversations from an enrolled Hermes profile')
     hermes_import.add_argument('project', type=Path)
     hermes_import.add_argument('--from-profile', type=Path, required=True, help='Hermes profile home directory')
@@ -1452,9 +1611,15 @@ def main(argv=None):
             if not home.is_absolute() or args.command not in journal_commands:
                 raise ValueError('This command requires an absolute Hermes profile path and a supported journal operation')
         if args.command == 'observe':
-            inserted = observe(**json.load(sys.stdin), hermes_home=home)
+            payload = json.load(sys.stdin)
+            artifact_snapshot = payload.pop('artifact_snapshot', True) is True
+            inserted = observe(**payload, hermes_home=home, artifact_snapshot=artifact_snapshot)
             if home is not None:
                 print(json.dumps({'inserted': inserted}))
+            return 0
+        if args.command == 'verify-artifact':
+            print(json.dumps(verify_artifact(args.project, args.harness, args.session, args.turn,
+                                             topic=args.topic, case_id=args.case_id), ensure_ascii=False))
             return 0
         if args.command == 'import-hermes':
             print(json.dumps(import_hermes(args.project, args.from_profile)))
@@ -1481,7 +1646,17 @@ def main(argv=None):
             print(json.dumps(enable_learning(args, home), ensure_ascii=False))
             return 0
         config = config_for(args.project, hermes_home=home)
+        if args.command == 'rollback' and (args.revision is None) == (args.candidate is None):
+            raise ValueError('Choose a numeric revision or --candidate ID')
+        if args.command in {'stage', 'verify-now', 'apply'} or (args.command == 'rollback' and args.candidate):
+            print(json.dumps(candidate_action(args, config or candidate_config(args.project)), ensure_ascii=False))
+            return 0
         if not config:
+            if home is None and args.command in {'status', 'preview'}:
+                candidates = staged_candidates(candidate_config(args.project)['state'])
+                if candidates:
+                    print(json.dumps({'candidates': candidates}, ensure_ascii=False))
+                    return 0
             raise ValueError('Project learning is not enabled')
         if home is not None and 'sessions' not in config['sources']:
             raise ValueError('Hermes requires sessions in the learning sources')
@@ -1495,7 +1670,12 @@ def main(argv=None):
             if args.retry_blocked:
                 with connection(config) as db:
                     queue(db, f'manual-retry:{secrets.token_hex(16)}')
-            work(config, lock_fd=args.lock_fd)
+            report = work(config, lock_fd=args.lock_fd)
+            if report is not None and args.lock_fd is None:
+                print(json.dumps(report, ensure_ascii=False))
+        elif args.command == 'repair-exchanges':
+            from scripts.learning_worker import repair_legacy_exchanges
+            print(json.dumps(repair_legacy_exchanges(config), ensure_ascii=False))
         elif args.command == 'rollback':
             from scripts.learning_worker import rollback_revision
             print(json.dumps(rollback_revision(config, args.revision), ensure_ascii=False))
@@ -1513,10 +1693,20 @@ def main(argv=None):
                     'checkpoints': {r[0]: r[1] for r in db.execute('SELECT status,COUNT(*) FROM checkpoints GROUP BY status')},
                     'revisions': [dict(r) for r in db.execute('SELECT * FROM revisions ORDER BY id DESC LIMIT 20')],
                 }
+                if config.get('automation') is not None and home is None:
+                    from scripts.learning_batch import batch_status
+                    summary['automation'] = batch_status(config, db)
+            if home is None:
+                summary['candidates'] = staged_candidates(config['state'])
             view = learning_view(config)
             summary.update(evidence_groups=view['groups'], history=view['history'], next_actions=view['preview'])
             if args.command == 'preview':
-                print(json.dumps({'skills': view['preview'], 'evidence_groups': view['groups']}, ensure_ascii=False))
+                preview = {'skills': view['preview'], 'evidence_groups': view['groups']}
+                if 'automation' in summary:
+                    preview['automation'] = summary['automation']
+                if 'candidates' in summary:
+                    preview['candidates'] = summary['candidates']
+                print(json.dumps(preview, ensure_ascii=False))
             else:
                 print(json.dumps(summary, ensure_ascii=False))
         return 0

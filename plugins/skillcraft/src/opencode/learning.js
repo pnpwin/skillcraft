@@ -50,6 +50,28 @@ export function completedModelSteps(segment) {
   return ids.size;
 }
 
+export function completedToolEvents(segment) {
+  const events = new Map();
+  for (const message of segment) {
+    if (message.type !== 'assistant' || !Array.isArray(message.content)) continue;
+    for (let index = 0; index < message.content.length; index += 1) {
+      const part = message.content[index];
+      if (part?.type !== 'tool') continue;
+      const id = typeof part.id === 'string' && part.id ? part.id
+        : `${typeof message.id === 'string' && message.id ? message.id : 'unknown'}:${index}`;
+      const tool = typeof part.name === 'string' && part.name ? part.name : 'tool';
+      const state = part.state?.status;
+      const status = state === 'completed' ? 'ok'
+        : state === 'error' || part.state?.error ? 'error' : 'unknown';
+      const event = { id, tool, status };
+      const previous = events.get(id);
+      events.set(id, previous && (previous.tool !== tool || previous.status !== status)
+        ? { id, tool: 'tool', status: 'unknown' } : event);
+    }
+  }
+  return [...events.values()];
+}
+
 export function selectTurn(messages) {
   const turns = completedTurns(messages);
   const lastUserIndex = messages.findLastIndex((message) => message.type === 'user');

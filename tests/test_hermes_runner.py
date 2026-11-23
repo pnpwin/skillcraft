@@ -51,6 +51,16 @@ class HermesRunnerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.check(after={**self.after, 'api_request_id': 'unrelated'})
 
+    def test_identical_provider_request_retry_keeps_native_proof(self):
+        rows = [self.before, dict(self.before), self.after]
+        self.assertEqual(hermes_runner.check_requests(
+            rows, self.request, 'native-session', self.profile, block=None), self.check())
+        for altered in ([self.before, {**self.before, 'catalog': ['replacement']}, self.after],
+                        [self.before, self.after, self.before]):
+            with self.assertRaisesRegex(ValueError, 'Invalid native request receipt'):
+                hermes_runner.check_requests(
+                    altered, self.request, 'native-session', self.profile, block=None)
+
     def test_complete_native_preload(self):
         path = self.root / 'SKILL.md'
         path.write_text('---\nname: demo\n---\n\nPrivate tool instructions.\n')

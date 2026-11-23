@@ -176,6 +176,47 @@ class LearningCaptureTests(unittest.TestCase):
             self.assertIsNone(capture.completed_model_steps(str(transcript), 's', 't'))
             self.assertTrue(capture.aborted_turn(str(transcript), 's', 't'))
 
+    def test_codex_tool_events_are_turn_scoped_minimal_and_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / 'rollout.jsonl'
+            rows = [
+                {'type': 'event_msg', 'payload': {'type': 'item_completed', 'thread_id': 's', 'turn_id': 't',
+                 'item': {'type': 'CommandExecution', 'id': 'cmd-1', 'status': 'completed', 'exit_code': 0,
+                          'command': ['secret command']}}},
+                {'type': 'event_msg', 'payload': {'type': 'item_completed', 'thread_id': 's', 'turn_id': 't',
+                 'item': {'type': 'CommandExecution', 'id': 'cmd-1', 'status': 'completed', 'exit_code': 0}}},
+                {'type': 'event_msg', 'payload': {'type': 'item_completed', 'thread_id': 's', 'turn_id': 't',
+                 'item': {'type': 'McpToolCall', 'id': 'mcp-1', 'status': 'failed', 'name': 'private/tool'}}},
+                {'type': 'event_msg', 'payload': {'type': 'item_completed', 'thread_id': 's', 'turn_id': 'other',
+                 'item': {'type': 'CommandExecution', 'id': 'other', 'status': 'failed'}}},
+            ]
+            transcript.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+            self.assertEqual(capture.completed_tool_events(str(transcript), 's', 't'), [
+                {'id': 'cmd-1', 'tool': 'command', 'status': 'unknown'},
+                {'id': 'mcp-1', 'tool': 'mcp', 'status': 'error'},
+            ])
+
+    def test_codex_stop_observation_includes_tool_events(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / 'project'
+            project.mkdir()
+            rollout = project / 'rollout.jsonl'
+            rollout.write_text(json.dumps({'type': 'event_msg', 'payload': {
+                'type': 'item_completed', 'thread_id': 'session', 'turn_id': 'turn',
+                'item': {'type': 'CommandExecution', 'id': 'command-1', 'status': 'completed', 'exit_code': 0},
+            }}) + '\n')
+            env = {'PLUGIN_ROOT': str(CAPTURE.parents[1]), 'PLUGIN_DATA': str(Path(directory) / 'data')}
+            with mock.patch.dict(capture.os.environ, env, clear=False), \
+                    mock.patch.object(capture, 'enabled', return_value=True), \
+                    mock.patch.object(capture, 'inventory', return_value=[]), \
+                    mock.patch.object(capture, 'observe', return_value=True) as observe:
+                base = {'cwd': str(project), 'session_id': 'session'}
+                self.invoke({**base, 'hook_event_name': 'UserPromptSubmit', 'turn_id': 'turn', 'prompt': 'prompt'})
+                self.invoke({**base, 'hook_event_name': 'Stop', 'turn_id': 'turn',
+                             'transcript_path': str(rollout), 'last_assistant_message': 'answer'})
+            assistant = next(call.args[2] for call in observe.call_args_list if call.args[2]['role'] == 'assistant')
+            self.assertEqual(assistant['tool_events'], [{'id': 'command-1', 'tool': 'command', 'status': 'unknown'}])
+
     def test_aborted_codex_stop_does_not_send_an_assistant_completion(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / 'project'

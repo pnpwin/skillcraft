@@ -13,12 +13,18 @@ already establishes. Ask only about gaps that affect the result.
 
 | User goal | Start here |
 | --- | --- |
-| Create a skill | Read the sections of the [authoring guide](references/authoring-guide.md) that apply to the request. Draft and validate the skill. |
+| Create a skill, including from this conversation | Read the sections of the [authoring guide](references/authoring-guide.md) that apply to the request. Draft and validate the skill. |
 | Create a reusable prompt | Follow the prompt workflow below. |
-| Evaluate an existing artifact or review a report | Read [evaluation and iteration](references/evaluation-and-iteration.md) for the selected evaluation, then follow the [evaluation commands](references/run-evaluations.md). |
-| Improve behavior or selection | Reproduce the problem before proposing a small change. Compare the candidate with the current version and protect successful cases. |
+| Evaluate an artifact, check a candidate now, or review a report | Read [evaluation and iteration](references/evaluation-and-iteration.md) for the selected evaluation, then follow the [evaluation commands](references/run-evaluations.md). |
+| Improve an existing skill | Reproduce the problem before proposing a small change. Compare the candidate with the current version and protect successful cases. |
 
 ## Create
+
+When starting from a conversation, use the relevant turns to identify the recurring
+task, durable rules, and confirmed examples. Show which evidence supports each
+rule and note where an expected result still needs verification. Keep transient
+errors, private details, and credentials out of the skill. For a revision, use the
+current package and preserve behavior supported by earlier checks.
 
 For a skill, match the folder and frontmatter name and write a description that
 helps the harness select it for realistic requests. Keep workflow and essential
@@ -67,7 +73,10 @@ When the output is the issue, revise the instructions or resources. Consider
 splitting only when the workflows have distinct requests and deliverables. Check
 the new routing on positives and near misses and evaluate the cost of the split.
 
-Show the diff, representative results and remaining limitations. Keep model
-proposals in a workspace until the user approves an update or the project has
-enrolled the exact skill for automatic application. Read [Learning](references/learning.md)
-before configuring collection or automatic updates.
+Show the diff, representative results and remaining limitations. To save a draft,
+check it now, apply it, inspect scheduled work, or roll it back, follow
+[session candidates](references/learning.md#session-candidates). Run A/B on request
+in the manual workflow. A verification request ends with the report. Use the
+separate apply action when the user requests publication. Read
+[scheduled Learning](references/learning.md#scheduled-learning) before enabling
+automatic creation or updates.

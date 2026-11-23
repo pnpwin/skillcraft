@@ -91,7 +91,7 @@ Learning's own A/B runs do not feed back into the journal.
 
 ```mermaid
 flowchart TD
-    A["Process a queued check"] --> B{"Enough independent evidence and approved datasets and models?"}
+    A["Process a queued check"] --> B{"Reproducible defect and approved training inputs?"}
     B -->|No| C["Retain the evidence and skip generation"]
     B -->|Yes| D["Generate a candidate in an isolated snapshot"]
     D --> E{"Approved checks and controlled A/B pass?"}
@@ -103,8 +103,25 @@ flowchart TD
     I -->|Mismatch| F
 ```
 
-Generation requires three independent observations or a correction backed by a
-reproducible failure. The optimizer sees approved training evidence. The A/B
+One reproducible defect can queue a revision. The optimizer sees approved
+training evidence. The A/B
 worker protects holdout and previously confirmed behavior across configured
 runtimes. Executable changes also require owner-provided tests in the configured
 offline validation environment.
+
+### Scheduled candidates
+
+```mermaid
+flowchart LR
+    A["Completed local turns and A/B"] --> B["Scoped journal and artifact checks"]
+    B --> C["Due batch"]
+    C --> D["One verified case queues a draft"]
+    D --> H{"Independent holdout available?"}
+    H -->|No| W["Keep draft and wait for a case"]
+    H -->|Yes| E["Paired evaluation"]
+    M["Manual draft"] --> E
+    E --> R["Quality and resource reports"]
+    R -->|Policy and checks pass| P["Publish with recovery record"]
+    P -->|Native catalog matches| Q["Record the active hash and rollback history"]
+    P -->|Catalog check fails| V["Restore the previous version"]
+```

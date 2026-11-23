@@ -8,8 +8,10 @@ Install the SkillCraft plugin in Codex or OpenCode to collect conversation
 events. Standalone SkillCraft can collect evaluation and review evidence.
 Review and trust SkillCraft's bundled `UserPromptSubmit` and `Stop` hooks in
 Codex before using conversation collection. Trust `PostModelRequest` for
-model-step counting where the installed Codex exposes it. The marketplace
-package uses the Codex compatibility manifest for hook discovery.
+model-step counting where the installed Codex exposes it. Scheduled Learning also
+uses `PostToolUse` for tool outcomes. Review and trust that hook when enabling
+scheduled collection. The marketplace package uses the Codex compatibility
+manifest for hook discovery.
 [Codex hook trust](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks)
 Completed quality evaluations and validated HTML feedback feed the same journal.
 For a run with the skill loaded, set an explicit success, failure, or correction
@@ -126,9 +128,11 @@ records the train/holdout dataset bytes and each in-project fixture identity
 and hash for model evaluation. Dataset or fixture changes pause model work
 until the owner enables learning again. A configuration change pauses learning
 until the owner enables it again. The journal stores
-message identities, version bindings, and short redacted evidence outside the
-skill directory. Identified skill turns can retain a short redacted answer
-excerpt so a later confirmation preserves the concrete successful behavior.
+message identities, version bindings, and short excerpts with recognized
+credentials removed outside the skill directory. This includes common API
+tokens and URI userinfo; it is not general PII filtering. Identified skill turns
+can retain a short redacted answer excerpt so a later confirmation preserves
+the concrete successful behavior.
 
 ```sh
 "${SKILLCRAFT_VENV:-${XDG_DATA_HOME:-$HOME/.local/share}/skillcraft/venv}/bin/python" \
@@ -248,8 +252,9 @@ Observers commit the step count and any feedback from a chat only after that
 turn finishes. Step counts use runtime event identifiers, with no reasoning
 text. Intermediate tool messages, subagent activity, interrupted turns and
 learning-generated evaluations do not contribute model steps. A signal with an
-unknown skill or version stays diagnostic. Repeated A/B samples from one case
-or one explicit paraphrase group count as one source of evidence.
+unknown skill or version can support a new skill when a project-approved case
+confirms the result. Revising an enrolled skill requires its verified version.
+Repeats of the same case and input count once.
 
 Codex uses `UserPromptSubmit` and `Stop` for turns and `PostModelRequest` for
 completed model requests. A supported local rollout can bind
@@ -261,9 +266,9 @@ and changed files leave the turn unbound. OpenCode follows execution and inbox
 events, then verifies the skill body in persisted attachments or successful native skill tool
 results against the enrolled version observed at the start of the turn.
 
-The worker uses three independent observations or one correction backed by
-a reproducible failure. A/B imports use completed deterministic and independent
-judge grades. A correction needs a deterministic reproduction to qualify on its own.
+One reproducible defect can queue a revision. A/B imports use completed
+deterministic and independent judge grades. Automatic publication also needs
+independent holdout coverage and a fresh, controlled A/B result.
 Ordinary English or Russian confirmations, failure reports and corrections
 are recognized when they can be attributed to the preceding skill use. Add
 `[skillcraft-case:case-id]` to link feedback to an existing case. A
@@ -303,8 +308,15 @@ concurrent edit can be restored. A supported same-filesystem atomic exchange
 is required for auto-apply.
 
 Use `rollback "$PWD" REVISION_ID` to restore a recorded backup. Rollback
-checks the currently installed hash before switching directories. To import
-an existing run by hand use `ingest WORKSPACE --project "$PWD"`, with
+checks the currently installed hash before switching directories.
+
+After upgrading, if Hermes discovers copies named `.promotion-…` or
+`.rollback-…` next to a skill, run `repair-exchanges "$PWD"` in the enrolled
+project. It archives copies that match the hashes and permissions in completed
+revision records and lists other matches under `unverified`. It preserves the
+active skill, journal history, and rollback records.
+
+To import an existing run by hand use `ingest WORKSPACE --project "$PWD"`, with
 `--feedback FILE` for an already generated review file. If the review was
 generated with a grading selection, also pass the same `--selection FILE`.
 Repeat imports are idempotent. Feedback imports report `new_evidence` and
@@ -322,3 +334,110 @@ without changing those settings. These validation checkpoints never call the
 optimizer; they run only when a hash-verified proposal for the same source and
 optimizer request is available. Failed or interrupted optimizer calls still
 wait for new evidence or a changed optimizer request.
+
+
+## Session candidates
+
+Ask SkillCraft in the current chat to create a draft from a recurring workflow
+or revise an existing skill from the relevant feedback. Keep the draft directory
+outside the runtime's skill catalog and give it the same name as its frontmatter.
+The draft and proposed checks can be reviewed before any model evaluation.
+
+```sh
+"$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/learning.py" stage "$PWD" /path/to/drafts/meeting-actions
+"$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/learning.py" verify-now "$PWD" CANDIDATE_ID \
+  --evals evals/meeting-actions.json --harness codex --model "$EXECUTOR_MODEL"
+"$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/learning.py" apply "$PWD" CANDIDATE_ID
+"$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/learning.py" rollback "$PWD" --candidate CANDIDATE_ID
+```
+
+For a revision, add `--source .agents/skills/meeting-actions` to the stage
+command. The stage result contains the candidate ID, source and candidate hashes.
+Verification writes the usual paired reports, including `report.html`, and
+returns their location. Application is a separate explicit owner action.
+The apply result records whether a trusted verification exists.
+
+## Scheduled Learning
+
+Add an `automation` block to the enrolled Learning policy. For example, this
+project discovers eligible skills, drafts new skills or revisions, and prepares
+reports for review. Apply the revised configuration with the same `enable`
+command used for initial enrollment.
+
+```json
+{
+  "schema_version": 1,
+  "enabled": true,
+  "selection": "all",
+  "sources": ["sessions", "evals"],
+  "automation": {
+    "create": true,
+    "improve": true,
+    "auto_apply": false,
+    "interval_days": 7,
+    "max_candidates_per_batch": 3,
+    "harnesses": {"codex": {"model": "<model available in your Codex profile>"}}
+  }
+}
+```
+
+Set `scope` to `home` in the policy under your home directory to use the same
+actions there. Project boundaries and enrollment still apply. For Hermes,
+enroll the local profile and enable its shared-journal auto-import. Trust the
+project in Hermes, or configure the profile to discover `~/.agents/skills` for
+home. Use the existing harness and project permission settings.
+
+The next completed session turn after a batch becomes due wakes the worker.
+`work` also checks the persisted due time, and `verify-now` evaluates a chosen
+candidate immediately. The default of three candidates per project or home
+batch is a starting setting. Raise `max_candidates_per_batch` when you can
+run more (for example, to six). Each batch combines eligible lessons into at
+most one candidate per skill. With one case, one harness, a pilot and three
+repeats, creation runs the executor eight times and revision runs it twelve
+times. Generation, judging and trigger checks add separate runs. The batch
+summary and candidate reports include stage-by-stage usage, elapsed time and
+provider-reported cost when available.
+
+Confirmed feedback belongs to the previous completed turn. A failed tool result
+can explain where a task went wrong, and a successful repeat can corroborate a
+recovery. A tool result by itself does not qualify an improvement. The journal
+records tool identifiers and categorical outcomes, with bounded redacted chat
+excerpts for opted-in scopes. Use `[skillcraft-topic:meeting-actions]` in the
+task or feedback to group related prompts. Untagged grouping is conservative.
+When a turn used multiple proven skills and no single attribution is available,
+the observation stays out of the creation queue.
+
+One confirmed result with a deterministic check can queue creation. One
+reproducible failure or correction can queue a revision. Cases can come from
+one session. With only one case, the worker can prepare a draft and report
+that an independent holdout case is needed for automatic publication.
+
+For tool-generated artifacts, approve a deterministic train case and link a
+task with `[skillcraft-case:case-id]`. On a completed turn, the observer
+checks fresh files under `outputs/` (up to 8 MiB per file) and records the
+result with input and artifact hashes. A tool status or a missing or unattributed file stays
+diagnostic. To verify a recorded local artifact manually, run
+`learning.py verify-artifact PROJECT HARNESS SESSION TURN --case CASE_ID`
+with the journal's native session and turn IDs. Without hooks, run
+`learning.py verify-artifact PROJECT --topic TOPIC --case CASE_ID` to record
+a local proof without a session or skill-version attribution. A verified A/B
+import can add version-bound evidence without session hooks.
+
+When confirming a file result, optionally record a verifiable literal in a
+separate feedback line. Use an output filename and the expected text. SkillCraft
+compiles such literals to file checks on independent cases. Keep confidential
+information out of examples sent to a configured model.
+
+```text
+I verified it works.
+[skillcraft-check:{"file":"actions.csv","contains":"Owner,Due"}]
+```
+
+Alternatively, set `automation.cases.<topic>.train` and `holdout` to
+scope-relative quality evaluation files for creating a skill. List each deterministic check's `text` in the case's `expectations`.
+Existing per-skill approved datasets also work for revisions. Keep independent holdout
+prompts, fixtures, and expected results out of training input. The worker
+records insufficient checks and leaves activation pending when it cannot verify
+a candidate. On a qualified candidate, `auto_apply: true` authorizes publication
+or replacement only inside the enrolled scope. Check the batch items and
+candidate reports with `status` and `preview`.

@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import { Plugin, Skill } from '@opencode/plugin';
 import { parse } from 'yaml';
 import {
-  completedModelSteps, consumeWithReconnect, initialCursor, learningEventPhase, learningEventTypes, messageText,
+  completedModelSteps, completedToolEvents, consumeWithReconnect, initialCursor, learningEventPhase, learningEventTypes, messageText,
   reconcileProjection, selectTurn, spawnBounded, turnsAfter, verifiedSkills,
 } from './src/opencode/learning.js';
 
@@ -109,11 +109,12 @@ async function rememberStart({ session, messages }, state, event) {
   }
 }
 
-async function captureProjection(ctx, { session, messages }, state, { abandonedUserID } = {}) {
+async function captureProjection(ctx, { session, messages }, state, { abandonedUserID, pendingOnly = false } = {}) {
   const sessionID = session.id;
   const project = session.location.directory;
   if (!(await enabled(project))) return;
   await reconcileProjection(messages, state, async (turn) => {
+    if (pendingOnly && turn.final) return false;
     if (turn.user.id === abandonedUserID) {
       state.baselines.delete(turn.user.id);
       return true;
@@ -137,6 +138,7 @@ async function captureProjection(ctx, { session, messages }, state, { abandonedU
       project, harness: 'opencode', session: sessionID, turn: turn.user.id, role: 'user',
       text: messageText(turn.user), loaded: [], target_turn: turn.targetTurn,
       defer_feedback: true,
+      artifact_snapshot: !turn.final && completedToolEvents(turn.segment).length === 0,
       diagnostic: turn.targetTurn ? undefined : 'No immediately preceding completed assistant turn is available for feedback association.',
     });
     if (!userRecorded) return false;
@@ -144,6 +146,7 @@ async function captureProjection(ctx, { session, messages }, state, { abandonedU
     const assistantRecorded = await observe({
       project, harness: 'opencode', session: sessionID, turn: turn.user.id, role: 'assistant',
       text: messageText(turn.final), loaded, diagnostic,
+      tool_events: completedToolEvents(turn.segment),
       model_steps: completedModelSteps([...turn.segment, turn.final]),
     });
     if (assistantRecorded) state.baselines.delete(turn.user.id);
@@ -232,8 +235,13 @@ export default Plugin.define({
           }
           return;
         }
-        if (phase === 'start') await rememberStart(projection, state, event);
-        else await captureProjection(ctx, projection, state);
+        if (phase === 'start') {
+          await rememberStart(projection, state, event);
+          const current = selectTurn(projection.messages);
+          if (current && !current.final) await captureProjection(ctx, projection, state, { pendingOnly: true });
+        } else {
+          await captureProjection(ctx, projection, state);
+        }
       },
       abort.signal,
       { onConnected: reconcileAll },

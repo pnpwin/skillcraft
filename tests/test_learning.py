@@ -94,12 +94,16 @@ class LearningTest(unittest.TestCase):
         self.assertEqual([row['kind'] for row in rows], ['success', 'failure', 'correction'])
         self.assertEqual([row['harness'] for row in rows], ['codex', 'opencode', 'opencode'])
         self.assertTrue(all(row['turn'] == 'old' and row['version'] == tree_hash(self.source) for row in rows))
-        self.assertTrue(learning_worker.unique_batch(rows))
+        self.assertFalse(learning_worker.unique_batch(rows))
 
     def test_redacts_credentials_and_ignores_questions(self):
         self.assertIsNone(learning.classify('Всё работает?'))
         self.assertEqual(learning.classify('Подтверждаю, что не работает'), 'failure')
         self.assertNotIn('sk-abcdefghijk', learning.sanitize('token: sk-abcdefghijk'))
+        self.assertNotIn('github_pat_', learning.sanitize('github_pat_abcdefghijk1234567890'))
+        self.assertNotIn('synthetic-password', learning.sanitize(
+            'postgresql://alice:synthetic-password@localhost/db'))
+        self.assertNotIn('secret', learning.sanitize('https://user:secret@example.test/path'))
 
     def test_preview_groups_evidence_by_version_and_independent_case_without_notes(self):
         self.enable()
@@ -122,9 +126,8 @@ class LearningTest(unittest.TestCase):
         self.assertEqual(view['preview'][0]['next_action'], 'collect_independent_evidence')
         self.assertNotIn('Private transcript', json.dumps(view))
         with learning.connection(self.config) as db:
-            for i in (2, 3):
-                learning.record(db, f'new-{i}', 'demo', version, 'feedback', 'codex', 's',
-                                't', f'case-new-{i}', f'train-{i}', 'failure', 'Observed failure')
+            learning.record(db, 'verified-defect', 'demo', version, 'tool_check', 'codex', 's',
+                            't', 'case-new', 'train-2', 'failure', 'Reproduced defect', True)
         self.assertEqual(learning.learning_view(self.config)['preview'][0]['state'], 'waiting_for_checkpoint')
 
     def test_status_history_reports_only_redacted_metadata(self):
@@ -703,6 +706,33 @@ class LearningTest(unittest.TestCase):
         self.assertIn('Preserve the supplied date', self.markdown.read_text())
         learning_worker.rollback_revision(self.config, row['id'])
         self.assertEqual(self.markdown.read_text(), before)
+
+    def test_scheduled_revision_checks_catalog_before_finalizing_and_can_rollback(self):
+        self.configuration['automation'] = {'improve': True, 'auto_apply': True}
+        write_json(self.project / learning.CONFIG, self.configuration)
+        self.config = learning.config_for(self.project, enrolling=True)
+        self.seed_worker()
+        before = tree_hash(self.source)
+
+        def runtime_probe(_root, harness, _models):
+            return lambda path, **kwargs: {'harness': harness, 'path': str(path), 'hash': tree_hash(path)}
+
+        with (patch.object(learning_worker, 'run_model', side_effect=self.fake_proposal) as model,
+              patch.object(learning_worker, 'run_quality', side_effect=self.fake_quality),
+              patch('scripts.learning_candidates.native_catalog_probe', side_effect=runtime_probe),
+              patch('scripts.learning_candidates.render_quality_review', side_effect=lambda path: path / 'review.html')):
+            report = learning_worker.work(self.config)
+            self.assertEqual(report['candidate_count'], 1)
+            self.assertEqual(report['items'][0]['result']['status'], 'applied')
+            self.assertEqual(learning_worker.work(self.config)['status'], 'not_due')
+        model.assert_called_once()
+        with learning.connection(self.config) as db:
+            revision = db.execute("SELECT * FROM revisions WHERE status='applied'").fetchone()
+        report = json.loads((Path(revision['path']) / 'report.json').read_text())
+        self.assertTrue(report['catalogs']['codex']['verified'])
+        self.assertNotEqual(tree_hash(self.source), before)
+        learning_worker.rollback_revision(self.config, revision['id'])
+        self.assertEqual(tree_hash(self.source), before)
 
     def test_changed_approval_blocks_activation(self):
         self.seed_worker()

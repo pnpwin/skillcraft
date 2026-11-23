@@ -13,6 +13,7 @@ from venv import EnvBuilder
 import yaml
 
 from plugins import skillcraft
+from plugins.skillcraft.src.hermes import hermes_learning
 from scripts import learning
 from scripts.utils import tree_hash, write_json
 
@@ -247,3 +248,33 @@ class HermesLearningTest(unittest.TestCase):
                 self.assertEqual(db.execute('SELECT SUM(steps) FROM model_steps').fetchone()[0], 15)
                 self.assertEqual([r[0] for r in db.execute('SELECT kind FROM evidence')], ['success'])
                 self.assertIn('model-steps:15', [r[0] for r in db.execute('SELECT witness FROM checkpoints')])
+
+    def test_tool_outcomes_are_minimal_deduplicated_and_attached_to_completed_turn(self):
+        self.command('enable')
+        self.start('tools')
+        hook = self.hooks['post_tool_call']
+        hook(session_id='same-session', turn_id='tools', tool_name='shell', status='ok',
+             tool_call_id='call-1', args={'command': 'private command'}, result='private output')
+        hook(session_id='same-session', turn_id='tools', tool_name='shell', status='ok',
+             tool_call_id='call-1', args={'command': 'private command'}, result='private output')
+        hook(session_id='same-session', turn_id='tools', tool_name='read', status='error',
+             tool_call_id='call-2', args={'path': '/private/path'}, result='private error')
+        hook(session_id='same-session', turn_id='tools', tool_name='shell', status='ok',
+             args={'command': 'no native id'}, result='private output')
+        captured = []
+        original = hermes_learning.run_learning
+
+        def capture_payload(home, verb, *args, **kwargs):
+            if verb == 'observe':
+                captured.append(kwargs['payload'])
+                return {'inserted': True}
+            return original(home, verb, *args, **kwargs)
+
+        with patch('plugins.skillcraft.src.hermes.hermes_learning.run_learning', side_effect=capture_payload):
+            self.finish('tools')
+        self.assertEqual(captured[-1]['tool_events'], [
+            {'id': 'call-1', 'tool': 'shell', 'status': 'ok'},
+            {'id': 'call-2', 'tool': 'read', 'status': 'error'},
+            {'id': 'unknown:shell', 'tool': 'shell', 'status': 'unknown'},
+        ])
+        self.assertTrue(all(set(event) == {'id', 'tool', 'status'} for event in captured[-1]['tool_events']))
