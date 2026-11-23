@@ -694,8 +694,11 @@ def _probe_hermes(root: Path, target: Path) -> dict:
             environment["HERMES_HOME"] = str(Path(profile).expanduser().resolve())
         # Hermes resolves a terminal workdir before the process cwd.
         environment["TERMINAL_CWD"] = str(root)
+        # Keep Python from importing repository-controlled modules from the
+        # enrolled project or a caller-provided PYTHONPATH.
+        environment.pop("PYTHONPATH", None)
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
-        result = subprocess.run([interpreter, "-B", "-c", program, target.name], cwd=root, env=environment,
+        result = subprocess.run([interpreter, "-I", "-B", "-c", program, target.name], cwd=Path("/"), env=environment,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, timeout=45, check=False)
         if result.returncode:
@@ -735,8 +738,6 @@ def apply_candidate(*, candidate_id: str, state_dir: Path, project_root: Path,
     target = Path(record["target_path"])
     if target.name != record["name"] or target.parent.resolve() != Path(record["target_root"]).resolve():
         raise ValueError("candidate_target_mismatch")
-    _check_collisions(record["name"], collision_roots,
-                      allowed_source=record.get("source_path") if record["kind"] == "revision" else None)
     state = Path(state_dir).absolute() / "promotion" / candidate_id
     state.mkdir(parents=True, exist_ok=True)
     candidate_file = _candidate_dir(state_dir, candidate_id) / "candidate.json"
@@ -747,23 +748,29 @@ def apply_candidate(*, candidate_id: str, state_dir: Path, project_root: Path,
             raise ValueError("candidate_state_conflict: state changed before apply")
         record = current
         pending = record.get("promotion") if record.get("status") == "applying" else None
+        allowed_source = record.get("source_path") if record["kind"] == "revision" else None
+        if pending and record["kind"] == "new":
+            staged = Path(pending.get("stage_path", ""))
+            if (pending.get("created") is not True or pending.get("source") != str(target.absolute())
+                    or pending.get("after_hash") != record["candidate_hash"]
+                    or not learning_promotion._valid_exchange_path(target, staged, state, "candidate")):
+                raise ValueError("candidate_promotion_intent_mismatch")
+            if target.exists() or target.is_symlink():
+                if (target.is_symlink() or not target.is_dir() or staged.is_symlink() or staged.exists()
+                        or not learning_promotion._matches_tree(target, record["candidate_hash"],
+                                                                record["candidate_modes"])):
+                    raise ValueError("candidate_collision: pending target differs from the published candidate")
+                allowed_source = target
+        _check_collisions(record["name"], collision_roots, allowed_source=allowed_source)
         if pending and not pending.get("pending"):
             if _hash(target) != record["candidate_hash"]:
                 raise ValueError("candidate_collision: pending published tree changed")
             promotion = pending
         elif record["kind"] == "new":
             if pending:
-                if pending.get("source") != str(target.absolute()) or pending.get("after_hash") != record["candidate_hash"]:
-                    raise ValueError("candidate_promotion_intent_mismatch")
-                if target.exists():
-                    if _hash(target) != record["candidate_hash"]:
-                        raise ValueError("candidate_collision: pending target contains different content")
-                else:
-                    staged = Path(pending.get("stage_path", ""))
-                    if (not learning_promotion._valid_exchange_path(target, staged, state, "candidate")
-                            or staged.is_symlink() or (staged.exists() and
-                            (_hash(staged) != record["candidate_hash"] or
-                             learning_promotion.tree_modes(staged) != record["candidate_modes"]))):
+                if allowed_source is None:
+                    if (staged.is_symlink() or (staged.exists() and not learning_promotion._matches_tree(
+                            staged, record["candidate_hash"], record["candidate_modes"]))):
                         raise ValueError("candidate_promotion_stage_mismatch")
                     if not staged.exists():
                         staged = learning_promotion._exchange_parent(target, state) / f".{target.name}.candidate-{uuid.uuid4().hex}"
@@ -807,12 +814,11 @@ def apply_candidate(*, candidate_id: str, state_dir: Path, project_root: Path,
                 try:
                     _rename_noreplace(staged, target)
                 except Exception:
-                    shutil.rmtree(staged, ignore_errors=True)
-                    if not target.exists():
+                    if staged.exists() or not target.exists():
                         record["promotion"] = None
                         record["status"] = "verified" if verified else "staged"
-                        record = _save_candidate_unlocked(state_dir, candidate_id, record, record_revision)
-                        record_revision = record["record_revision"]
+                        _save_candidate_unlocked(state_dir, candidate_id, record, record_revision)
+                        shutil.rmtree(staged, ignore_errors=True)
                     raise
                 promotion = {**intent, "pending": False,
                              "after_modes": learning_promotion.tree_modes(target)}

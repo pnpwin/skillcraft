@@ -682,6 +682,8 @@ def _scope_hash(config):
     value = {"fingerprint": config.get("fingerprint"),
              "automation": config.get("automation"),
              "automation_inputs": config.get("automation_inputs")}
+    if config.get("approval"):
+        value["approval"] = config["approval"]
     return sha256(_json(value).encode()).hexdigest()
 
 
@@ -770,9 +772,9 @@ def run_batch(config, db, *, update=None, now=None):
         if not due(db, automation, now=now):
             return {"status": "not_due", "items": []}
         stamp = _stamp(now)
+        scope_hash = _scope_hash(config)
         batch = db.execute("SELECT * FROM learning_batches WHERE status='running' ORDER BY id LIMIT 1").fetchone()
         if batch is None:
-            scope_hash = _scope_hash(config)
             planned = _plan(config, db, automation, scope_hash)
             db.execute(
                 "INSERT INTO learning_batches(status,created_at,updated_at,report) VALUES('running',?,?, '{}')",
@@ -806,6 +808,14 @@ def run_batch(config, db, *, update=None, now=None):
         for item_row in db.execute(
                 "SELECT * FROM learning_batch_items WHERE batch_id=? AND status!='done' ORDER BY ordinal",
                 (batch_id,)).fetchall():
+            if item_row["scope_hash"] != scope_hash or automation.get(item_row["operation"]) is not True:
+                result = {"status": "approval_changed", "reason": "Item is outside the current automation approval"}
+                db.execute(
+                    "UPDATE learning_batch_items SET status='done',result=?,error=NULL,updated_at=? WHERE id=?",
+                    (_json(result), _stamp(), item_row["id"]),
+                )
+                db.commit()
+                continue
             db.execute(
                 "UPDATE learning_batch_items SET status='running',error=NULL,updated_at=? WHERE id=?",
                 (_stamp(), item_row["id"]),

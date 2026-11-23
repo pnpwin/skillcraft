@@ -159,6 +159,30 @@ class LearningBatchTests(unittest.TestCase):
         import json
         self.assertEqual(3, len(json.loads(self.db.execute("SELECT row_ids FROM learning_batch_items").fetchone()[0])))
 
+    def test_resume_skips_items_outside_the_current_approval(self):
+        from scripts.learning_observations import SCHEMA
+
+        self.db.executescript(SCHEMA)
+        self.add_observation(session="s0", independent="family-0")
+
+        def interrupt(*args):
+            raise KeyboardInterrupt()
+
+        with self.assertRaises(KeyboardInterrupt):
+            run_batch(self.config, self.db, update=interrupt, now=self.now)
+        # Exercise an updated approval and a disabled operation separately.
+        for current in ({**self.config, "automation_inputs": {"cases": {}}},
+                        {**self.config, "automation": {**self.config["automation"], "create": False}}):
+            with self.subTest(automation=current["automation"], inputs=current.get("automation_inputs")):
+                self.db.execute("UPDATE learning_batches SET status='running'")
+                self.db.execute("UPDATE learning_batch_items SET status='running'")
+                self.db.commit()
+                with patch("scripts.learning_batch._rows_for_item") as read:
+                    report = run_batch(current, self.db, update=lambda *args: self.fail("stale model work"), now=self.now)
+                read.assert_not_called()
+                self.assertEqual("done", report["status"])
+                self.assertEqual("approval_changed", report["items"][0]["result"]["status"])
+
     def test_improve_uses_only_unconsumed_current_version_evidence(self):
         version = "approved-hash"
         self.db.execute("""CREATE TABLE evidence(

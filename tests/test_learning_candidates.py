@@ -87,8 +87,13 @@ class LearningCandidates(unittest.TestCase):
     def test_new_publish_recovers_after_crash_immediately_after_atomic_rename(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            record = self.stage(root)
+            catalog = root / "project" / ".agents" / "skills"
+            other_catalog = root / "project" / ".codex" / "skills"
+            roots = [catalog, other_catalog]
+            record = self.stage(root, collision_roots=roots)
             rename = learning_candidates._rename_noreplace
+            apply = dict(candidate_id=record["id"], state_dir=root / "state",
+                         project_root=root / "project", manual=True, collision_roots=roots)
 
             def rename_then_crash(source, destination):
                 rename(source, destination)
@@ -96,13 +101,23 @@ class LearningCandidates(unittest.TestCase):
 
             with patch.object(learning_candidates, "_rename_noreplace", side_effect=rename_then_crash):
                 with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
-                    learning_candidates.apply_candidate(candidate_id=record["id"], state_dir=root / "state",
-                                                        project_root=root / "project", manual=True)
+                    learning_candidates.apply_candidate(**apply)
             target = Path(record["target_path"])
             self.assertEqual(learning_candidates._hash(target), record["candidate_hash"])
-            reconciled = learning_candidates.apply_candidate(candidate_id=record["id"],
-                                                              state_dir=root / "state",
-                                                              project_root=root / "project", manual=True)
+            shadow = self.tree(other_catalog / record["name"], "unrelated\n")
+            with self.assertRaisesRegex(ValueError, "candidate_collision"):
+                learning_candidates.apply_candidate(**apply)
+            self.assertEqual("unrelated\n", (shadow / "SKILL.md").read_text())
+            (shadow / "SKILL.md").unlink()
+            shadow.rmdir()
+            skill = target / "SKILL.md"
+            content = skill.read_bytes()
+            skill.write_text("user edits\n")
+            with self.assertRaisesRegex(ValueError, "candidate_collision"):
+                learning_candidates.apply_candidate(**apply)
+            self.assertEqual("user edits\n", skill.read_text())
+            skill.write_bytes(content)
+            reconciled = learning_candidates.apply_candidate(**apply)
             self.assertEqual(reconciled["status"], "applied_manual_unverified")
             self.assertFalse(reconciled["promotion"]["pending"])
 
