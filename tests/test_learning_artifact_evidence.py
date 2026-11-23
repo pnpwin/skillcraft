@@ -116,6 +116,46 @@ class ArtifactEvidenceTests(unittest.TestCase):
                 "SELECT kind FROM evidence WHERE origin='tool_check' ORDER BY id")]
         self.assertEqual(kinds, ['failure', 'correction'])
 
+    def test_long_approved_prompt_uses_captured_case_identity(self):
+        train = self.project / 'evals/train.json'
+        data = json.loads(train.read_text())
+        prompt = ('Create a summary from notes.md. ' + 'Keep the owner-approved formatting. ' * 28).strip()
+        data['evals'][0]['prompt'] = prompt
+        write_json(train, data)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(learning.main(['enable', str(self.project)]), 0)
+        self.config = learning.config_for(self.project)
+        outputs = self.project / 'outputs'
+        outputs.mkdir()
+        (outputs / 'summary.txt').write_text('APPROVED content\n')
+        (outputs / 'meta.json').write_text('{}')
+
+        self.record_turn(prompt=prompt)
+        with learning.connection(self.config) as db:
+            user = db.execute("SELECT excerpt FROM messages WHERE role='user'").fetchone()
+            self.assertLess(len(user['excerpt']), len(prompt))
+            snapshot = db.execute('SELECT case_id,dataset_sha256 FROM artifact_turn_snapshots').fetchone()
+            self.assertEqual(snapshot['case_id'], 'case-a')
+            evidence = db.execute("SELECT details FROM observations WHERE kind='success'").fetchone()
+            self.assertIsNotNone(evidence)
+            proof = json.loads(evidence['details'])['proof']
+            self.assertEqual(proof['dataset_sha256'], snapshot['dataset_sha256'])
+        self.assertTrue(learning.verify_artifact(self.project, 'codex', 's1', 't1')['verified'])
+        self.assertFalse(learning.verify_artifact(self.project, 'codex', 's1', 't1', case_id='case-h')['verified'])
+
+        learning.observe(self.project, 'codex', 's2', 't2', 'user', prompt, [])
+        train.write_text(json.dumps(data, separators=(',', ':')))
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(learning.main(['enable', str(self.project)]), 0)
+        self.config = learning.config_for(self.project)
+        (outputs / 'summary.txt').write_text('APPROVED new content\n')
+        (outputs / 'meta.json').write_text('{"new":true}')
+        learning.observe(self.project, 'codex', 's2', 't2', 'assistant', 'The summary is ready.',
+                         learning.source_inventory(self.config),
+                         tool_events=[{'id': 's2-tool', 'tool': 'terminal', 'status': 'ok'}])
+        with learning.connection(self.config) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM evidence WHERE origin='tool_check'").fetchone()[0], 1)
+
     def test_no_case_match_no_symlink_and_changed_fixture_are_not_evidence(self):
         outputs = self.project / 'outputs'
         outputs.mkdir()

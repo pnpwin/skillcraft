@@ -234,7 +234,7 @@ def verify_saved_artifact(db, config, harness, session, turn, *, case_id=None):
             'case_id': result['case_id'], 'proof': result['proof']}
 
 
-def _case_for_prompt(config, prompt, case_id=None, topic=None):
+def _case_for_prompt(config, prompt, case_id=None, topic=None, *, dataset_sha256=None):
     """Return one exact owner-approved training case, never a holdout case."""
     from scripts.learning import dataset_snapshot, local_path
 
@@ -252,6 +252,8 @@ def _case_for_prompt(config, prompt, case_id=None, topic=None):
             continue
         snapshot = approved.get(case_topic, {}).get('train')
         if not isinstance(snapshot, dict):
+            continue
+        if dataset_sha256 is not None and snapshot.get('sha256') != dataset_sha256:
             continue
         try:
             path = local_path(config['root'], splits['train'])
@@ -374,14 +376,7 @@ def save_artifact_snapshot(db, config, harness, session, turn, prompt):
     return True
 
 
-def _fresh_output_snapshot(db, config, harness, session, turn, verified):
-    baseline = db.execute('SELECT * FROM artifact_turn_snapshots WHERE harness=? AND session=? AND turn=?',
-                          (harness, session, turn)).fetchone()
-    if (baseline is None or baseline['topic'] != verified['topic']
-            or baseline['case_id'] != verified['case_id']
-            or baseline['dataset_sha256'] != verified['dataset_sha256']
-            or baseline['config_sha256'] != config['fingerprint']):
-        return False
+def _fresh_output_snapshot(config, baseline, verified):
     before = json.loads(baseline['outputs'])
     after = _output_snapshot(config['root'], verified['case'].get('checks', []))
     if not after or set(before) != set(after) or set(after) != set(verified['artifacts']):
@@ -404,7 +399,7 @@ def _artifact_config(config):
     return shared
 
 
-def _verified_case(config, prompt, case_id=None, topic=None):
+def _verified_case(config, prompt, case_id=None, topic=None, *, dataset_sha256=None):
     """Check approved fixture provenance and deterministic output checks locally."""
     from scripts.grade import check_one
     from scripts.inputs import input_specs
@@ -413,7 +408,7 @@ def _verified_case(config, prompt, case_id=None, topic=None):
     config = _artifact_config(config)
     if config is None:
         return None
-    match = _case_for_prompt(config, prompt, case_id, topic)
+    match = _case_for_prompt(config, prompt, case_id, topic, dataset_sha256=dataset_sha256)
     if not match:
         return None
     topic, snapshot, row = match
@@ -501,12 +496,19 @@ def verify_standalone_artifact(db, config, topic, case_id):
 def verify_artifact_turn(db, harness, session, turn, prompt, bindings, tool_events,
                          config=None, case_id=None, event_ids_are_hashed=False, completion_proofs=None):
     """Record deterministic artifact proof for a completed, tool-observed turn."""
-    if config is None or not tool_events:
+    if config is None or not tool_events or len(bindings) > 1:
         return None
     config = _artifact_config(config)
     if config is None:
         return None
-    verified = _verified_case(config, prompt, case_id)
+    baseline = db.execute('SELECT * FROM artifact_turn_snapshots WHERE harness=? AND session=? AND turn=?',
+                          (harness, session, turn)).fetchone()
+    if (baseline is None or baseline['config_sha256'] != config['fingerprint']
+            or (case_id is not None and case_id != baseline['case_id'])):
+        return None
+    # Only the full, live prompt can bind a case. The retained excerpt is metadata.
+    verified = _verified_case(config, None, baseline['case_id'], baseline['topic'],
+                              dataset_sha256=baseline['dataset_sha256'])
     if not verified:
         return None
     if completion_proofs is not None and not any(
@@ -514,7 +516,7 @@ def verify_artifact_turn(db, harness, session, turn, prompt, bindings, tool_even
         for proof in completion_proofs
     ):
         return None
-    if len(bindings) > 1 or not _fresh_output_snapshot(db, config, harness, session, turn, verified):
+    if not _fresh_output_snapshot(config, baseline, verified):
         return None
     skill, version = next(iter(bindings.items())) if bindings else (None, None)
     independent = f"artifact:{verified['topic']}:{verified['case_id']}:{verified['input_hash']}"
