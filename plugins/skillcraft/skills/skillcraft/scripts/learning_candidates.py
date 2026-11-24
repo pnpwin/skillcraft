@@ -722,7 +722,7 @@ def _probe_opencode(root: Path, target: Path, models: dict) -> dict:
                     raise RuntimeError("opencode_native_catalog_probe_unavailable: isolated server did not start")
             output = base / "out"
             request_path = base / "request.json"
-            request = {"schema_version": 1, "operation": "probe", "directory": str(project),
+            request = {"schema_version": 1, "operation": "catalog_probe", "directory": str(project),
                        "output": str(output), "prompt": "", "model": _configured_model(models, "opencode"),
                        "agent": "build", "timeout_seconds": 90, "mode": "quality",
                        "skill_id": target.name, "skill_path": str(skill_file),
