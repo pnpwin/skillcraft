@@ -88,4 +88,9 @@ test('compatibility and publication probes keep their distinct evidence without 
   assert.equal(blocked.status, 'preflight_error');
   assert.match(blocked.error, /Unexpected non-builtin plugin/);
   assert.equal(blocked.session_id, null);
+
+  requests.length = 0;
+  await assert.rejects(probe('verify_environment', true), /OpenCode operation must be run, probe or catalog_probe/);
+  assert.deepEqual(requests, []);
+  await assert.rejects(readFile(path.join(root, 'verify_environment', 'run.json')), { code: 'ENOENT' });
 });

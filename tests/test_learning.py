@@ -163,6 +163,17 @@ class LearningTest(unittest.TestCase):
             'postgresql://alice:synthetic-password@localhost/db'))
         self.assertNotIn('secret', learning.sanitize('https://user:secret@example.test/path'))
 
+    def test_explicit_correct_result_confirmation(self):
+        self.assertEqual(learning.classify('I verified this result is correct. Reply ACK only.'), 'success')
+        self.assertEqual(learning.classify('I confirmed that the output is correct!'), 'success')
+        for text in (
+            'I verified this result is correct?',
+            'I verified this result is not correct.',
+            'I verified this result is correct only if the date is updated.',
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(learning.classify(text))
+
     def test_preview_groups_evidence_by_version_and_independent_case_without_notes(self):
         self.enable()
         version = tree_hash(self.source)

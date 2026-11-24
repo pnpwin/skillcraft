@@ -78,6 +78,8 @@ SUCCESS = re.compile(
     r'^(?:подтверждаю\b|проверил(?:а)?[,:]?\s+(?:всё\s+)?работает\b|'
     r'вс[её]\s+работает\b|сработало(?:[.!\s]|$)|'
     r'(?:i\s+)?(?:confirmed|verified)[,:]?\s+(?:it\s+)?(?:works|works correctly)\b|'
+    r'(?:i\s+)?(?:confirmed|verified)[,:]?\s+(?:that\s+)?(?:this|the)\s+(?:result|output)\s+is\s+correct'
+    r'(?=[.!](?:\s|$)|$)|'
     r'it works(?:[.!\s]|$))', re.I)
 CASE_TAG = re.compile(r'\[skillcraft-case:([a-zA-Z0-9_-]+)\]')
 SECRET = re.compile(

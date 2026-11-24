@@ -59,6 +59,13 @@ class Profiles(unittest.TestCase):
             self.assertIn('as the final response', instruction)
             self.assertEqual(json.loads(schema), REPLACEMENTS)
 
+    def test_unsupported_opencode_operation_fails_before_creating_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / 'result'
+            with self.assertRaisesRegex(ValueError, 'OpenCode operation must be run, probe or catalog_probe'):
+                runtime.run_model('', output, 'openai/test', operation='verify_environment')
+            self.assertFalse(output.exists())
+
 
 if __name__ == '__main__':
     unittest.main()

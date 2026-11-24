@@ -105,6 +105,8 @@ def run_model(prompt, output, model, *, mode='quality', skill=None, skill_id=Non
     model_config = model_ref(model, harness)
     selection = harness_metadata(harness)
     harness = selection['harness']
+    if harness == 'opencode' and operation not in ('run', 'probe', 'catalog_probe'):
+        raise ValueError('OpenCode operation must be run, probe or catalog_probe')
     if harness == 'hermes' and (operation != 'run' or preparation or
                                  (mode == 'quality' and bool(skill) != attach) or
                                  (mode == 'trigger' and (not skill or attach)) or

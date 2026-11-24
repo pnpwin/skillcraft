@@ -161,6 +161,9 @@ async function cancel(client: Client, sessionID: string) {
 
 async function run(r: Request) {
   if (r.schema_version !== 1 || !path.isAbsolute(r.directory) || !path.isAbsolute(r.output) || !r.model?.id || !r.agent || !(r.timeout_seconds > 0)) throw Error('Invalid runner request');
+  if (r.operation !== undefined && !['run', 'probe', 'catalog_probe'].includes(r.operation)) {
+    throw Error('OpenCode operation must be run, probe or catalog_probe');
+  }
   await mkdir(r.output, { recursive: true });
   const out = (name: string) => path.join(r.output, name);
   await writeFile(out('events.jsonl'), '');
