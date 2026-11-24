@@ -722,7 +722,7 @@ def _rows_for_item(db, item):
     return sorted(rows, key=lambda row: row["id"])
 
 
-def _report(batch, items, config=None):
+def _report(batch, items, config=None, db=None):
     report = {
         "batch_id": batch["id"], "status": batch["status"],
         "created_at": batch["created_at"], "updated_at": batch["updated_at"],
@@ -739,6 +739,7 @@ def _report(batch, items, config=None):
         resources = aggregate_batch_resources(
             config, batch["id"], report["items"],
             created_at=report.get("created_at"), updated_at=report.get("updated_at"),
+            db=db,
         )
         report["resources"] = resources
         report["resource_report_html"] = resources["report_html"]
@@ -810,7 +811,7 @@ def run_batch(config, db, *, update=None, reload_config=None, now=None):
                 "SELECT * FROM learning_batch_items WHERE batch_id=? ORDER BY ordinal", (batch_id,)
             ).fetchall()
             interim = _report({"id": batch_id, "status": "running", "created_at": batch["created_at"],
-                               "updated_at": _stamp()}, active_items, config)
+                               "updated_at": _stamp()}, active_items, config, db)
             db.execute("UPDATE learning_batches SET updated_at=?,report=? WHERE id=?",
                        (_stamp(), _json(interim), batch_id))
             db.commit()
@@ -892,7 +893,7 @@ def run_batch(config, db, *, update=None, reload_config=None, now=None):
                   "interrupted" if "interrupted" in result_statuses else
                   "awaiting_checks" if "awaiting_checks" in result_statuses else "done")
         batch_obj = dict(db.execute("SELECT * FROM learning_batches WHERE id=?", (batch_id,)).fetchone())
-        report = _report({**batch_obj, "status": status, "updated_at": _stamp()}, items, config)
+        report = _report({**batch_obj, "status": status, "updated_at": _stamp()}, items, config, db)
         db.execute("UPDATE learning_batches SET status=?,updated_at=?,report=? WHERE id=?",
                    (status, _stamp(), _json(report), batch_id))
         if not unfinished:
