@@ -100,6 +100,31 @@ class SessionObservationsTests(unittest.TestCase):
             self.assertEqual(tuple(observation), tuple(evidence))
             self.assertEqual((observation['skill'], observation['kind']), ('demo', 'correction'))
 
+    def test_remember_and_save_rule_are_opt_in_reflection_signals(self):
+        config = self.enroll(self.project, automation={'create': True, 'reflect': True})
+        examples = (
+            'Запомни: сохраняй порядок строк.',
+            'Сохрани это как правило: оставляй повторы.',
+            'Закрепи на будущее: пропускай пустые строки.',
+            'Remember: keep the input order.',
+            'Save this as a rule: keep duplicates.',
+            'Сохрани отчёт в outputs/report.md.',
+            'Save this to outputs/report.md.',
+        )
+        for index, text in enumerate(examples):
+            session = str(index)
+            self.turn(self.project, session, 'ask', 'Clean the rows.')
+            self.turn(self.project, session, 'review', text, review='ask')
+        with learning.connection(config) as db:
+            signals = db.execute("SELECT excerpt FROM observations WHERE kind='correction' ORDER BY id").fetchall()
+            self.assertEqual([row['excerpt'] for row in signals], list(examples[:5]))
+
+        config = self.enroll(self.project, automation={'create': True})
+        self.turn(self.project, 'off', 'ask', 'Clean the rows.')
+        self.turn(self.project, 'off', 'review', examples[0], review='ask')
+        with learning.connection(config) as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM observations WHERE session='off'").fetchone())
+
     def test_fixture_checks_only_come_from_explicit_safe_user_literals(self):
         config = self.enroll(self.project)
         for index, prompt in enumerate(('Write actions.csv from Ann agrees to call.',

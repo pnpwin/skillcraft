@@ -130,8 +130,8 @@ than a user's path rules, defines command access.
 ## Deterministic paired evaluation
 
 Every Hermes expectation must be covered by deterministic file checks; Hermes
-does not support judge-model grading, standalone grading, trigger evaluation,
-blind comparison, or custom permission profiles. Use checks that validate
+does not support judge-model grading, standalone grading, blind comparison, or
+custom permission profiles. Use checks that validate
 actual files under `outputs/`, not just the response prose. Keep prompts and
 checks identical for both arms. SkillCraft stages one immutable candidate and
 fixture snapshot before dispatch.
@@ -169,6 +169,13 @@ records the observed Hermes version and model settings. The run also preserves
 the native JSONL events and request receipts for diagnosis. The runner keeps
 execution directories to support review and recovery; remove only experiment
 directories you own after retaining required evidence.
+
+## Natural skill selection
+
+Use `run_eval.py --harness hermes` with positive and close negative requests.
+The same isolated macOS profile advertises the candidate in the native skill
+catalog. A verified native `skill_view` load counts as a trigger. Compare these
+results separately from the file-quality benchmark.
 
 ## Failure interpretation
 

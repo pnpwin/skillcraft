@@ -17,15 +17,17 @@ def parse_automation(raw):
     defaults = raw.get('defaults', {})
     if not isinstance(value, dict) or not isinstance(defaults, dict):
         raise ValueError('automation must be an object')
-    accepted = {'create', 'improve', 'auto_apply', 'interval_days', 'max_candidates_per_batch',
+    accepted = {'create', 'improve', 'auto_apply', 'reflect', 'interval_days', 'max_candidates_per_batch',
                 'cases', 'harnesses'}
     if set(value) - accepted:
         raise ValueError('Unsupported automation settings')
     policy = {'create': False, 'improve': False, 'auto_apply': False, 'interval_days': 7,
               'max_candidates_per_batch': 3, 'cases': {}, 'harnesses': defaults.get('harnesses', {}),
               **value}
-    if any(type(policy[key]) is not bool for key in ('create', 'improve', 'auto_apply')):
-        raise ValueError('automation.create, improve and auto_apply must be booleans')
+    if any(type(policy[key]) is not bool for key in ('create', 'improve', 'auto_apply', 'reflect') if key in policy):
+        raise ValueError('automation.create, improve, auto_apply and reflect must be booleans')
+    if policy.get('reflect') and not (policy['create'] or policy['improve']):
+        raise ValueError('automation.reflect requires create or improve')
     if any(type(policy[key]) is not int or policy[key] < 1
            for key in ('interval_days', 'max_candidates_per_batch')):
         raise ValueError('automation interval and candidate limit must be positive integers')

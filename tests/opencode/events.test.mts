@@ -36,12 +36,26 @@ test('other tools and failed skill loads are not successful triggering', () => {
   e.accept(event(3, 'session.tool.input.started', { name: 'skill', id: 'skill-1' }));
   e.accept(event(4, 'session.tool.called', { id: 'skill-1', input: { id: 'candidate' }, executed: true }));
   e.accept(event(5, 'session.tool.failed', { id: 'skill-1', error: { message: 'permission denied' }, executed: true }));
-  assert.equal(e.triggered('candidate', true), false);
+  assert.equal(e.triggered('candidate', true), null);
   assert.equal(e.policyBlocked, true);
   e.accept(event(6, 'session.tool.input.started', { name: 'skill', id: 'skill-2' }));
   e.accept(event(7, 'session.tool.called', { id: 'skill-2', input: { id: 'candidate' }, executed: true }));
   e.accept(event(8, 'session.tool.success', { id: 'skill-2', content: [], executed: true }));
   assert.equal(e.triggered('candidate', false), true);
+});
+
+test('an unexecuted skill result does not prove a load or a skip', () => {
+  const e = new Events();
+  e.accept(event(1, 'session.tool.input.started', { name: 'skill' }));
+  e.accept(event(2, 'session.tool.called', { input: { id: 'candidate' }, executed: false }));
+  e.accept(event(3, 'session.tool.success', { content: [], executed: false }));
+  assert.equal(e.triggered('candidate', true), null);
+  e.reconcile([{ id: 'msg_test', type: 'assistant', time: { created: 1, completed: 2 },
+    model: { providerID: 'test', id: 'test' }, agent: 'test',
+    content: [{ type: 'tool', id: 'call_test', name: 'skill', time: { created: 1 },
+      state: { status: 'completed', input: { id: 'candidate' }, content: [] } }] }] as SessionMessageInfo[], 'ses_test');
+  assert.equal(e.triggered('candidate', true), null);
+  assert.equal(e.triggered('another-candidate', true), null);
 });
 
 test('durable message recovery confirms tools and deduplicates late step events', () => {
@@ -63,7 +77,7 @@ test('tool IDs are scoped to messages and sessions', () => {
   e.accept(event(1, 'session.tool.input.started', { name: 'skill' }));
   e.accept(event(2, 'session.tool.called', { input: { id: 'candidate' } }));
   e.accept(event(3, 'session.tool.success', { assistantMessageID: 'different', content: [], executed: true }));
-  assert.equal(e.triggered('candidate', true), false);
+  assert.equal(e.triggered('candidate', true), null);
 });
 
 test('missing projected cost remains unknown while tokens are usable', () => {

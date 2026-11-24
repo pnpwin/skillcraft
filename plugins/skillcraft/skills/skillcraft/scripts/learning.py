@@ -259,7 +259,7 @@ def has_project_boundary(directory, home):
     return False
 
 
-def read_regular(path, *, dir_fd=None):
+def read_regular(path, *, dir_fd=None, max_bytes=None):
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) |
                      getattr(os, 'O_NONBLOCK', 0), dir_fd=dir_fd)
@@ -269,7 +269,10 @@ def read_regular(path, *, dir_fd=None):
         metadata = os.fstat(stream.fileno())
         if not stat.S_ISREG(metadata.st_mode):
             raise ValueError(f'Learning file must be a regular file: {path}')
-        return stream.read(), stat.S_IMODE(metadata.st_mode)
+        contents = stream.read() if max_bytes is None else stream.read(max_bytes + 1)
+        if max_bytes is not None and len(contents) > max_bytes:
+            return None
+        return contents, stat.S_IMODE(metadata.st_mode)
 
 
 def read_learning_config(root):
@@ -883,7 +886,8 @@ def observe(project, harness, session, turn, role, text, loaded, *, target_turn=
                 kind = observation_kind(feedback['text'], config)
                 record_feedback(db, harness, session, turn, feedback['target'], feedback['text'], kind=kind)
                 if auto and kind:
-                    save_feedback(db, harness, session, turn, feedback['target'], feedback['text'], kind)
+                    save_feedback(db, harness, session, turn, feedback['target'], feedback['text'], kind,
+                                  reflect=config['automation'].get('reflect') is True)
             if model_steps and db.execute(
                 "SELECT 1 FROM messages WHERE harness=? AND session=? AND turn=? AND role='user'",
                 (harness, session, turn),
@@ -1486,6 +1490,9 @@ def candidate_action(args, config):
         candidate, _ = load_candidate(candidate_id=candidate_id, state_dir=state)
         if candidate.get('status', '').startswith('applied'):
             raise ValueError('Prepare a new candidate to re-evaluate an applied version')
+        if candidate.get('lesson'):
+            from scripts.learning_reflection import require_independent_review
+            require_independent_review(config, candidate, args.evals)
         previous = os.environ.get(INTERNAL)
         os.environ[INTERNAL] = '1'
         try:
@@ -1530,7 +1537,7 @@ def verify_artifact(project, harness=None, session=None, turn=None, *, topic=Non
         return verify_standalone_artifact(db, config, topic, case_id)
 
 
-def staged_candidates(state):
+def staged_candidates(state, *, limit=20):
     root = state / 'candidates'
     if not root.is_dir() or root.is_symlink():
         return []
@@ -1545,13 +1552,18 @@ def staged_candidates(state):
                 continue
             details = {key: record.get(key) for key in
                        ('id', 'name', 'kind', 'status', 'candidate_hash', 'source_hash', 'created_at', 'catalog')}
+            if record.get('lesson'):
+                details['lesson'] = record['lesson']
+                diff = directory / 'lesson-diff.json'
+                if diff.is_file() and not diff.is_symlink():
+                    details['lesson_diff'] = str(diff)
             verification = record.get('verification') or {}
             details['verification'] = {key: verification.get(key) for key in
                                        ('trusted_pass', 'reason', 'workspace')}
             records.append(details)
         except (OSError, TypeError, ValueError):
             continue
-    return sorted(records, key=lambda item: item['created_at'] or 0, reverse=True)[:20]
+    return sorted(records, key=lambda item: item['created_at'] or 0, reverse=True)[:limit]
 
 
 def main(argv=None):
@@ -1717,6 +1729,9 @@ def main(argv=None):
                 elif config.get('automation') is not None and home is None:
                     from scripts.learning_batch import batch_status
                     summary['automation'] = batch_status(config, db)
+                    if config['automation'].get('reflect'):
+                        from scripts.learning_reflection import lesson_view
+                        summary['lessons'] = lesson_view(config, db)
             if home is None:
                 summary['candidates'] = staged_candidates(config['state'])
             view = learning_view(config)
@@ -1727,6 +1742,8 @@ def main(argv=None):
                     preview['automation'] = summary['automation']
                 if 'candidates' in summary:
                     preview['candidates'] = summary['candidates']
+                if 'lessons' in summary:
+                    preview['lessons'] = summary['lessons']
                 print(json.dumps(preview, ensure_ascii=False))
             else:
                 print(json.dumps(summary, ensure_ascii=False))

@@ -153,12 +153,19 @@ def publish_creation(config, candidate, harnesses, collision_roots):
             or current.get('automation_inputs') != config.get('automation_inputs')
             or automation_approval(current) != current.get('automation_inputs')):
         raise ValueError('Owner approval changed before automatic application')
+    if candidate.get('lesson'):
+        from scripts.learning_reflection import approved_cases
+        operation = 'improve' if candidate['kind'] == 'revision' else 'create'
+        if not current['automation'].get('reflect') or not current['automation'].get(operation):
+            raise ValueError('Reflection publication is no longer approved')
+        approved_cases(current, candidate['name'], candidate)
 
     def catalog_probe(target_path, *, harness):
         probes = []
         target_hash = tree_hash(target_path)
         for name, settings in harnesses.items():
-            with approved_runner(config, name, settings):
+            with approved_runner(config, name, settings,
+                                 skill_name=candidate['name'] if candidate.get('lesson') else None):
                 probe = native_catalog_probe(config['root'], name, {name: settings['model']})
                 evidence = probe(target_path, harness=name)
             if (evidence.get('path') != str(Path(target_path).resolve()) or evidence.get('hash') != target_hash
@@ -197,7 +204,8 @@ def resume_verified_creation(candidate, attempt, cases, harness, model, settings
                 or metadata.get("timeout_seconds") != settings.get("timeout", 180)
                 or metadata.get("evals") != cases):
             return None
-        passed, reason, proof = _trusted_pass(report, candidate["candidate_eval_hash"], None, None, workspace)
+        passed, reason, proof = _trusted_pass(report, candidate["candidate_eval_hash"],
+                                              candidate.get("source_hash"), candidate.get("source_eval_hash"), workspace)
         if not passed or proof != saved["quality_evidence"]:
             return None
         return {"candidate": candidate, "report": report, "trusted_pass": True, "reason": reason}
@@ -205,7 +213,7 @@ def resume_verified_creation(candidate, attempt, cases, harness, model, settings
         return None
 
 
-def create_candidate(config, db, name, settings, observations, batch_id):
+def create_candidate(config, db, name, settings, observations, batch_id, *, staged_id=None):
     """Draft and verify a new skill from training-only, approved evidence.
 
     The optimizer sees confirmed training signals and train cases only. Holdout
@@ -224,7 +232,7 @@ def create_candidate(config, db, name, settings, observations, batch_id):
         return {"status": "blocked", "reason": "Configure an approved model harness"}
     topic = settings.get("automation_topic", name)
     identity = _json([config.get("fingerprint"), name, _row_ids(observations)])
-    candidate_id = f"auto-{batch_id}-{sha256(identity.encode()).hexdigest()[:16]}"
+    candidate_id = staged_id or f"auto-{batch_id}-{sha256(identity.encode()).hexdigest()[:16]}"
     attempt = Path(config["state"]) / "batches" / str(batch_id) / name
 
     def finish_creation_recovery(candidate_record):
@@ -247,7 +255,7 @@ def create_candidate(config, db, name, settings, observations, batch_id):
     try:
         existing_candidate, _ = load_candidate(candidate_id=candidate_id, state_dir=config["state"])
     except ValueError as error:
-        if "candidate_not_found" not in str(error):
+        if staged_id or "candidate_not_found" not in str(error):
             raise
     collision_roots = [Path(config["root"]) / path for path in (
         ".agents/skills", ".codex/skills", ".opencode/skills", "opencode/skills",
@@ -258,6 +266,10 @@ def create_candidate(config, db, name, settings, observations, batch_id):
         collision_roots.append(Path(config["hermes_skill_home"]) / "skills")
     if existing_candidate is not None:
         status = existing_candidate.get('status')
+        if staged_id and status in {'applying', 'applied_verified'}:
+            workspace = Path(existing_candidate.get('verification', {}).get('workspace', '')).parent
+            if workspace.is_relative_to(Path(config['state']) / 'batches'):
+                attempt = workspace
         if status == 'applying':
             applied = publish_creation(config, existing_candidate, harnesses, collision_roots)
             finish_creation_recovery(applied)
@@ -268,14 +280,21 @@ def create_candidate(config, db, name, settings, observations, batch_id):
         if status in {'rolled_back', 'applied_manual', 'applied_manual_unverified'}:
             return {'status': status, 'candidate': existing_candidate}
     # Exact local/catalog collisions are checked before spending a model call.
-    if name in config.get("skills", {}):
+    if not staged_id and name in config.get("skills", {}):
         return {"status": "blocked", "reason": "A skill with this name is already enrolled"}
-    for root in collision_roots:
+    for root in (() if staged_id else collision_roots):
         if root.is_dir() and any(path.name.casefold() in {name.casefold(), name.casefold() + ".md"}
                                  for path in root.iterdir()):
             return {"status": "blocked", "reason": "A same-name skill exists in an approved catalog root"}
     approved = settings.get("automation_inputs")
     approved_paths = {}
+    fixture_root = config['root']
+    if staged_id:
+        from scripts.learning_reflection import approved_cases
+        approved, fixture_root = approved_cases(config, name, existing_candidate)
+        if not approved:
+            return {'status': 'awaiting_checks', 'candidate': existing_candidate,
+                    'reason': 'Approve train and independent holdout cases for this skill'}
     if isinstance(approved, dict) and "train" in approved and "holdout" in approved:
         splits = {}
         for split in ("train", "holdout"):
@@ -296,6 +315,11 @@ def create_candidate(config, db, name, settings, observations, batch_id):
         case.setdefault("group", f"holdout:{case['id']}")
     all_cases = splits["train"] + splits["holdout"]
     train_groups = {row.get("group") for row in splits["train"] if row.get("group")}
+    if staged_id:
+        from scripts.learning_reflection import independent_checks
+        reason = independent_checks(db, existing_candidate, observations, splits)
+        if reason:
+            return {'status': 'awaiting_checks', 'candidate': existing_candidate, 'reason': reason}
     if ({row["id"] for row in splits["train"]} & {row["id"] for row in splits["holdout"]}
             or families(splits["train"]) & families(splits["holdout"])):
         return {"status": "blocked", "reason": "Training and holdout cases overlap"}
@@ -303,19 +327,26 @@ def create_candidate(config, db, name, settings, observations, batch_id):
     frozen_expected = {}
     # Copy only owner-approved fixtures into a fixed batch snapshot. Holdout
     # fixture bytes are never added to the optimizer request.
-    approved_fixtures = (config.get("automation_inputs") or {}).get("cases", {}).get(name, {})
+    approved_fixtures = approved if staged_id else (config.get("automation_inputs") or {}).get("cases", {}).get(name, {})
     for split in ("train", "holdout"):
         fixture_hashes = approved_fixtures.get(split, {}).get("fixtures", {}) if isinstance(approved_fixtures, dict) else {}
         for row in splits[split]:
             frozen_files = []
-            for spec in input_specs(row.get("files", []), config["root"]):
+            for spec in input_specs(row.get("files", []), fixture_root):
                 source = Path(spec["source"]).resolve(strict=True)
                 if not source.is_relative_to(Path(config["root"]).resolve()):
                     return {"status": "blocked", "reason": "Evaluation fixture is outside the approved project"}
                 relative = source.relative_to(Path(config["root"]).resolve()).as_posix()
-                expected = fixture_hashes.get(relative)
+                expected = (fixture_hashes.get((row['id'], spec['destination'], relative))
+                            if staged_id and fixture_root != config['root'] else fixture_hashes.get(relative))
                 if not expected or _file_hash(source) != expected:
                     return {"status": "blocked", "reason": "Evaluation fixture differs from owner approval"}
+                if staged_id and split == 'holdout' and existing_candidate.get('source_path'):
+                    if source.is_relative_to(existing_candidate['source_path']):
+                        return {"status": "blocked", "reason": "Holdout fixture must be outside the deployable skill"}
+                inherited = row.get('session_fixture_hashes')
+                if inherited and inherited.get(spec['destination']) != expected:
+                    return {"status": "blocked", "reason": "Approved fixture differs from the protected case"}
                 frozen = attempt / "snapshots" / "fixtures" / split / row["id"] / spec["destination"]
                 frozen.parent.mkdir(parents=True, exist_ok=True)
                 if frozen.is_symlink() or (frozen.exists() and _file_hash(frozen) != expected):
@@ -327,6 +358,9 @@ def create_candidate(config, db, name, settings, observations, batch_id):
                 frozen_files.append({"source": str(frozen), "destination": spec["destination"],
                                      "role": spec["role"]})
             row["files"] = frozen_files
+            if row.get('session_fixture_hashes') and set(row['session_fixture_hashes']) != {
+                    item['destination'] for item in frozen_files}:
+                return {"status": "blocked", "reason": "Protected case fixture is missing"}
     train_ids = {row["id"] for row in splits["train"]}
     evidence = []
     for row in observations:
@@ -342,7 +376,7 @@ def create_candidate(config, db, name, settings, observations, batch_id):
             evidence.append({"kind": row["kind"], "prompt": sanitize(prompt)[:700],
                              "confirmation": sanitize(excerpt)[:500],
                              "check": detail.get("check")})
-    if not evidence:
+    if not evidence and not staged_id:
         return {"status": "awaiting_checks", "reason": "No confirmed observations map to approved training cases"}
 
     # Only training cases and sanitized confirmations enter the optimizer call.
@@ -367,7 +401,7 @@ def create_candidate(config, db, name, settings, observations, batch_id):
               "properties": {"skill_md": {"type": "string"}}}
     harness, model_settings = next(iter(harnesses.items()))
     model = model_settings.get("optimizer_model", model_settings.get("model"))
-    if not isinstance(model, str) or not model:
+    if existing_candidate is None and (not isinstance(model, str) or not model):
         return {"status": "blocked", "reason": "The configured optimizer model is missing"}
     if existing_candidate is None:
         optimizer_dir = attempt / "optimizer"
@@ -422,7 +456,7 @@ def create_candidate(config, db, name, settings, observations, batch_id):
         verification = resume_verified_creation(candidate, attempt, all_cases, eval_harness, eval_model, settings, models)
         if verification is None:
             require_model_consent()
-            with approved_runner(config, eval_harness, models):
+            with approved_runner(config, eval_harness, models, skill_name=name if staged_id else None):
                 verification = verify_candidate(
                     candidate_id=candidate["id"], state_dir=config["state"], evals=evals,
                     model=eval_model, harness=eval_harness, repeats=settings.get("repeats", 3),
@@ -444,7 +478,7 @@ def create_candidate(config, db, name, settings, observations, batch_id):
         matrix, matrix_error = _check_matrix(
             verification.get("report", {}),
             Path((candidate_record.get("verification") or {}).get("workspace", "")),
-            "without_skill",
+            "previous_skill" if candidate.get("source_hash") is not None else "without_skill",
         )
         protected_matrix = {(case_id, check): outcomes for (case_id, check), outcomes in matrix.items()
                             if case_id in protected_ids}
@@ -456,53 +490,19 @@ def create_candidate(config, db, name, settings, observations, batch_id):
             return {"status": "blocked", "candidate": candidate,
                     "verification": verification.get("reason") if not verification.get("trusted_pass")
                     else "protected_holdout_did_not_pass_or_gain", "verification_results": verification_results}
-    # Check native skill discovery separately from file quality. Codex and
-    # OpenCode each need one true trigger and one close false trigger with a
-    # usable rendered report before this draft can be considered qualified.
-    from scripts.run_eval import run_eval
-    trigger_positive = dict(splits["holdout"][0])
-    trigger_positive.update(id="heldout-positive", should_trigger=True)
-    topic_words = name.replace("-", " ")
-    trigger_negative = {
-        "id": "heldout-close-negative", "group": "heldout-negative",
-        "prompt": (f"For a glossary, explain the ordinary meaning of the words '{topic_words}' in one sentence. "
-                   "Give only a definition. No project-specific convention, tool use, or deliverable is needed."),
-        "should_trigger": False,
-    }
-    trigger_evals = attempt / "trigger-evals.json"
-    write_json(trigger_evals, {"evals": [trigger_positive, trigger_negative]})
-    trigger_reports = {}
-    for eval_harness in ("codex", "opencode"):
-        if eval_harness not in harnesses:
-            continue
-        models = harnesses[eval_harness]
-        trigger_workspace = attempt / f"trigger-{eval_harness}"
-        saved_trigger = trigger_workspace / "trigger-results.json"
-        if saved_trigger.is_file() and (trigger_workspace / "report.html").is_file():
-            trigger_report = read_json(saved_trigger)
-        else:
-            require_model_consent()
-            with approved_runner(config, eval_harness, models):
-                trigger_report = run_eval(candidate["candidate_path"], trigger_evals, trigger_workspace,
-                                          models["model"], repeats=1, timeout=settings.get("timeout", 180),
-                                          judge_model=models.get("judge_model"), harness=eval_harness)
-        summary = trigger_report.get("summary", {})
-        if (not summary.get("controlled") or summary.get("errors") or
-                summary.get("tp", 0) < 1 or summary.get("tn", 0) < 1 or
-                not (trigger_workspace / "report.html").is_file()):
-            counts = {key: summary[key] for key in ("tp", "fp", "tn", "fn", "valid", "errors")
-                      if key in summary}
-            return {"status": "blocked", "candidate": candidate,
-                    "verification_results": verification_results,
-                    "trigger_validation": "failed", "trigger_harness": eval_harness,
-                    "trigger_counts": counts,
-                    "trigger_report": str(trigger_workspace / "report.html"),
-                    "reason": f"Native {eval_harness} trigger positive/negative gate failed"}
-        trigger_reports[eval_harness] = str(trigger_workspace / "report.html")
-    result = {"candidate": candidate, "verification": verification.get("reason") if verification else None}
-    result["verification_results"] = verification_results
-    result["trigger_reports"] = trigger_reports
-    result["trigger_validation"] = "passed" if trigger_reports else "unmeasured_hermes_only"
+    from scripts.learning_triggers import qualify
+
+    triggers = qualify(
+        candidate["candidate_path"], splits["holdout"], attempt, harnesses,
+        repeats=settings.get("repeats", 3), timeout=settings.get("timeout", 180),
+        runner=lambda harness, models: approved_runner(
+            config, harness, models, skill_name=name if staged_id else None),
+    )
+    if triggers["trigger_validation"] != "passed":
+        return {"status": "blocked", "candidate": candidate,
+                "verification_results": verification_results, **triggers}
+    result = {"candidate": candidate, "verification": verification.get("reason") if verification else None,
+              "verification_results": verification_results, **triggers}
     if config.get("automation", {}).get("auto_apply"):
         # This intent precedes the filesystem publication so a restart can
         # finish the protected-case commit without rerunning the optimizer or A/B.
@@ -511,6 +511,7 @@ def create_candidate(config, db, name, settings, observations, batch_id):
             "candidate_hash": candidate["candidate_hash"],
             "passed_ab": bool(verification_results) and all(
                 item.get("trusted_pass") is True for item in verification_results),
+            "trigger_validation": triggers["trigger_validation"],
             "verification_results": verification_results,
             "protected_cases": [
                 {**case, "session_fixture_hashes": {
@@ -684,7 +685,7 @@ def _plan(config, db, automation, scope_hash):
     for item in groups:
         unique[(item["operation"], item["name"], item["topic"])] = item
     candidates = sorted(unique.values(), key=lambda item: (
-        min(row["id"] for row in item["rows"]), item["operation"], item["name"], item["topic"],
+        min((row["id"] for row in item["rows"]), default=0), item["operation"], item["name"], item["topic"],
     ))
     for item in candidates:
         if item["operation"] != "create":
@@ -698,12 +699,22 @@ def _plan(config, db, automation, scope_hash):
             item["related_skill"] = conflict
     processed = {
         (row["operation"], row["name"], row["topic"], row["row_ids"])
-        for row in db.execute("SELECT operation,name,topic,row_ids FROM learning_batch_items WHERE status='done' AND scope_hash=?",
-                              (scope_hash,))
+        for row in db.execute("SELECT operation,name,topic,row_ids,result FROM learning_batch_items "
+                              "WHERE status='done' AND scope_hash=?", (scope_hash,))
+        if not (row['operation'] == 'reflect' and row['result'] and
+                json.loads(row['result']).get('status') == 'reflection_preflight_error')
     }
-    candidates = [item for item in candidates if (
-        item["operation"], item["name"], item["topic"], _json(_row_ids(item["rows"]))
-    ) not in processed]
+    def unprocessed(items):
+        return [item for item in items if (
+            item["operation"], item["name"], item["topic"], _json(_row_ids(item["rows"]))
+        ) not in processed]
+
+    candidates = unprocessed(candidates)
+    if automation.get('reflect') and _table_exists(db, 'observations'):
+        from scripts.learning_reflection import plan
+        reflected = unprocessed(plan(db, config, [item for item in candidates if not item.get('skip_reason')]))
+        verifying = {item['name'] for item in reflected if item['operation'] == 'reflect-verify'}
+        candidates = [item for item in candidates if item['name'] not in verifying] + reflected
     return candidates[:automation.get("max_candidates_per_batch", 3)]
 
 
@@ -817,6 +828,7 @@ def run_batch(config, db, *, update=None, reload_config=None, now=None):
             db.commit()
             revoked = Event()
             operation = item_row["operation"]
+            flag = "reflect" if operation == "reflect-verify" else operation
 
             def require_approval():
                 if not revoked.is_set():
@@ -826,7 +838,7 @@ def run_batch(config, db, *, update=None, reload_config=None, now=None):
                         current = None
                     if (not current or current["root"] != config["root"]
                             or item_row["scope_hash"] != scope_hash or _scope_hash(current) != scope_hash
-                            or (current.get("automation") or {}).get(operation) is not True):
+                            or (current.get("automation") or {}).get(flag) is not True):
                         revoked.set()
                 if revoked.is_set():
                     raise PermissionError("Learning approval changed before model launch")
@@ -864,7 +876,14 @@ def run_batch(config, db, *, update=None, reload_config=None, now=None):
                     settings["approved_binary"] = approved["binary"]
             try:
                 with model_consent(require_approval):
-                    result = update(item_row["name"], settings, rows, batch_id)
+                    if operation == 'reflect':
+                        from scripts.learning_reflection import reflect
+                        result = reflect(config, db, item_row['topic'], rows, batch_id, item_row['name'])
+                    elif operation == 'reflect-verify':
+                        from scripts.learning_reflection import evaluate
+                        result = evaluate(config, db, item_row['topic'], settings, rows, batch_id)
+                    else:
+                        result = update(item_row["name"], settings, rows, batch_id)
                 status = result.get("status", "candidate_created") if isinstance(result, dict) else "candidate_created"
                 db.execute(
                     "UPDATE learning_batch_items SET status='done',result=?,updated_at=? WHERE id=?",
@@ -890,6 +909,7 @@ def run_batch(config, db, *, update=None, reload_config=None, now=None):
                     pass
         status = ("running" if unfinished else
                   "blocked" if "blocked" in result_statuses else
+                  "blocked" if "reflection_preflight_error" in result_statuses else
                   "interrupted" if "interrupted" in result_statuses else
                   "awaiting_checks" if "awaiting_checks" in result_statuses else "done")
         batch_obj = dict(db.execute("SELECT * FROM learning_batches WHERE id=?", (batch_id,)).fetchone())

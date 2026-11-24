@@ -23,8 +23,8 @@ Choose explicit executor and judge models available in the selected harness. For
 new skill compare `without_skill` against `with_skill`; for revisions also pass
 `--previous` pointing to the saved prior skill directory.
 Set `HARNESS` to `codex`, `opencode`, or `hermes` to run these commands from a
-terminal. Natural-trigger evaluation and description optimization use `codex`
-or `opencode`.
+terminal. The same harness options are available for natural-trigger evaluation
+and description optimization. Hermes uses the isolated macOS profile.
 
 ```sh
 "$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/run_quality_eval.py" \

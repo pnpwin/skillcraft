@@ -885,6 +885,15 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
         if not improved or any(value['regressed'] for value in report['validations'].values()):
             report['status'] = 'rejected'
             return report
+        if scheduled:
+            from scripts.learning_triggers import qualify
+            verify_frozen(evals, evals_hash, frozen_rows, frozen_hashes)
+            triggers = qualify(candidate, holdout, attempt, options, repeats=repeats, timeout=timeout,
+                               runner=runner_environment)
+            report.update(triggers)
+            if triggers['trigger_validation'] != 'passed':
+                report['status'] = 'rejected'
+                return report
         report['status'] = 'qualified'
         # Persist the exact hashes, successful A/B evidence and protected cases
         # before activation can make the candidate visible to the runtime.
@@ -895,6 +904,7 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
                 'policy_hash': report.get('policy_hash'),
                 'validation_hash': validation_hash,
                 'passed_ab': True,
+                'trigger_validation': report['trigger_validation'],
                 'auto_apply': settings.get('auto_apply') is True and not is_linked,
                 'candidate_modes': candidate_modes,
                 'validations': report['validations'],
@@ -964,7 +974,8 @@ def recover_attempt(attempt, source, state, *, linked=False, config=None, settin
                 if (not config or not settings or settings.get('auto_apply') is not True
                         or intent.get('policy_hash') != config['fingerprint']
                         or not approval_still_current(config, require_model_approval(config, name=name), name=name)
-                        or intent.get('passed_ab') is not True or intent.get('source') != str(source.resolve())
+                        or intent.get('passed_ab') is not True or intent.get('trigger_validation') != 'passed'
+                        or intent.get('source') != str(source.resolve())
                         or not candidate.is_relative_to(attempt.resolve())
                         or _tree_hash(source) != intent['before_hash']
                         or _tree_hash(candidate) != intent['after_hash']

@@ -41,6 +41,12 @@ CREATE TABLE IF NOT EXISTS artifact_turn_snapshots (
 TOPIC_TAG = re.compile(r'\[skillcraft-topic:([a-z0-9]+(?:-[a-z0-9]+)*)\]', re.I)
 TEACH = re.compile(r'^(?:как надо(?: делать)?\s*:|правильный способ\s*:|'
                    r'делай так\s*:|how to do it\s*:|the correct way is\b)', re.I)
+REFLECT_TEACH = re.compile(
+    r'^(?:в следующий раз|всегда|на будущее|впредь|запомни(?:те)?|'
+    r'(?:сохрани|закрепи)(?:те)?\s+(?:это\s+)?(?:правило|как\s+правило|на\s+будущее)|'
+    r'next time|from now on|always|for future|remember|save\s+(?:this\s+)?as\s+a\s+rule)\b',
+    re.I,
+)
 ARTIFACT = re.compile(r'\b([a-z0-9][a-z0-9_-]{2,35})\.(csv|json|md|txt|tsv)\b', re.I)
 WORD = re.compile(r'[^\W\d_]{3,}', re.UNICODE)
 STOP = set('the and for from this that with please create generate write file output there '
@@ -73,7 +79,10 @@ def topic_for(prompt, feedback=''):
 
 
 def observation_kind(text, config):
-    return classify(text) or ('correction' if config.get('automation') and TEACH.match(text.strip()) else None)
+    automation = config.get('automation') or {}
+    teaching = (config.get('automation') and TEACH.match(text.strip())
+                or automation.get('reflect') and REFLECT_TEACH.match(text.strip()))
+    return classify(text) or ('correction' if teaching else None)
 
 
 def retained_text(text):
@@ -555,7 +564,7 @@ def verify_artifact_turn(db, harness, session, turn, prompt, bindings, tool_even
     return {'inserted': inserted, 'kind': reported_kind, 'case_id': verified['case_id'], 'proof': proof}
 
 
-def save_feedback(db, harness, session, turn, target, text, kind):
+def save_feedback(db, harness, session, turn, target, text, kind, *, reflect=False):
     prior = db.execute(
         'SELECT t.prompt,t.answer,m.bindings FROM observed_turns t JOIN messages m '
         'ON m.harness=t.harness AND m.session=t.session AND m.turn=t.turn AND m.role=? '
@@ -566,10 +575,12 @@ def save_feedback(db, harness, session, turn, target, text, kind):
         return
     bindings = json.loads(prior['bindings'])
     # Competing bindings are ambiguous rather than evidence for a new skill.
-    if len(bindings) > 1:
+    if len(bindings) > 1 and not reflect:
         return
     prompt = prior['prompt']
-    topic = next(iter(bindings)) if bindings else topic_for(prompt, text)
+    topic = next(iter(bindings)) if len(bindings) == 1 else topic_for(prompt, text)
+    if reflect and not topic and (identity := prompt_key(prompt)):
+        topic = f'conversation-{identity[:16]}'
     case = CASE_TAG.search(text)
     failed_tools = set()
     recovered_tools = set()
@@ -584,7 +595,9 @@ def save_feedback(db, harness, session, turn, target, text, kind):
             recovered_tools.add(detail['tool'])
     details = {'prompt': prompt, 'answer': prior['answer'], 'review_turn': turn,
                'recovered_tools': sorted(recovered_tools)}
-    if kind in {'success', 'correction'} and (check := declared_check(text)):
+    if len(bindings) > 1:
+        details['ambiguous_use'] = True
+    if len(bindings) <= 1 and kind in {'success', 'correction'} and (check := declared_check(text)):
         details['check'] = check
     write_observation(
         db, harness, session, target, turn, kind, topic, f'prompt:{prompt_key(prompt)}',

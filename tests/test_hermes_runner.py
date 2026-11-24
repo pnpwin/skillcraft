@@ -83,6 +83,87 @@ class HermesRunnerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             hermes_worker.preload_hash(self.request, block, [])
 
+    def test_natural_selection_requires_native_exact_skill_view(self):
+        path = self.root / 'SKILL.md'
+        body = '---\nname: demo\ndescription: Native selection fixture.\n---\n\nUse the native action tool.\n'
+        path.write_text(body)
+        request = {**self.request, 'mode': 'trigger', 'attach_skill': False,
+                   'skill_id': 'demo', 'skill_path': str(path), 'skill_sha256': digest(path)}
+        args = {'session_id': 'native-session', 'turn_id': 'native-turn', 'request_ids': ['request'],
+                'profile': self.profile}
+        self.assertEqual(hermes_runner.natural_skill_load([], request, [], **args),
+                         {'status': 'not_loaded', 'skill_id': 'demo'})
+        use = {'type': 'tool_use', 'tool_call_id': 'load-1', 'name': 'skill_view',
+               'input': {'name': 'demo'}}
+        result = {'type': 'tool_result', 'tool_call_id': 'load-1', 'name': 'skill_view',
+                  'output': json.dumps({'success': True, 'name': 'demo', 'content': body})}
+        receipt = {'schema_version': 1, 'run_id': 'run', 'profile': str(self.profile),
+                   'session_id': 'native-session', 'turn_id': 'native-turn', 'api_request_id': 'request',
+                   'tool_call_id': 'load-1', 'tool_name': 'skill_view', 'skill_id': 'demo',
+                   'skill_sha256': request['skill_sha256'],
+                   'content_sha256': hermes_worker.sha(body.encode()), 'status': 'ok',
+                   'success': True, 'exact_content': True, 'returned_name': 'demo'}
+        receipt['receipt_sha256'] = hermes_worker.sha(json.dumps(
+            receipt, sort_keys=True, separators=(',', ':')).encode())
+        evidence = hermes_runner.natural_skill_load([use, result], request, [receipt], **args)
+        self.assertEqual(evidence['status'], 'loaded')
+        self.assertEqual(evidence['tool_call_id'], 'load-1')
+        self.assertEqual(evidence['content_sha256'], hermes_worker.sha(body.encode()))
+        self.assertEqual(hermes_runner.natural_skill_load([], request, [receipt], **args)['status'], 'unknown')
+        wrong_name = {**receipt, 'returned_name': 'other'}
+        wrong_name['receipt_sha256'] = hermes_worker.sha(json.dumps(
+            {key: value for key, value in wrong_name.items() if key != 'receipt_sha256'},
+            sort_keys=True, separators=(',', ':')).encode())
+        self.assertEqual(hermes_runner.natural_skill_load([use, result], request, [wrong_name], **args)['status'], 'unknown')
+        for rows in ([use], [use, {**result, 'is_error': True}],
+                     [use, {**result, 'output': '{"success":true}'}],
+                     [{**use, 'input': {'name': 'other'}}, result],
+                     [use, {**result, 'output': json.dumps({'success': True, 'name': 'demo', 'content': 'tampered'})}],
+                     [result], [use, result, result]):
+            with self.subTest(rows=rows):
+                status = hermes_runner.natural_skill_load(rows, request, [], **args)['status']
+                self.assertEqual(status, 'unknown')
+        receipt = {**self.before, 'catalog': ['demo'], 'block_sha256': None,
+                   'skill_sha256': request['skill_sha256']}
+        self.assertEqual(hermes_runner.check_requests([receipt, self.after], request,
+                                                       'native-session', self.profile, block=None)['catalog'], ['demo'])
+        hermes_worker.reject_preload(request, '', [{'role': 'user', 'content': 'Use skill_view.'}])
+        with self.assertRaisesRegex(ValueError, 'must not contain a native preload marker'):
+            hermes_worker.reject_preload(request,
+                '[IMPORTANT: The user launched this CLI session with the "demo" skill preloaded.]', [])
+        self.assertTrue(hermes_worker.natural_skill_tool_allowed('skills_list', {}, request))
+        self.assertTrue(hermes_worker.natural_skill_tool_allowed('skill_view', {'name': 'demo'}, request))
+        self.assertFalse(hermes_worker.natural_skill_tool_allowed('skill_view', {'name': 'other'}, request))
+        self.assertFalse(hermes_worker.natural_skill_tool_allowed('skill_view', {'name': 'demo', 'file_path': 'references/x'}, request))
+        self.assertFalse(hermes_worker.natural_skill_tool_allowed('skill_manage', {}, request))
+        with self.assertRaises(ValueError):
+            hermes_runner.check_requests([self.before, self.after], request,
+                                         'native-session', self.profile, block=None)
+
+    def test_natural_selection_uses_untruncated_private_receipt_for_long_skill(self):
+        path = self.root / 'SKILL.md'
+        body = '---\nname: demo\n---\n\n' + ('large instruction block. ' * 400)
+        path.write_text(body)
+        request = {**self.request, 'mode': 'trigger', 'attach_skill': False,
+                   'skill_id': 'demo', 'skill_path': str(path), 'skill_sha256': digest(path)}
+        use = {'type': 'tool_use', 'tool_call_id': 'load-long', 'name': 'skill_view',
+               'input': {'name': 'demo'}}
+        # stream-json caps tool outputs; the separately captured native hook receipt retains the full hash.
+        result = {'type': 'tool_result', 'tool_call_id': 'load-long', 'name': 'skill_view',
+                  'output': '{"success":true,"name":"demo","content":"truncated...'}
+        expected = body
+        receipt = {'schema_version': 1, 'run_id': 'run', 'profile': str(self.profile),
+                   'session_id': 'native-session', 'turn_id': 'native-turn', 'api_request_id': 'request',
+                   'tool_call_id': 'load-long', 'tool_name': 'skill_view', 'skill_id': 'demo',
+                   'skill_sha256': request['skill_sha256'],
+                   'content_sha256': hermes_worker.sha(expected.encode()), 'status': 'ok',
+                   'success': True, 'exact_content': True, 'returned_name': 'demo'}
+        receipt['receipt_sha256'] = hermes_worker.sha(json.dumps(
+            receipt, sort_keys=True, separators=(',', ':')).encode())
+        evidence = hermes_runner.natural_skill_load([use, result], request, [receipt],
+            session_id='native-session', turn_id='native-turn', request_ids=['request'], profile=self.profile)
+        self.assertEqual(evidence['status'], 'loaded')
+
     def test_native_events_project_tool_and_result(self):
         native, parts = hermes_runner.native_events([
             {'type': 'system', 'subtype': 'init'},
@@ -293,6 +374,26 @@ class HermesRunnerTest(unittest.TestCase):
                           side_effect=[KeyboardInterrupt, ('', '')]):
             with self.assertRaises(KeyboardInterrupt):
                 hermes_runner.invoke(launcher, self.root, {}, 10)
+
+    def test_gateway_stop_race_requires_release_of_owned_runtime_lock(self):
+        from unittest.mock import patch
+
+        write_json(self.profile / 'gateway.pid', {'hermes_home': str(self.profile), 'pid': 123})
+        with (patch.object(hermes_runner, 'gateway_lock_active', side_effect=[True, False]),
+              patch.object(hermes_runner, 'invoke', return_value=(1, '', 'already exiting')) as stop,
+              patch.object(hermes_runner.time, 'sleep')):
+            hermes_runner.stop_private_gateway('hermes', self.root, {}, self.profile)
+        stop.assert_called_once_with(['hermes', 'gateway', 'stop'], self.root, {}, 10)
+
+    def test_private_gateway_never_stops_a_different_profile(self):
+        from unittest.mock import patch
+
+        write_json(self.profile / 'gateway.pid', {'hermes_home': str(self.root / 'different'), 'pid': 123})
+        with (patch.object(hermes_runner, 'gateway_lock_active', return_value=True),
+              patch.object(hermes_runner, 'invoke') as stop):
+            with self.assertRaisesRegex(ValueError, 'identity does not match'):
+                hermes_runner.stop_private_gateway('hermes', self.root, {}, self.profile)
+        stop.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main()

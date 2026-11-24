@@ -352,10 +352,20 @@ for new evidence or a changed optimizer request.
 
 ## Session candidates
 
-Ask SkillCraft in the current chat to create a draft from a recurring workflow
-or revise an existing skill from the relevant feedback. Keep the draft directory
-outside the runtime's skill catalog and give it the same name as its frontmatter.
-The draft and proposed checks can be reviewed before any model evaluation.
+Ask SkillCraft in the current chat to review selected turns immediately, or to
+create a draft from a recurring workflow or revise an existing skill from the
+relevant feedback. For a review, select the turns that contain a correction,
+user rule, or concrete confirmation. Route a finding to a proven skill used in
+those turns, then to a matching existing skill in the enrolled scope, or to a
+new skill if its name does not collide. Ambiguous attribution and read-only
+skills are suggestions in preview. Keep a new draft outside the runtime's skill
+catalog and give it the same name as its frontmatter. A finding without an
+independent case can only produce a staged text-only draft awaiting checks.
+
+Use the existing `stage`, `verify-now`, and `apply` commands below to stage,
+check, and publish a selected draft. `apply` remains a separate owner action;
+without verified independent cases, trigger checks, and native checks, a draft
+is not eligible for automatic publication.
 
 ```sh
 "$SKILLCRAFT_VENV/bin/python" "$SKILLCRAFT/scripts/learning.py" stage "$PWD" /path/to/drafts/meeting-actions
@@ -399,6 +409,7 @@ scheduled model work.
   "automation": {
     "create": true,
     "improve": true,
+    "reflect": true,
     "auto_apply": false,
     "interval_days": 7,
     "max_candidates_per_batch": 3,
@@ -412,6 +423,40 @@ actions there. Project boundaries and enrollment still apply. For Hermes,
 enroll the local profile and enable its shared-journal auto-import. Trust the
 project in Hermes, or configure the profile to discover `~/.agents/skills` for
 home. Use the existing harness and project permission settings.
+
+Set `automation.reflect` to `true` to opt in to completed-turn reflection for
+the enrolled project or home scope. The default is `false`. Enable either
+`create` or `improve` to allow the corresponding drafts. The scheduled worker
+uses the existing `interval_days` and `max_candidates_per_batch` settings. It
+reviews eligible completed corrections, explicit user rules, and concrete
+confirmations, and routes each finding to a proven skill used in the turn, a
+matching existing skill in scope, or a new skill when its name is available.
+Use phrases such as “Запомни: сохраняй порядок строк” or “Сохрани как правило:
+оставляй дубликаты” to flag feedback for the next scheduled review.
+To draft immediately, ask SkillCraft to create or
+improve a skill from the selected turns.
+Ambiguous attribution and read-only targets are shown as suggestions in
+`preview`. If no independent case exists, reflection can leave a staged
+text-only draft marked as awaiting checks. No such draft auto-applies without
+verified independent cases, trigger checks, and native checks, even if
+`auto_apply` is enabled.
+
+Add `trigger_negatives` to an approved holdout case to test nearby requests
+where the skill should stay inactive in each configured harness. Its value is a
+list of prompts, such as a definition question that previously loaded the
+skill. These prompts are used only for natural selection checks. The selection
+checks reuse the quality evaluation's repeat count when explicit probes are
+provided. Any incorrect load, missed load, or incomplete check blocks automatic
+publication. When no negative prompts are supplied, SkillCraft uses its default
+glossary probe and one repeat.
+
+Approve separate train and holdout datasets for the draft's skill name through
+`automation.cases` or the existing per-skill settings, then run `enable` again.
+When due, the worker evaluates the saved candidate without generating another
+draft. To check it immediately, use `verify-now` with independent cases. The
+`lessons` section of `preview` links the source turns, candidate, batch IDs and
+verification. The batch resource reports count reflection and evaluation when
+each runs.
 
 The scheduler persists `next_due_at` as the last batch start plus
 `interval_days` (seven days by default); the first batch is due when the

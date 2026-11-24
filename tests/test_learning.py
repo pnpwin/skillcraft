@@ -777,6 +777,8 @@ class LearningTest(unittest.TestCase):
 
         with (patch.object(learning_worker, 'run_model', side_effect=self.fake_proposal) as model,
               patch.object(learning_worker, 'run_quality', side_effect=self.fake_quality),
+              patch('scripts.learning_triggers.qualify',
+                    return_value={'trigger_validation': 'passed', 'trigger_reports': {}}),
               patch('scripts.learning_candidates.native_catalog_probe', side_effect=runtime_probe),
               patch('scripts.learning_candidates.render_quality_review', side_effect=lambda path: path / 'review.html')):
             report = learning_worker.work(self.config)

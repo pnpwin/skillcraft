@@ -17,6 +17,7 @@ already establishes. Ask only about gaps that affect the result.
 | Create a reusable prompt | Follow the prompt workflow below. |
 | Evaluate an artifact, check a candidate now, or review a report | Read [evaluation and iteration](references/evaluation-and-iteration.md) for the selected evaluation, then follow the [evaluation commands](references/run-evaluations.md). |
 | Improve an existing skill | Reproduce the problem before proposing a small change. Compare the candidate with the current version and protect successful cases. |
+| Review completed turns for durable corrections or rules | Use opt-in scheduled reflection for the enrolled project or home scope, or review selected turns in the current chat on request. Route evidence to a proven skill, a matching skill in scope, or a new skill when its name is available. |
 
 ## Create
 
@@ -79,4 +80,4 @@ check it now, apply it, inspect scheduled work, or roll it back, follow
 in the manual workflow. A verification request ends with the report. Use the
 separate apply action when the user requests publication. Read
 [scheduled Learning](references/learning.md#scheduled-learning) before enabling
-automatic creation or updates.
+automatic creation, updates, or session reflection.

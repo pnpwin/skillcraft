@@ -16,9 +16,11 @@ import tempfile
 BACKEND = 'skillcraft_seatbelt'
 SANDBOX = '/usr/bin/sandbox-exec'
 TOOLS = frozenset({'terminal', 'read_file', 'write_file', 'patch', 'search_files'})
+NATURAL_SKILL_TOOLS = frozenset({'skills_list', 'skill_view'})
+BLOCKED_SKILL_TOOLS = frozenset({'skill_manage'})
 # Hermes advertises process_manage with the native terminal toolset. The
 # pre-tool hook denies it, together with terminal's background modes.
-ADVERTISED_TOOLS = TOOLS | {'process_manage'}
+ADVERTISED_TOOLS = TOOLS | NATURAL_SKILL_TOOLS | BLOCKED_SKILL_TOOLS | {'process_manage'}
 PRELOAD = re.compile(r'^\[IMPORTANT: The user launched this CLI session with the "([^"\n]+)" skill preloaded\.', re.M)
 
 
@@ -131,6 +133,18 @@ def preload_hash(spec, system, messages):
     return sha(block.encode())
 
 
+def reject_preload(spec, system, messages):
+    if PRELOAD.findall('\n'.join(request_text(system, messages))):
+        raise ValueError('Natural skill selection must not contain a native preload marker')
+
+
+def natural_skill_tool_allowed(tool_name, args, spec):
+    if tool_name == 'skills_list':
+        return True
+    return (tool_name == 'skill_view' and isinstance(args, dict)
+            and args.get('name') == spec.get('skill_id') and args.get('file_path') is None)
+
+
 def register(ctx):
     from agent.terminal_env_provider import TerminalEnvironmentProvider
     from hermes_constants import get_hermes_home
@@ -139,6 +153,7 @@ def register(ctx):
     home = get_hermes_home().resolve()
     spec = json.loads((home / 'skillcraft-eval.json').read_text())
     receipt = home / 'requests.jsonl'
+    load_receipt = home / 'natural-load-receipts.jsonl'
 
     class Seatbelt(TerminalEnvironmentProvider):
         name = BACKEND
@@ -174,7 +189,12 @@ def register(ctx):
                           for s in _skill_catalog() if s['load_name']]
             if candidates != ([(spec['skill_id'], spec['skill_path'])] if expected else []):
                 raise ValueError('Native skill resolves to another path')
-            row['block_sha256'] = preload_hash(spec, event.get('system_prompt'), event.get('request_messages'))
+            natural = spec.get('mode') == 'trigger' and not spec.get('attach_skill')
+            if natural:
+                reject_preload(spec, event.get('system_prompt'), event.get('request_messages'))
+                row['block_sha256'] = None
+            else:
+                row['block_sha256'] = preload_hash(spec, event.get('system_prompt'), event.get('request_messages'))
             row['skill_sha256'] = spec.get('skill_sha256')
             request = event.get('request') or {}
             definitions = request.get('body', {}).get('tools')
@@ -191,8 +211,39 @@ def register(ctx):
     def post_api_request(**event):
         append({**identity('response', event), 'response_model': event.get('response_model')})
 
+    def post_tool_call(**event):
+        tool_name = event.get('tool_name')
+        args = event.get('args')
+        result = event.get('result')
+        status = event.get('status')
+        if (spec.get('mode') != 'trigger' or spec.get('attach_skill') or tool_name != 'skill_view'
+                or not isinstance(args, dict) or args.get('name') != spec.get('skill_id')):
+            return
+        try:
+            payload = json.loads(result) if isinstance(result, str) else result
+            content = payload.get('content') if isinstance(payload, dict) else None
+            expected = Path(spec['skill_path']).read_text(encoding='utf-8-sig', errors='replace')
+            identity_fields = {key: event.get(key) for key in
+                               ('session_id', 'turn_id', 'api_request_id', 'tool_call_id')}
+            row = {'schema_version': 1, 'run_id': spec['run_id'], 'profile': str(home),
+                   **identity_fields, 'tool_name': tool_name, 'skill_id': spec['skill_id'],
+                   'skill_sha256': spec['skill_sha256'], 'status': status,
+                   'success': isinstance(payload, dict) and payload.get('success') is True,
+                   'content_sha256': sha(content.encode('utf-8')) if isinstance(content, str) else None,
+                   'exact_content': content == expected, 'returned_name': payload.get('name') if isinstance(payload, dict) else None}
+            row['receipt_sha256'] = sha(json.dumps(row, sort_keys=True, separators=(',', ':')).encode('utf-8'))
+            with load_receipt.open('a', encoding='utf-8') as handle:
+                handle.write(json.dumps(row, separators=(',', ':')) + '\n')
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            return
+
     def pre_tool_call(tool_name, args, **event):
         from tools.terminal_tool import _get_env_config
+        natural = spec.get('mode') == 'trigger' and not spec.get('attach_skill')
+        if natural and tool_name in NATURAL_SKILL_TOOLS:
+            if not natural_skill_tool_allowed(tool_name, args, spec):
+                return {'action': 'block', 'message': 'Only the controlled candidate SKILL.md may be loaded'}
+            return None
         if (tool_name not in TOOLS or _get_env_config().get('env_type') != BACKEND
                 or tool_name == 'terminal' and (args.get('background') or args.get('watch_patterns')
                                                 or args.get('notify_on_complete'))):
@@ -201,3 +252,4 @@ def register(ctx):
     ctx.register_hook('pre_api_request', pre_api_request)
     ctx.register_hook('post_api_request', post_api_request)
     ctx.register_hook('pre_tool_call', pre_tool_call)
+    ctx.register_hook('post_tool_call', post_tool_call)

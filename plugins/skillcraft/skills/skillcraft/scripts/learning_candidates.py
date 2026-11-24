@@ -310,7 +310,8 @@ def _rename_noreplace(source: Path, destination: Path) -> None:
 def stage_candidate(*, content_path: Path, state_dir: Path, project_root: Path,
                     name: str, kind: str = "new", source_path: Path | None = None,
                     candidate_id: str | None = None, collision_roots: Sequence[Path] = (),
-                    home_root: Path | None = None, target_root: Path | None = None) -> dict:
+                    home_root: Path | None = None, target_root: Path | None = None,
+                    expected_source_hash: str | None = None, lesson: dict | None = None) -> dict:
     """Copy a manually requested skill into a hash-bound candidate record."""
     name = _safe_name(name)
     if kind not in {"new", "revision"}:
@@ -333,7 +334,11 @@ def stage_candidate(*, content_path: Path, state_dir: Path, project_root: Path,
             if source_path is not None:
                 resolved_source = _real_directory(source_path, "source")
                 source_hash = _hash(resolved_source)
+                if expected_source_hash is not None and source_hash != expected_source_hash:
+                    raise ValueError("candidate_source_hash_mismatch: source changed before staging")
                 candidate_hash = _revision_snapshot(resolved_source, Path(content_path), candidate_path)
+                if _hash(resolved_source) != source_hash:
+                    raise ValueError("candidate_source_hash_mismatch: source changed during staging")
             else:
                 candidate_hash = _snapshot(Path(content_path), candidate_path)
             if not (candidate_path / "SKILL.md").is_file() or (candidate_path / "SKILL.md").is_symlink():
@@ -361,6 +366,8 @@ def stage_candidate(*, content_path: Path, state_dir: Path, project_root: Path,
                 "target_path": str(target_root / name), "created_at": time.time(),
                 "record_revision": 0, "verification": None, "promotion": None, "catalog": None,
             }
+            if lesson is not None:
+                record["lesson"] = lesson
             _write_json(destination / "candidate.json", record)
             return record
         except Exception:

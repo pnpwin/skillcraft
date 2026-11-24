@@ -108,11 +108,16 @@ def _revision_attempt(item, state, batch_id, db):
 def _item_attempts(item, state, batch_id, db=None):
     result = item.get('result') or {}
     result = result.get('candidate', result) if 'candidate' in result and 'status' in result else result
-    if item['operation'] == 'create':
+    if item['operation'] == 'reflect':
+        yield from _attempts(state / 'batches' / str(batch_id) / item['name'] / 'reflector',
+                             state, 'reflection', None)
+        return
+    if item['operation'] in {'create', 'reflect-verify'}:
         attempt = state / 'batches' / str(batch_id) / item['name']
         yield from _attempts(attempt / 'optimizer', state, 'optimizer', None)
         for workspace in sorted(attempt.glob('trigger-*')):
-            yield from _eval_attempts(workspace, state, workspace.name.removeprefix('trigger-'), trigger=True)
+            harness = workspace.name.removeprefix('trigger-').split('-')[0]
+            yield from _eval_attempts(workspace, state, harness, trigger=True)
         for workspace in sorted(attempt.glob('verification-*')):
             yield from _eval_attempts(workspace, state, workspace.name.removeprefix('verification-').split('-')[0])
         return
@@ -128,6 +133,9 @@ def _item_attempts(item, state, batch_id, db=None):
     yield from _attempts(attempt / 'optimizer', state, 'optimizer', None)
     for workspace in sorted(attempt.glob('ab-*')):
         yield from _eval_attempts(workspace, state, workspace.name.removeprefix('ab-'))
+    for workspace in sorted(attempt.glob('trigger-*')):
+        harness = workspace.name.removeprefix('trigger-').split('-')[0]
+        yield from _eval_attempts(workspace, state, harness, trigger=True)
 
 
 def _summary(samples):
