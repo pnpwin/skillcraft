@@ -1590,7 +1590,7 @@ def main(argv=None):
         if verb == 'work':
             parser.add_argument('--lock-fd', type=int, help=argparse.SUPPRESS)
             parser.add_argument('--retry-blocked', action='store_true',
-                                help='Queue one durable validation-only retry for saved blocked proposals')
+                                help='Queue one validation-only retry for checkpoint-based Learning')
     for verb, description in (
         ('stage', 'Save a prepared skill folder as a separate candidate'),
         ('verify-now', 'Run a fresh A/B for a staged candidate without applying it'),
@@ -1684,6 +1684,9 @@ def main(argv=None):
         elif args.command == 'work':
             from scripts.learning_worker import work
             if args.retry_blocked:
+                if config.get('automation') is not None or config.get('automation_needs_approval'):
+                    raise ValueError('--retry-blocked requires checkpoint-based Learning. '
+                                     'For scheduled Learning, use work without this flag to check or resume the batch.')
                 with connection(config) as db:
                     queue(db, f'manual-retry:{secrets.token_hex(16)}')
             report = work(config, lock_fd=args.lock_fd)
