@@ -383,7 +383,30 @@ class HermesRunnerTest(unittest.TestCase):
               patch.object(hermes_runner, 'invoke', return_value=(1, '', 'already exiting')) as stop,
               patch.object(hermes_runner.time, 'sleep')):
             hermes_runner.stop_private_gateway('hermes', self.root, {}, self.profile)
-        stop.assert_called_once_with(['hermes', 'gateway', 'stop'], self.root, {}, 10)
+        stop.assert_called_once_with(['hermes', 'gateway', 'stop'], self.root, {}, 20)
+
+    def test_gateway_stop_can_use_held_lock_record_without_pid_file(self):
+        from unittest.mock import patch
+
+        write_json(self.profile / 'gateway.lock', {'hermes_home': str(self.profile), 'pid': 123})
+        with (patch.object(hermes_runner, 'gateway_lock_active', side_effect=[True, True, False]),
+              patch.object(hermes_runner, 'invoke', return_value=(0, '', '')) as stop,
+              patch.object(hermes_runner.time, 'sleep')):
+            hermes_runner.stop_private_gateway('hermes', self.root, {}, self.profile)
+        stop.assert_called_once_with(['hermes', 'gateway', 'stop'], self.root, {}, 20)
+
+    def test_active_gateway_preserves_original_failure_and_removes_auth(self):
+        from unittest.mock import patch
+
+        with patch.object(hermes_runner, 'gateway_lock_active', return_value=True):
+            with self.assertRaisesRegex(ValueError, 'native turn failed') as failure:
+                with hermes_runner.private_profile(self.root) as private:
+                    (private / 'profile').mkdir()
+                    (private / 'profile' / 'auth.json').write_text('synthetic credential')
+                    raise ValueError('native turn failed')
+        self.assertTrue(private.is_dir())
+        self.assertFalse((private / 'profile' / 'auth.json').exists())
+        self.assertIn(str(private), failure.exception.__notes__[0])
 
     def test_private_gateway_never_stops_a_different_profile(self):
         from unittest.mock import patch

@@ -427,21 +427,29 @@ def invoke(command, cwd, env, timeout):
 @contextmanager
 def private_profile(parent):
     directory = Path(tempfile.mkdtemp(prefix='hermes-', dir=parent)).resolve()
+    failure = None
     try:
         yield directory
+    except BaseException as error:
+        failure = error
+        raise
     finally:
         home = directory / 'profile'
         (home / 'auth.json').unlink(missing_ok=True)
         if gateway_lock_active(home):
-            raise ValueError(f'Private Hermes gateway is still active. Preserved its runtime directory: {directory}')
-        for attempt in range(10):
-            try:
-                shutil.rmtree(directory)
-                break
-            except OSError as error:
-                if error.errno != errno.ENOTEMPTY or attempt == 9:
-                    raise
-                time.sleep(0.1)
+            detail = f'Private Hermes gateway is still active. Preserved its runtime directory: {directory}'
+            if failure is None:
+                raise ValueError(detail)
+            failure.add_note(detail)
+        else:
+            for attempt in range(10):
+                try:
+                    shutil.rmtree(directory)
+                    break
+                except OSError as error:
+                    if error.errno != errno.ENOTEMPTY or attempt == 9:
+                        raise
+                    time.sleep(0.1)
 
 
 def gateway_lock_active(home):
@@ -462,25 +470,47 @@ def gateway_lock_active(home):
         os.close(fd)
 
 
-def stop_private_gateway(launcher, directory, env, home):
-    deadline = time.monotonic() + 12
-    while gateway_lock_active(home):
+def gateway_record_pid(path, home):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(fd, encoding='utf-8') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+            raise ValueError('Unsafe private Hermes gateway identity record')
         try:
-            record = read_json(home / 'gateway.pid')
-        except (FileNotFoundError, json.JSONDecodeError):
-            record = None
-        if record is not None:
-            if not isinstance(record, dict) or record.get('hermes_home') != str(home):
-                raise ValueError('Private Hermes gateway identity does not match evaluation profile')
-            try:
-                code, _, _ = invoke([launcher, 'gateway', 'stop'], directory, env, 10)
-            except subprocess.TimeoutExpired:
-                code = None
-            if code == 0 and not gateway_lock_active(home):
-                return
-        if time.monotonic() >= deadline:
-            raise ValueError('Private Hermes gateway did not release its runtime lock')
-        time.sleep(0.15)
+            record = json.load(stream)
+        except json.JSONDecodeError:
+            return None  # The gateway may still be publishing its record.
+    if not isinstance(record, dict) or record.get('hermes_home') != str(home):
+        raise ValueError('Private Hermes gateway identity does not match evaluation profile')
+    pid = record.get('pid')
+    return pid if type(pid) is int and pid > 1 else None
+
+
+def stop_private_gateway(launcher, directory, env, home):
+    deadline = time.monotonic() + 26  # Keep cleanup inside the runner's cancellation grace period.
+    outcome = 'no owned gateway identity'
+    requested = False
+    while gateway_lock_active(home):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError(f'Private Hermes gateway did not release its runtime lock ({outcome})')
+        # Hermes can remove the PID file before releasing the runtime lock. Its
+        # native stop command verifies the live process identity from either file.
+        if not requested:
+            pid = gateway_record_pid(home / 'gateway.pid', home)
+            owner = gateway_record_pid(home / 'gateway.lock', home)
+            if (pid or owner) and (not pid or not owner or pid == owner):
+                requested = True
+                try:
+                    code, _, _ = invoke([launcher, 'gateway', 'stop'], directory, env, min(20, remaining))
+                except subprocess.TimeoutExpired:
+                    outcome = 'native stop timed out'
+                else:
+                    outcome = f'native stop exited with status {code}'
+        time.sleep(min(0.15, remaining))
 
 
 def run(request):
@@ -541,6 +571,7 @@ def run(request):
                'HERMES_HOME': str(home), 'HERMES_DISABLE_LAZY_INSTALLS': '1', 'PYTHONDONTWRITEBYTECODE': '1',
                'HERMES_GATEWAY_LOCK_DIR': str(private / 'gateway-locks'),
                'SKILLCRAFT_LEARNING_INTERNAL': '1', 'LANG': 'en_US.UTF-8'}
+        failure = None
         try:
             version_code, version, _ = invoke([launcher, '--version'], directory, env, min(30, request['timeout_seconds']))
             if version_code != 0 or not (match := re.search(r'Hermes Agent\s+([^\s]+)', version, re.I)):
@@ -603,8 +634,16 @@ def run(request):
                             response_models=proof['response_models'],
                             duration_ms=final.get('duration_ms'), usage={
                                 key: usage[key] for key in ('input', 'output', 'total', 'cache_read', 'cache_write') if key in usage})
+        except BaseException as error:
+            failure = error
+            raise
         finally:
-            stop_private_gateway(launcher, directory, env, home)
+            try:
+                stop_private_gateway(launcher, directory, env, home)
+            except (OSError, ValueError, subprocess.SubprocessError) as cleanup:
+                if failure is None:
+                    raise
+                failure.add_note(str(cleanup))
     return {**response, 'duration_ms': response.get('duration_ms') or round((time.monotonic() - started) * 1000)}
 
 
@@ -621,7 +660,8 @@ def main():
     except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError, KeyboardInterrupt) as error:
         status = ('timeout' if isinstance(error, subprocess.TimeoutExpired) else
                   'cancelled' if isinstance(error, KeyboardInterrupt) else 'runner_error')
-        result = {'schema_version': 1, 'status': status, 'error': str(error) or status,
+        result = {'schema_version': 1, 'status': status,
+                  'error': '\n'.join((str(error) or status, *getattr(error, '__notes__', ()))),
                   'run_id': request['run_id'], 'harness': 'hermes', 'triggered': None}
     write_json(output / 'run.json', result)
     return 0 if result['status'] == 'completed' else 1
