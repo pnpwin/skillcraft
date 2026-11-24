@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import tempfile
 
-POLICY = 7
+POLICY = 8
 MAX_TURNS = 6
 MAX_CATALOG = 80
 NAME = re.compile(r'[a-z0-9]+(?:-[a-z0-9]+)*\Z')
@@ -71,6 +71,60 @@ def _evidence(row):
     return evidence
 
 
+def _holdout_cases(config, db):
+    from scripts.learning import dataset_snapshot, local_path
+
+    approvals = (config.get('approval') or {}).values()
+    batches = (config.get('automation_inputs') or {}).get('cases', {}).values()
+    snapshots = [record.get('datasets', {}).get('holdout') for record in approvals]
+    snapshots.extend(record.get('holdout') for record in batches)
+    cases = []
+    for relative, expected in dict.fromkeys((item['path'], item['sha256']) for item in snapshots if item):
+        raw, rows = dataset_snapshot(local_path(config['root'], relative))
+        if sha256(raw).hexdigest() != expected:
+            raise ValueError('Approved reflection holdout changed; re-enable Learning')
+        cases.extend(rows)
+    cases.extend(json.loads(row['payload']) for row in db.execute('SELECT DISTINCT payload FROM protected_session_cases'))
+    return cases
+
+
+def _without_holdout(db, observations, holdout):
+    from scripts.learning import CASE_TAG, prompt_key, sanitize
+    from scripts.learning_observations import TOPIC_TAG
+    from scripts.learning_worker import families
+
+    if not holdout:
+        return observations
+    ids = {case['id'] for case in holdout}
+    groups = {value for kind, value in families(holdout) if kind == 'group'}
+    prompts = [case['prompt'] for case in holdout]
+    prompts.extend(prompt for case in holdout for prompt in (case.get('trigger_negatives') or [])
+                   if isinstance(prompt, str) and prompt.strip())
+    keys = {key for prompt in prompts if (key := prompt_key(prompt))}
+    withheld = {value for kind, value in families([{'prompt': sanitize(prompt)} for prompt in prompts]) if value}
+    witnesses = groups | {f'group:{group}' for group in groups} | {f'prompt:{key}' for key in keys}
+    eligible = []
+    for row in observations:
+        if row['case_id'] in ids or row['independent'] in witnesses:
+            continue
+        details = json.loads(row['details'])
+        case = details.get('case')
+        if isinstance(case, dict) and (case.get('id') in ids or str(case.get('group')) in groups):
+            continue
+        fields = [field for field in (row['excerpt'], details.get('prompt'), details.get('answer'))
+                  if isinstance(field, str)]
+        if any(ids.intersection(CASE_TAG.findall(field)) for field in fields):
+            continue
+        texts = [re.sub(r'\W+', ' ', TOPIC_TAG.sub('', field).casefold()).strip() for field in fields]
+        if any(f' {prompt} ' in f' {text} ' for prompt in withheld for text in texts):
+            continue
+        message = db.execute("SELECT case_key FROM messages WHERE harness=? AND session=? AND turn=? "
+                             "AND role='user'", (row['harness'], row['session'], row['turn'])).fetchone()
+        if not message or message['case_key'] not in keys:
+            eligible.append(row)
+    return eligible
+
+
 def plan(db, config, existing):
     """Use the existing batch budget. Keep saved drafts ready for later A/B."""
     db.execute(SCHEMA)
@@ -86,7 +140,14 @@ def plan(db, config, existing):
     seen = {key for lesson in lessons if lesson['policy'] == POLICY for key in json.loads(lesson['source_keys'])}
     groups = {}
     row_index = {row['id']: row for row in rows}
-    for row in rows:
+    eligible = rows
+    if rows:
+        try:
+            eligible = _without_holdout(db, rows, _holdout_cases(config, db))
+        except (OSError, KeyError, TypeError, ValueError):
+            # The queued item reports the approval failure before sending any evidence.
+            pass
+    for row in eligible:
         if row['topic'] in occupied or row['skill'] in occupied:
             continue
         key = _key(row)
@@ -272,10 +333,16 @@ def collision_roots(config):
 
 def reflect(config, db, topic, rows, batch_id, slot):
     from scripts.learning import sanitize, staged_candidates
-    from scripts.learning_worker import approved_runner
+    from scripts.learning_worker import approved_runner, optimizer_profile
     from scripts.runtime import require_model_consent, run_model
     from scripts.utils import parse_json_response, read_json
 
+    try:
+        holdout = _holdout_cases(config, db)
+        rows = _without_holdout(db, rows, holdout)
+    except (OSError, KeyError, TypeError, ValueError):
+        return {'status': 'reflection_preflight_error',
+                'reason': 'Could not verify approved holdout for reflection; re-enable Learning'}
     evidence = [item for row in rows if (item := _evidence(row))]
     if not evidence:
         return {'status': 'no_evidence'}
@@ -299,16 +366,23 @@ def reflect(config, db, topic, rows, batch_id, slot):
     catalog, targets, truncated = _catalog(config, bound, evidence)
     # Previously distilled rules are relevant context for detecting contradictions.
     prior = []
-    for row in db.execute('SELECT lesson FROM learning_lessons WHERE topic=? ORDER BY rowid DESC LIMIT 4', (topic,)):
+    for row in db.execute('SELECT lesson,source_rows FROM learning_lessons WHERE topic=? ORDER BY rowid DESC LIMIT 4',
+                          (topic,)):
         entry = json.loads(row['lesson'])
         if entry.get('rule'):
+            if holdout:
+                provenance = db.execute('SELECT * FROM observations WHERE id IN (SELECT value FROM json_each(?))',
+                                        (row['source_rows'],)).fetchall()
+                if len(_without_holdout(db, provenance, holdout)) != len(json.loads(row['source_rows'])):
+                    continue
             prior.append({key: entry[key] for key in ('rule', 'applies_when')})
     skill_name = next(iter(bound), None)
     skill_settings = config.get('skills', {}).get(skill_name, {})
     harnesses = skill_settings.get('harnesses') or config['automation'].get('harnesses', {})
-    if not harnesses:
+    override = skill_settings.get('optimizer')
+    if not harnesses and override is None:
         return {'status': 'blocked', 'reason': 'Configure an approved model for reflection'}
-    harness, models = next(iter(harnesses.items()))
+    harness, optimizer_settings, optimizer_model = optimizer_profile(harnesses, override)
     catalog_is_empty = not catalog and not bound and not truncated
     attempt = config['state'] / 'batches' / str(batch_id) / slot / 'reflector'
     prompt = (
@@ -357,9 +431,14 @@ def reflect(config, db, topic, rows, batch_id, slot):
     require_model_consent()
     if attempt.exists():
         run = read_json(attempt / 'run.json') if (attempt / 'run.json').is_file() else {}
+        if run.get('status') == 'completed':
+            saved = read_json(attempt / 'request.json') if (attempt / 'request.json').is_file() else {}
+            if saved.get('prompt') != prompt or saved.get('harness') != harness:
+                return {'status': 'reflection_preflight_error', 'lesson_id': identity,
+                        'reason': 'Saved reflection request differs from the eligible inputs'}
     else:
-        with approved_runner(config, harness, models, skill_name=skill_name):
-            run = run_model(prompt, attempt, models.get('optimizer_model', models['model']),
+        with approved_runner(config, harness, optimizer_settings, skill_name=skill_name):
+            run = run_model(prompt, attempt, optimizer_model,
                             mode='optimizer', harness=harness, output_schema=output_schema)
     if run.get('status') == 'preflight_error':
         return {'status': 'reflection_preflight_error', 'lesson_id': identity,
@@ -478,21 +557,11 @@ def approved_cases(config, name, candidate):
 
 
 def independent_checks(db, candidate, observations, splits):
-    from scripts.learning import CASE_TAG, prompt_key
-    from scripts.learning_observations import TOPIC_TAG, protected_session_cases
+    from scripts.learning_observations import protected_session_cases
     from scripts.learning_worker import protected_success_cases
 
-    source_prompts = {prompt_key(CASE_TAG.sub('', TOPIC_TAG.sub('', item['request'])))
-                      for row in observations if (item := _evidence(row))}
-    source_cases = {row['case_id'] for row in observations if row['case_id']}
-    for row in observations:
-        message = db.execute("SELECT case_key FROM messages WHERE harness=? AND session=? AND turn=? "
-                             "AND role='user'", (row['harness'], row['session'], row['turn'])).fetchone()
-        if message and message['case_key']:
-            source_prompts.add(message['case_key'])
     holdout = splits['holdout']
-    if not holdout or any(case['id'] in source_cases or prompt_key(case['prompt']) in source_prompts
-                          for case in holdout):
+    if not holdout or len(_without_holdout(db, observations, holdout)) != len(observations):
         return 'The draft needs a holdout independent of the source turns'
     if not candidate.get('source_hash'):
         return None

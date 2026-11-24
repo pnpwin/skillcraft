@@ -117,6 +117,66 @@ class LearningReflectionTests(unittest.TestCase):
         self.assertEqual(learning_reflection.MAX_TURNS, len(planned[0]["rows"]))
         self.assertEqual(list(range(1, 7)), [row["id"] for row in planned[0]["rows"]])
 
+    def approve_holdout(self, filename, cases):
+        dataset = self.root / filename
+        dataset.write_text(json.dumps({"evals": cases}), encoding="utf-8")
+        return {"path": filename, "sha256": sha256(dataset.read_bytes()).hexdigest()}
+
+    def test_approved_holdout_is_removed_before_model_and_does_not_use_slots(self):
+        private = "Format the independent blue meeting notes."
+        other = "Summarize the approved automation-only notes."
+        self.config["approval"] = {"meeting-actions": {"datasets": {"holdout": self.approve_holdout(
+            "per-skill.json", [{"id": "protected-id", "prompt": private, "group": "family-3"}],
+        )}}}
+        self.config["automation_inputs"] = {"cases": {"another-topic": {"holdout": self.approve_holdout(
+            "scheduled.json", [{"id": "second-id", "prompt": other}],
+        )}}}
+        by_prompt = self.add_turn(index=1, prompt=f"Extra instructions. {private}", excerpt="Private prompt rule.")
+        by_id = self.add_turn(index=2, excerpt="Private ID rule. [skillcraft-case:protected-id]")
+        by_group = self.add_turn(index=3, excerpt="Private group rule.")
+        by_batch = self.add_turn(index=4, prompt=other, excerpt="Private automation rule.")
+        allowed = self.add_turn(index=5)
+        planned = learning_reflection.plan(self.db, self.config, existing=[])
+        self.assertEqual([[allowed["id"]]], [[row["id"] for row in item["rows"]] for item in planned])
+
+        calls = []
+        with (patch("scripts.runtime.require_model_consent"),
+              patch("scripts.runtime.run_model", side_effect=self.fake_model(self.proposal(allowed), calls)),
+              patch("scripts.learning_worker.approved_runner", return_value=nullcontext())):
+            result = learning_reflection.reflect(self.config, self.db, allowed["topic"],
+                                                 [by_prompt, by_id, by_group, by_batch, allowed], 17, "item-1")
+        self.assertEqual("awaiting_checks", result["status"])
+        self.assertEqual(1, len(calls))
+        self.assertIn(allowed["excerpt"], calls[0][0])
+        for phrase in (private, other, by_id["excerpt"], by_group["excerpt"]):
+            self.assertNotIn(phrase, calls[0][0])
+        sources = self.db.execute("SELECT source_rows FROM learning_lessons").fetchone()[0]
+        self.assertEqual([allowed["id"]], json.loads(sources))
+
+    def test_stale_approved_holdout_blocks_model_before_evidence_is_read(self):
+        approval = self.approve_holdout("holdout.json", [{"id": "heldout", "prompt": "Previous version."}])
+        self.config["approval"] = {"meeting-actions": {"datasets": {"holdout": approval}}}
+        self.approve_holdout("holdout.json", [{"id": "heldout", "prompt": "Changed after approval."}])
+        row = self.add_turn()
+        calls = []
+        result = self.reflect_with_model(row, self.proposal(row), calls)
+        self.assertEqual("reflection_preflight_error", result["status"])
+        self.assertEqual([], calls)
+
+    def test_reapproved_holdout_does_not_reenter_reflection_via_a_prior_lesson(self):
+        earlier = self.add_turn(index=1, prompt="Build the proprietary fixture with independent blue notes.")
+        proposal = self.proposal(earlier, decision="skip")
+        proposal["rule"] = "Unique old fixture rule."
+        self.reflect_with_model(earlier, proposal, [])
+        self.config["approval"] = {"meeting-actions": {"datasets": {"holdout": self.approve_holdout(
+            "holdout.json", [{"id": "new-holdout", "prompt": json.loads(earlier["details"])["prompt"]}],
+        )}}}
+        allowed = self.add_turn(index=2)
+        calls = []
+        result = self.reflect_with_model(allowed, self.proposal(allowed), calls, batch_id=18)
+        self.assertEqual("awaiting_checks", result["status"])
+        self.assertNotIn(proposal["rule"], calls[0][0])
+
     def test_one_correction_without_case_stages_text_draft_and_duplicate_reuses_it(self):
         row = self.add_turn()
         calls = []
@@ -347,6 +407,35 @@ class LearningReflectionTests(unittest.TestCase):
                                 reload_config=lambda: self.config, now=now.replace(day=9))
         self.assertEqual("awaiting_checks", retried["status"])
         self.assertEqual(1, len(calls))
+
+    def test_bound_skill_optimizer_override_uses_approved_cross_harness_profile(self):
+        source = self.root / ".agents/skills/meeting-actions"
+        source.mkdir(parents=True)
+        (source / "SKILL.md").write_text(
+            "---\nname: meeting-actions\ndescription: Create a meeting action list.\n---\n"
+            "# Rules\n\nKeep the owner label.\n", encoding="utf-8")
+        version = tree_hash(source)
+        home = self.home / "hermes-profile"
+        self.config["skills"] = {"meeting-actions": {
+            "source": ".agents/skills/meeting-actions",
+            "harnesses": {"codex": {"model": "codex-eval-model"}},
+            "optimizer": {"harness": "hermes", "model": "test:optimizer-model", "home": str(home)},
+        }}
+        row = self.add_turn(skill="meeting-actions", version=version)
+        proposal = self.proposal(row, matches=["meeting-actions"], old_text="Keep the owner label.",
+                                 new_text="Keep the owner label on every action.")
+        calls = []
+        with (patch("scripts.runtime.require_model_consent"),
+              patch("scripts.runtime.run_model", side_effect=self.fake_model(proposal, calls)),
+              patch("scripts.learning_worker.approved_runner", return_value=nullcontext()) as runner):
+            result = learning_reflection.reflect(self.config, self.db, row["topic"], [row], 21, "item-1")
+
+        self.assertEqual("awaiting_checks", result["status"])
+        runner.assert_called_once_with(
+            self.config, "hermes", {"model": "test:optimizer-model", "home": str(home)},
+            skill_name="meeting-actions")
+        self.assertEqual("test:optimizer-model", calls[0][2])
+        self.assertEqual("hermes", calls[0][3]["harness"])
 
 
 if __name__ == "__main__":

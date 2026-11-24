@@ -48,6 +48,26 @@ RUNNER_ENV = {
 MANUAL_RETRY_PREFIX = 'manual-retry:'
 
 
+def optimizer_profile(options, override):
+    if override is None:
+        harness, settings = next(iter(options.items()))
+        return harness, settings, settings.get('optimizer_model', settings['model'])
+    if (not isinstance(override, dict) or override.get('harness') != 'hermes'
+            or set(override) - {'harness', 'model', 'home'} or 'model' not in override):
+        raise ValueError('optimizer must configure a Hermes harness and model')
+    model = override['model']
+    settings = {'model': model}
+    if 'home' in override:
+        if not isinstance(override['home'], str) or not override['home']:
+            raise ValueError('optimizer.home must resolve to an absolute Hermes profile path')
+        home = Path(override['home']).expanduser()
+        if not home.is_absolute():
+            raise ValueError('optimizer.home must resolve to an absolute Hermes profile path')
+        settings['home'] = str(home)
+    model_ref(model, 'hermes')
+    return 'hermes', settings, model
+
+
 @contextmanager
 def runner_environment(harness, settings):
     overrides = {env: settings[key] for key, env in RUNNER_ENV[harness].items() if key in settings}
@@ -754,28 +774,7 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
                           **({'training_checks': training_checks} if scheduled else {})},
                          ensure_ascii=False)
         )
-        override = settings.get('optimizer')
-        if override is None:
-            optimizer = next(iter(options))
-            optimizer_settings = options[optimizer]
-            optimizer_model = optimizer_settings.get('optimizer_model', optimizer_settings['model'])
-        else:
-            if (not isinstance(override, dict) or override.get('harness') != 'hermes'
-                    or set(override) - {'harness', 'model', 'home'}
-                    or 'model' not in override):
-                raise ValueError('optimizer must configure a Hermes harness and model')
-            if 'home' in override:
-                if not isinstance(override['home'], str) or not override['home']:
-                    raise ValueError('optimizer.home must resolve to an absolute Hermes profile path')
-                home = Path(override['home']).expanduser()
-                if not home.is_absolute():
-                    raise ValueError('optimizer.home must resolve to an absolute Hermes profile path')
-                override = {**override, 'home': str(home)}
-            optimizer = 'hermes'
-            optimizer_settings = {key: override[key] for key in ('home',) if key in override}
-            optimizer_settings['model'] = override['model']
-            optimizer_model = override['model']
-            model_ref(optimizer_model, optimizer)
+        optimizer, optimizer_settings, optimizer_model = optimizer_profile(options, settings.get('optimizer'))
         configured_optimizer = settings.get('harnesses', {}).get(optimizer, {})
         runtime_overrides = {}
         for key, env in RUNNER_ENV[optimizer].items():

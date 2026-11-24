@@ -431,6 +431,9 @@ uses the existing `interval_days` and `max_candidates_per_batch` settings. It
 reviews eligible completed corrections, explicit user rules, and concrete
 confirmations, and routes each finding to a proven skill used in the turn, a
 matching existing skill in scope, or a new skill when its name is available.
+Before sending evidence, the worker excludes observations matching approved
+holdout cases by ID, prompt, or case family. It uses the explicit optimizer
+profile for a bound skill when one is configured.
 Use phrases such as “Запомни: сохраняй порядок строк” or “Сохрани как правило:
 оставляй дубликаты” to flag feedback for the next scheduled review.
 To draft immediately, ask SkillCraft to create or
