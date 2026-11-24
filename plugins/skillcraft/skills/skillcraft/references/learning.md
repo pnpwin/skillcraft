@@ -156,9 +156,10 @@ For home-wide collection, create `~/.skillcraft/learning.json` with
 Home collection applies under `HOME`. An intervening mount point, project
 configuration, or project marker (`.git`, `.hg`, `.svn`, or `AGENTS.md`) stops
 home fallback. A session
-at exactly `HOME` opts in even when `HOME` has a repository marker. An approved
-project configuration takes precedence; a disabled project configuration blocks
-home fallback. Home collection never uses a project's separate journal.
+at exactly `HOME` opts in even when `HOME` has a repository marker. The closest
+project configuration takes precedence; a disabled closest project
+configuration blocks home fallback. Home collection never uses a project's
+separate journal.
 Home automatic selection includes `~/.codex/skills`, `~/.hermes/skills`, and
 `~/.config/opencode/skills`. The native Hermes plugin uses only the active
 profile's Hermes skill root, including one category level. Explicit selection
@@ -245,16 +246,27 @@ verifiable version binding.
 
 ## Collection and promotion
 
-The observer schedules a journal check after 15 user or final-answer
-messages, after 15 completed model steps, or when an A/B result or feedback
-import adds new evidence. A user turn can include multiple model steps.
-Observers commit the step count and any feedback from a chat only after that
-turn finishes. Step counts use runtime event identifiers, with no reasoning
-text. Intermediate tool messages, subagent activity, interrupted turns and
-learning-generated evaluations do not contribute model steps. A signal with an
-unknown skill or version can support a new skill when a project-approved case
-confirms the result. Revising an enrolled skill requires its verified version.
-Repeats of the same case and input count once.
+The observer queues a journal checkpoint every 15th observed message (a user
+prompt or final answer), or each 15th completed model step in the selected
+scope's journal. Counts are cumulative; one user turn can contain multiple
+model steps. Step counts use runtime event identifiers, not reasoning text.
+Messages are counted when observed, while attributed feedback and model-step
+counts are committed only for a completed turn. Intermediate tool messages, subagent
+activity, interrupted turns, and learning-generated evaluations do not
+contribute model steps. A/B imports and new feedback can also queue a checkpoint.
+A checkpoint records work for the worker; it does not by itself authorize
+model calls. Scheduled model calls require due automation, current owner
+approval, valid model and input settings, and eligible training evidence. For
+`selection: all`, ordinary per-skill revisions also require current approved
+train/holdout datasets and fixtures. Scheduled creation can use approved
+deterministic cases and may save a draft before an independent holdout exists.
+Without scheduled `automation`, the ordinary revision worker may call models
+only for a skill with its own approved model settings and eligible evidence. A
+due scan with no eligible items records an empty batch and makes no model calls.
+A signal with an unknown skill or version can support a new skill when a
+project-approved case confirms the result. Revising an enrolled
+skill requires its verified version. Repeats of the same case and input count
+once.
 
 Codex uses `UserPromptSubmit` and `Stop` for turns and `PostModelRequest` for
 completed model requests. A supported local rollout can bind
@@ -326,14 +338,16 @@ a hook or `work "$PWD"` starts it. Failed and interrupted optimizer attempts
 keep their evidence. A later checkpoint can retry when new evidence or changed
 optimizer settings produce a different request.
 
-When a proposal is saved but code or A/B verification is blocked, fixing the
-owner-controlled tests, evaluator settings, or validation runtime and running
-`work "$PWD"` queues a validation retry that reuses the verified proposal.
-Use `work "$PWD" --retry-blocked` to request one durable validation-only retry
-without changing those settings. These validation checkpoints never call the
-optimizer; they run only when a hash-verified proposal for the same source and
-optimizer request is available. Failed or interrupted optimizer calls still
-wait for new evidence or a changed optimizer request.
+For the ordinary per-skill revision worker, if a saved proposal's code or A/B
+verification is blocked, fix the owner-controlled tests, evaluator settings, or
+validation runtime and run `work "$PWD"` to queue a validation retry using that
+verified proposal. `work "$PWD" --retry-blocked` requests one durable
+validation-only checkpoint for this workflow; it does not call the optimizer
+and requires a hash-verified proposal for the same source and optimizer request.
+With scheduled `automation`, use plain `work "$PWD"` to check the persisted due
+time or resume an interrupted batch; the scheduled worker clears
+`--retry-blocked` checkpoints. Failed or interrupted optimizer calls still wait
+for new evidence or a changed optimizer request.
 
 
 ## Session candidates
@@ -354,8 +368,17 @@ The draft and proposed checks can be reviewed before any model evaluation.
 For a revision, add `--source .agents/skills/meeting-actions` to the stage
 command. The stage result contains the candidate ID, source and candidate hashes.
 Verification writes the usual paired reports, including `report.html`, and
-returns their location. Application is a separate explicit owner action.
-The apply result records whether a trusted verification exists.
+returns their location. `apply` is an explicit action that can publish even
+without a trusted verification; inspect its result for
+`applied_manual_unverified`. Run `verify-now` first when you want a fresh A/B.
+Manual apply does not run the native catalog probe used by scheduled
+auto-apply. Candidate rollback checks the published hash before restoring a
+revision or removing a newly created skill.
+
+A scheduled revision report's `candidate` path is a working tree, not a staged
+candidate ID. To publish it manually, pass that path to `stage` with the
+original skill as `--source`, then run `verify-now` and `apply` on the returned
+candidate ID. A scheduled new-skill report already has a staged candidate ID.
 
 ## Scheduled Learning
 
@@ -390,11 +413,17 @@ enroll the local profile and enable its shared-journal auto-import. Trust the
 project in Hermes, or configure the profile to discover `~/.agents/skills` for
 home. Use the existing harness and project permission settings.
 
-The next completed session turn after a batch becomes due wakes the worker.
-`work` also checks the persisted due time, and `verify-now` evaluates a chosen
-candidate immediately. The default of three candidates per project or home
-batch is a starting setting. Raise `max_candidates_per_batch` when you can
-run more (for example, to six). Each batch combines eligible lessons into at
+The scheduler persists `next_due_at` as the last batch start plus
+`interval_days` (seven days by default); the first batch is due when the
+schedule is initialized. There is no timer: `work` checks the persisted due
+time, and hook checkpoints wake the worker, which checks the due time again.
+Completed assistant turns also check the interval. Message and model-step
+thresholds can wake the worker, but do not make an interval-based batch due.
+An explicit `work` can run a due scan without a new checkpoint or evidence.
+`verify-now` evaluates a chosen candidate immediately. The default of three
+candidates per project or home batch is a starting setting. Raise
+`max_candidates_per_batch` when you can run more (for example, to six). Each
+batch combines eligible lessons into at
 most one candidate per skill. With one case, one harness, a pilot and three
 repeats, creation runs the executor eight times and revision runs it twelve
 times. Generation, judging and trigger checks add separate runs. The batch
@@ -416,10 +445,18 @@ task or feedback to group related prompts. Untagged grouping is conservative.
 When a turn used multiple proven skills and no single attribution is available,
 the observation stays out of the creation queue.
 
-One confirmed result with a deterministic check can queue creation. One
-reproducible failure or correction can queue a revision. Cases can come from
-one session. With only one case, the worker can prepare a draft and report
-that an independent holdout case is needed for automatic publication.
+One confirmed result with an owner-approved deterministic check can queue
+creation. One reproducible failure or correction can queue a revision. Cases
+can come from one session, but repeated inputs count once. For `selection: all`,
+discovered skills remain capture-only for ordinary per-skill revisions until
+their train/holdout data, fixtures, harness settings, and approval are current.
+Scheduled `automation.create` can use approved deterministic cases and draft a
+new skill without an independent holdout; automatic publication waits for one.
+A session-derived revision can use a verified defect as training and preserve
+confirmed successes as protected checks. The optimizer receives training
+evidence and checks only; holdout cases stay out of its request. Without an
+independent holdout, a revision proposal can be saved while it waits for
+independent checks.
 
 For tool-generated artifacts, approve a deterministic train case and link a
 task with `[skillcraft-case:case-id]`. On a completed turn, the observer

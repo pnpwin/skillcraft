@@ -32,13 +32,18 @@ or `opencode`.
   --harness "$HARNESS" --model "$EXECUTOR_MODEL" --judge-model "$JUDGE_MODEL" --repeats 3 --workers 2
 ```
 
-For Hermes, use `--model openai-codex:MODEL` and a rubric covered entirely by
-deterministic file checks. Omit judge arguments. The runner requires the local
-Hermes Chat CLI, a signed-in profile and macOS `sandbox-exec`. Use
-`SKILLCRAFT_HERMES_HOME` to select a source profile. The baseline catalog and
-candidate preload are checked against native requests before grading.
-Read the [Hermes runner guide](hermes-runner.md) before setting
-up Hermes or interpreting its profile, model, isolation, or proof artifacts.
+For Hermes with the `openai-codex` provider, use `--model openai-codex:MODEL`
+and a rubric covered entirely by deterministic file checks. Omit judge arguments.
+This provider requires a signed-in Hermes profile; the supported loopback `custom`
+provider does not. Both require the local Hermes Chat CLI and macOS
+`sandbox-exec`. Use `SKILLCRAFT_HERMES_HOME` to select a source profile. The
+baseline catalog and candidate preload are checked against native requests before
+In a Hermes skill-quality run, the baseline catalog and candidate preload are
+checked against native requests before grading. Hermes also supports instruction
+prompt A/B with deterministic checks; see [prompt A/B evaluation](prompt-ab-evaluation.md)
+for that distinct workflow.
+Read the [Hermes runner guide](hermes-runner.md) before setting up Hermes or
+interpreting its profile, model, isolation, or proof artifacts.
 
 The runner creates fresh sessions and independent fixtures. `with_skill` uses a
 native API attachment; this measures quality after loading, not natural selection.
@@ -57,16 +62,20 @@ corresponding runner guide for the supported operations and bounds.
 
 ## Grade and review
 
-The orchestrator applies deterministic checks and sends remaining expectations to a
-separate judge session using `references/prompts/grader.md`. A grading error is
-recorded separately from the expectation's verdict. The files in
-`references/prompts/` configure the independent evaluation sessions.
-When `--judge-model` is supplied, the judge also critiques the full rubric, including
-deterministic checks. With all expectations covered deterministically this is a
-critique-only call. Without a judge, critique is explicitly not run. Requested
-critique failures are reported separately and make the experiment incomplete,
-without changing valid expectation verdicts. Apply suggestions to a new rubric
-version and rerun comparable candidates rather than revising scores retroactively.
+For Codex and OpenCode, the orchestrator applies deterministic checks and sends
+remaining expectations to a separate judge session using
+`references/prompts/grader.md`. A grading error is recorded separately from the
+expectation's verdict. When `--judge-model` is supplied, the judge also critiques
+the full rubric, including deterministic checks. With all expectations covered
+deterministically this is a critique-only call. Without a judge, critique is
+explicitly not run. Requested critique failures are reported separately and make
+the experiment incomplete, without changing valid expectation verdicts. Apply
+suggestions to a new rubric version and rerun comparable candidates rather than
+revising scores retroactively. Hermes supports deterministic checks only: every
+expectation must be covered by file checks, and judge-model grading and critique
+are unsupported.
+
+The files in `references/prompts/` configure the independent evaluation sessions.
 
 Inspect actual artifacts, evidence, errors, repetitions, token usage and latency.
 Show the human reviewer the viewer:
