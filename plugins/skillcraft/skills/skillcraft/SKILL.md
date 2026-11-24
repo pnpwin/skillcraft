@@ -42,9 +42,17 @@ prompt's requested result with the rubric on at least one normal case and one
 relevant edge case. Use the same role, fixture and tool settings when comparing
 versions.
 
-Validate a skill with `scripts/quick_validate.py CANDIDATE --lint` using the
-SkillCraft interpreter. If the user asks for a draft, deliver a draft and identify
-the checks still pending.
+For lint, set `SKILLCRAFT` to the absolute directory containing this `SKILL.md`
+and `CANDIDATE` to the draft directory. Use the installed SkillCraft virtualenv.
+
+```sh
+"${SKILLCRAFT_VENV:-${XDG_DATA_HOME:-$HOME/.local/share}/skillcraft/venv}/bin/python" \
+  "$SKILLCRAFT/scripts/quick_validate.py" "$CANDIDATE" --lint
+```
+
+If the virtualenv is missing, mark lint as pending and link to the
+[dependency setup](references/configuration.md#choose-an-operating-mode).
+When delivering a draft, identify any checks still pending.
 
 ## Evaluate
 

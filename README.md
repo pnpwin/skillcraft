@@ -97,6 +97,9 @@ python3 -m venv "$SKILLCRAFT_VENV"
 npm --prefix "$SKILLCRAFT/scripts/opencode-runner" ci  # required for OpenCode
 ```
 
+After an OpenCode Git plugin update, run this `npm ci` for the newly loaded
+package before running A/B or resuming model-driven Learning.
+
 The skill directory is named `skillcraft`, matching its frontmatter name.
 
 Ask the agent to use **SkillCraft** for a recurring workflow:
