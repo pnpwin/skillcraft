@@ -5,8 +5,9 @@ Create, evaluate, and refine agent skills and prompts through measured iteration
 SkillCraft combines an Agent Skills-compatible authoring workflow with a Python
 evaluation toolkit for Codex and OpenCode and file-based A/B for Hermes on
 macOS. Local Codex chats in the ChatGPT desktop app use the same skill and
-evaluation scripts as Codex CLI. See the configuration reference for supported
-combinations of paired evaluations, trigger testing, description optimization,
+evaluation scripts as Codex CLI. See the
+[configuration reference](plugins/skillcraft/skills/skillcraft/references/configuration.md#harness-capabilities)
+for supported combinations of paired evaluations, trigger testing, description optimization,
 blind comparisons, and hash-bound packaging.
 
 The standalone skill ID is `skillcraft`. See the
@@ -21,6 +22,9 @@ for setup and verification in a local ChatGPT desktop chat.
 - For OpenCode, a server with the required V2 APIs, a configured model, Node.js **22+** and the
   locked dependencies under `scripts/opencode-runner/`. The server and runner share absolute paths.
   See the [OpenCode runner guide](plugins/skillcraft/skills/skillcraft/references/opencode-runner.md).
+- For Hermes file A/B, a local signed-in Hermes Chat CLI, macOS, and
+  `/usr/bin/sandbox-exec`. See the
+  [Hermes runner guide](plugins/skillcraft/skills/skillcraft/references/hermes-runner.md).
 
 Live checks have been run with Codex 0.170.0 and OpenCode 2.2.7. SkillCraft records
 the versions it observes and checks the runtime interfaces it uses.
@@ -116,9 +120,9 @@ show how these options affect quality A/B, description optimization, and Learnin
 | --- | --- |
 | Author a skill or prompt | Invoke `skillcraft` with the intended outcome and examples. |
 | Run A/B on demand | Install evaluation dependencies, sign in to the selected runner, and choose the model, cases, and repeat count. See [runner settings](plugins/skillcraft/skills/skillcraft/references/configuration.md#runner-settings). |
-| Collect feedback | Create `.skillcraft/learning.json` using the example below and enroll the project. |
-| Create or improve skills in batches | Enable [scheduled Learning](plugins/skillcraft/skills/skillcraft/references/learning.md#scheduled-learning) for the project or home. |
-| Automatically revise a skill on new evidence | Add model settings and separate training and holdout cases. Set `auto_apply` only when passing candidates may update that source. See [Learning settings](plugins/skillcraft/skills/skillcraft/references/configuration.md#per-skill-settings). |
+| Collect feedback | Create `.skillcraft/learning.json` using the example below and enroll the project. For Codex sessions, review and trust the installed [Learning hooks](plugins/skillcraft/skills/skillcraft/references/learning.md). |
+| Create or improve skills in batches | Add the optional [`automation` settings](plugins/skillcraft/skills/skillcraft/references/configuration.md#scheduled-automation) and re-enroll the project or home scope. |
+| Revise a skill at Learning checkpoints | Without an `automation` block, configure a model and separate training and holdout cases for that skill. See [per-skill settings](plugins/skillcraft/skills/skillcraft/references/configuration.md#per-skill-settings). |
 
 This example enrolls a local skill for feedback collection. Replace `example-skill`
 with the directory name of a skill you want to track.
@@ -151,21 +155,28 @@ for approval, status, and optional Hermes feedback forwarding.
 
 In a chat, ask SkillCraft to create a skill from the relevant turns or improve an
 existing skill from a correction. It prepares a candidate with examples and
-checks. Ask to **check now** to run A/B and get a report, or **apply** to publish
-the staged candidate. See [session candidates](plugins/skillcraft/skills/skillcraft/references/learning.md#session-candidates).
+checks. Ask to **check now** to run A/B for that candidate and get a report.
+Use **apply** as a separate publishing action. See
+[session candidates](plugins/skillcraft/skills/skillcraft/references/learning.md#session-candidates).
 
-Scheduled Learning collects feedback in the enrolled project or home scope.
-Use `selection: "all"` to discover local skills without listing each skill.
-The default interval is seven days and the configurable limit is three
-candidates per project or home batch. One verifiable case can queue a draft.
-Automatic publication also needs an independent holdout case. The batch
-status includes a resource report for generation, A/B, judging and trigger
-checks. [Configuration and examples](plugins/skillcraft/skills/skillcraft/references/learning.md#scheduled-learning)
+Learning collects feedback as turns finish in the enrolled project or home
+scope. Use `selection: "all"` to discover eligible local skills without
+listing each one. With scheduled Learning enabled, the first completed project
+or home turn on or after the stored due time can wake the worker. The default
+interval is seven days, with up to three candidates across that scope per
+batch. An empty batch requires zero model calls.
+
+One independently verifiable case can qualify a draft. Automatic publication
+requires the relevant `auto_apply` setting, a passing A/B with independent
+holdout coverage, and the required native checks. `learning.py status` shows
+the schedule, queue and batch resource report.
+[Configuration and examples](plugins/skillcraft/skills/skillcraft/references/learning.md#scheduled-learning)
 
 ```text
 Install from Git → select a profile → open skillcraft
-Task → draft or revision → A/B → report → decision
-Opted-in feedback → Learning → a candidate for the same A/B process
+Manual: task → candidate → optional A/B → report → owner decision
+Scheduled: completed turns and evaluated evidence → journal → due batch
+           → eligible candidate → A/B and report → publication gates
 ```
 
 ## Validate and evaluate

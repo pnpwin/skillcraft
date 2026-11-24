@@ -1,5 +1,10 @@
 # Comparing instruction prompts
 
+Prompt A/B runs support Codex, OpenCode and Hermes. The example uses OpenCode;
+Codex accepts `model[#effort]`, OpenCode accepts `provider/model[#variant]`, and
+Hermes accepts `provider:model`. Hermes requires deterministic file checks and
+rejects judge-model and judge-profile arguments.
+
 Use prompt A/B when the question is whether two instruction files change task
 quality or executor cost. It runs exactly two arms against the same frozen
 evaluation rows, fixture snapshots, model, harness, profile, repeat count and

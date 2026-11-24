@@ -40,12 +40,17 @@ files and experiment workspaces.
 ## Evaluation and evidence
 
 The runner starts a fresh ephemeral thread for each case. It verifies the staged
-`.agents/skills/<id>/SKILL.md` path through `skills/list`. A baseline preflight
-rejects a leaked candidate. Quality runs attach the exact skill with a native
-App Server input. Independent graders use structured output and read-only access.
+`.agents/skills/<id>/SKILL.md` path through `skills/list`. The
+`without_skill` arm checks that the evaluated skill is absent from the native
+catalog. Codex can still list bundled skills. Check the `background` field in
+`environment.json` and the recorded skill invocations when you need to establish
+what else was available or used. Quality runs attach the exact skill with a
+native App Server input. Independent graders use structured output and read-only access.
 The SkillCraft permission profile gives the executor read access to the staged
 workspace and write access to `outputs/`. The model's tools run without network
-access. OpenCode `--profile` files are specific to that adapter.
+access. The App Server still sends model requests through the selected
+provider, so use fixtures and skill content approved for that connection.
+OpenCode `--profile` files are specific to that adapter.
 
 On macOS, a parent Codex sandbox can prevent the App Server from creating its
 own sandbox. If the runner reports this, launch the evaluation from a regular

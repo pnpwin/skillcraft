@@ -11,8 +11,9 @@ The [workflow diagrams](workflows.md) show where key options change execution.
 For authoring, use the registered skill in a fresh local session. Resolve
 resources relative to its installed `SKILL.md`. For evaluation, prepare a Python
 environment outside the skill directory and choose an authorized runner. For
-Learning, enroll a project or home scope separately. `auto_apply` controls
-whether a passing revision can replace a local source.
+Learning, enroll a project or home scope separately. Choose a per-skill
+checkpoint workflow or a [scheduled batch](#scheduled-automation). Each uses
+its own `auto_apply` setting.
 
 Set `SKILLCRAFT` to the absolute directory containing the loaded `SKILL.md`.
 For a standalone copy, run `export SKILLCRAFT="$PWD/.agents/skills/skillcraft"`
@@ -66,7 +67,7 @@ This project configuration enables capture for one skill.
 | `enabled` | Must be `true` to collect. Absent behaves as disabled | Set false to suspend collection. |
 | `scope` | `project` (default) or `home` | `home` is valid only in the home configuration. |
 | `sources` | List of `sessions` and `evals`. Default both. | `["evals"]` collects evaluation evidence only. An empty list collects neither. Hermes enrollment requires `sessions`. |
-| `automation` | Optional scheduled Learning object. | See [scheduled Learning](learning.md#scheduled-learning). |
+| `automation` | Optional scheduled Learning object. | When present and approved, replaces checkpoint-based model work with the [batch policy](#scheduled-automation). |
 | `selection` | `explicit` (default) or `all` | `explicit` requires at least one `skills` entry. `all` discovers eligible local skills on each call. |
 | `skills` | Object keyed by exact skill ID. Default `{}` | Pins/overrides settings for IDs. With `selection: explicit`, each entry needs `source`. With `all`, `source` pins a duplicate ID to one discovered path, including an approved symlink. |
 | `exclude` | List of exact skill IDs. Default `[]` | Only valid with `selection: all`. |
@@ -114,6 +115,28 @@ through `hermes skillcraft enable`. A Hermes refresh only carries prior shared
 approval forward when that enrollment is already active. Other profiles must be
 enabled again after a configuration change.
 
+### Scheduled automation
+
+Set these fields inside `automation`.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `create` | `false` | Prepare a new skill from qualifying topic evidence. Requires `selection: all`. |
+| `improve` | `false` | Prepare a revision from reproducible evidence for a current enrolled version. |
+| `auto_apply` | `false` | Allow eligible candidates to publish after their evaluation and native checks pass. For scheduled revisions this setting controls publication, and linked sources remain read-only. Requires `create` or `improve`. |
+| `interval_days` | `7` | Positive integer. The next due time is calculated from the previous batch start. The first eligible completed turn on or after that time can wake the worker. |
+| `max_candidates_per_batch` | `3` | Positive integer. Shared across new drafts and revisions in the enrolled project or home scope. |
+| `harnesses` | `defaults.harnesses` or `{}` | Map of approved runner options. Each runtime entry requires a `model`. For revisions, the skill's own `harnesses` take precedence. |
+| `cases` | `{}` | Map from new-skill topic IDs to `{ "train": "…", "holdout": "…" }` dataset paths relative to the enrolled scope. Relative fixture paths resolve from that same root, and all fixtures must be within it. |
+
+Re-enroll after enabling the policy or changing approved datasets, fixtures or
+executables. When an existing skill has both per-skill datasets, scheduled
+revisions use those datasets. Otherwise, the worker looks for qualifying
+verified session cases and protected checks. One verifiable case can support
+a draft. Automatic publication needs separate holdout evidence and a passing
+evaluation. A due scan with no eligible model work makes zero model calls.
+[Batch workflow, statuses and reports](learning.md#scheduled-learning)
+
 ### Per-skill settings
 
 Use these settings in a `skills` entry or in `defaults`, except `source`, which
@@ -122,7 +145,7 @@ belongs in `skills` only.
 | Field | Values and default | Notes |
 |---|---|---|
 | `source` | Required for explicit selection. Project-relative directory | Must contain that ID's `SKILL.md`. Explicit sources cannot use symlinks or paths outside the configured root. With `selection: all`, a pin may name a discovered symlink only when its target is under an approved `linked_skill_roots` directory. |
-| `train`, `holdout` | Both omitted for capture-only. Both required for model-based revision | Project-relative JSON datasets. They must be distinct in case IDs, prompts and paraphrase groups. Holdout files must stay outside deployable skill resources. With `defaults` and `selection: all`, `{skill}` is replaced by the discovered ID. |
+| `train`, `holdout` | Optional pair. Both required for checkpoint-based model revision. | JSON datasets relative to the enrolled scope. They must be distinct in case IDs, prompts and paraphrase groups. Holdout files must stay outside deployable skill resources. With `defaults` and `selection: all`, `{skill}` is replaced by the discovered ID. |
 | `harnesses` | Object with one or more of `codex`, `opencode`, `hermes` | Each configured runtime requires `model`. See model syntax below. |
 | `harnesses.<runtime>.model` | Required when that runtime is configured | Codex `MODEL[#EFFORT]`. OpenCode `provider/model[#variant]`. Hermes `provider:model`. |
 | `harnesses.<runtime>.optimizer_model` | Optional | Runtime-specific optimizer model, same syntax as `model`. |
@@ -133,15 +156,15 @@ belongs in `skills` only.
 | `harnesses.hermes.home` | Optional absolute path | Selects a Hermes profile. |
 | `harnesses.hermes.python` | Optional absolute Python path | Native hook runs reuse the active Hermes interpreter. Set this for manual workers invoked through a shell-wrapper installation. Use an interpreter from a trusted local installation. |
 | `optimizer` | Optional object: `{"harness":"hermes","model":"provider:model","home":"/absolute/profile"}` | Explicit cross-runtime optimizer. Only `hermes` is accepted here. `home` is optional. |
-| `auto_apply` | Boolean. Default false | Automatic promotion requires true. Linked sources force false. |
+| `auto_apply` | Boolean. Default false | Controls publication in the checkpoint workflow. For scheduled work use `automation.auto_apply`. Linked sources force false. |
 | `editable` | List of skill-relative globs. Default `SKILL.md`, `references/*`, `assets/*`, `scripts/*`, `agents/*` | Limits files an optimizer may change. |
-| `tests` | List of argv arrays. Default `[]` | Commands run as deterministic checks, for example `["python3", "-m", "unittest", "discover", "-s", "tests"]`. |
+| `tests` | List of argv arrays. Default `[]` | Commands for the checkpoint workflow's deterministic validation, for example `["python3", "-m", "unittest", "discover", "-s", "tests"]`. Scheduled revisions are restricted to supported text files. |
 | `repeats` | Positive integer. Default `3` | Number of repeated quality runs per candidate. |
 | `timeout` | Positive number of seconds. Default `180` | Per-run limit. |
 
-Model-based revision requires both `train` and `holdout` plus at least one
-configured harness and model. If `optimizer` is omitted, the first configured
-harness supplies the optimizer by default.
+Checkpoint-based model revision requires both `train` and `holdout` plus
+at least one configured harness and model. If `optimizer` is omitted, the
+first configured harness supplies the optimizer by default.
 
 Executable changes require owner-provided `tests`. Those commands run in an
 already-present local Docker or Podman image named by `SKILLCRAFT_TEST_IMAGE`.
@@ -191,11 +214,12 @@ select the respective runtime profile or endpoint.
 
 ### Hermes Learning cycle
 
-The Hermes profile journals verified feedback from completed local chat turns.
+The Hermes profile journals events from completed local chat turns. Version-bound
+feedback requires a verified skill read.
 Use `--auto-import` or `learning.py import-hermes` to forward that evidence to
 the shared Learning worker after enabling shared Learning for the same scope.
-When enough evidence qualifies for revision, the worker uses the approved
-`train` cases to prepare a candidate and evaluates it on `holdout` cases. To
+The shared worker uses approved or verified training cases to prepare a
+candidate and evaluates it on separate holdout cases. To
 include Hermes in the quality runs, set `harnesses.hermes.model` and supply
 deterministic file checks for all expectations. To select Hermes as the
 proposal generator, use the `optimizer` setting above. Applying a passing
@@ -233,18 +257,26 @@ See [OpenCode profile behavior](opencode-runner.md#profile-options) for rule
 details. Custom `--profile`, `--judge-profile`, or `--optimizer-profile` settings
 are supported only with OpenCode. Codex and Hermes reject them.
 
-Hermes supports paired file-quality runs with deterministic grading and
-schema-checked description proposals through `improve_description.py`. Trigger
-evaluations, including the trigger-based `run_loop.py` workflow, require Codex
-or OpenCode. Model-judged grading, standalone grading, and blind comparison also
-require Codex or OpenCode.
+## Harness capabilities
+
+| Workflow | Codex CLI / local ChatGPT Codex | OpenCode v2 | Hermes Agent |
+| --- | --- | --- | --- |
+| Skill quality A/B | Yes | Yes | macOS, deterministic file checks |
+| Prompt A/B | Yes | Yes | macOS, deterministic file checks |
+| Natural trigger evaluation and trigger-based optimization loop | Yes | Yes | Unavailable |
+| Schema-checked description proposal with `improve_description.py` | Yes | Yes | Yes, with the configured Hermes runner |
+| Model-judged grading and blind comparison | Yes | Yes | Unavailable |
+
+Deterministic grading of an existing artifact can also run locally without a
+judge model. For Learning in Hermes, see the
+[profile enrollment and shared worker workflow](#hermes-learning-cycle).
 
 ## Environment
 
 | Variable | Purpose |
 |---|---|
 | `SKILLCRAFT` | Absolute SkillCraft skill directory used by examples and commands. |
-| `SKILLCRAFT_VENV` | Python virtual environment path. Keep writable and outside the skill directory. Defaults under `${XDG_DATA_HOME:-$HOME/.local/share}/skillcraft/venv`. |
+| `SKILLCRAFT_VENV` | Python virtual environment path used by the setup commands and the Codex and OpenCode collectors. Keep it writable and outside the skill directory. The setup default is `${XDG_DATA_HOME:-$HOME/.local/share}/skillcraft/venv`. Hermes callbacks use the active Hermes interpreter. |
 | `SKILLCRAFT_SERVER` | Explicit OpenCode server endpoint. Otherwise discover the local server. |
 | `SKILLCRAFT_HEADERS` | Optional JSON object of HTTP headers for an explicit OpenCode server. Treat as secret. Do not put it in config or experiment files. |
 | `SKILLCRAFT_OPENCODE_BINARY` | Optional absolute path to a trusted local OpenCode v2 CLI for publication catalog checks. SkillCraft also checks `PATH` and the macOS desktop bundle. |
@@ -254,7 +286,14 @@ require Codex or OpenCode.
 | `CODEX_API_KEY` | Alternative Codex runner authentication via the process environment. |
 | `SKILLCRAFT_HERMES_HOME` | Hermes profile home. Takes precedence over `HERMES_HOME`, then `~/.hermes`. |
 | `SKILLCRAFT_HERMES_BIN` | Optional local Hermes CLI executable. Defaults to `hermes` on `PATH`. |
+| `SKILLCRAFT_HERMES_PYTHON` | Optional Python executable from a trusted Hermes installation for native catalog checks. Useful if the Hermes launcher is a shell wrapper. Learning workers set it from `harnesses.hermes.python` when configured. |
 | `SKILLCRAFT_TEST_IMAGE` | Optional image name for isolated checks of executable skill changes. Must already exist in local Docker or Podman. No default. |
+
+Set a custom `SKILLCRAFT_VENV` in the environment of the process that runs the
+collector. Without it, Codex checks a legacy package-local `.venv` first, then
+the data-directory virtualenv, then the standard home data path and its
+current Python. OpenCode checks the data-directory virtualenv and falls back to
+`PYTHON` or `python3`. Hermes uses the active profile's Python for hooks.
 
 Keep credentials in the authorized runtime profile or process environment.
 OpenCode model runs use the configured or discovered service. Publication
@@ -275,16 +314,17 @@ for the full current option list.
 
 | Script | Required inputs | Main options |
 |---|---|---|
-| `learning.py enable` | Project path positional argument | `--auto-import` for an enrolled Hermes profile, or linked-root preview/approval flags described above. |
+| `learning.py enable` | Project or home root | Linked-root preview/approval flags described above. For Hermes forwarding use `hermes skillcraft enable PROJECT --auto-import` after shared enrollment. |
 | `learning.py stage` | Project path and draft folder | Use `--source PATH` for an existing skill. |
-| `learning.py verify-now` | Project path, candidate ID, `--evals`, `--model` | Takes `--harness`, `--judge-model`, `--workspace`, `--repeats`, and `--timeout`. Returns A/B evidence. |
+| `learning.py verify-now` | Project path, candidate ID, `--evals`, `--model` | Takes `--harness codex\|opencode\|hermes`, `--judge-model`, `--workspace`, `--repeats`, and `--timeout`. Returns A/B evidence. |
 | `learning.py verify-artifact` | Project path, then either harness, session and turn IDs or `--topic TOPIC --case CASE_ID` | Verifies local outputs against an approved train case. The standalone form stores proof without attributing it to a session or installed version. |
 | `learning.py apply` | Project path and candidate ID | Explicit owner publication. Undo with `rollback PROJECT --candidate ID`. |
+| `learning.py rollback` | Project path and either a numeric revision ID or `--candidate ID` | Revert a Learning revision or undo an applied staged candidate, including removal of a newly published skill if its snapshot still matches. |
 | `learning.py import-hermes` | Project path and `--from-profile` | Imports verified feedback from the specified Hermes profile into shared Learning. |
 | `learning.py ingest` | Evaluation workspace | `--project` selects the Learning scope. `--feedback` imports reviewed feedback. `--selection` selects the grading attempt and requires `--feedback`. |
 | `learning.py status` or `preview` | Project path | Inspect version-bound evidence, eligibility, and the next action. `status` also shows revision history. |
 | `learning.py repair-exchanges` | Enrolled project path | Archives verified exchange copies from previous releases outside the native skill catalog. Reports unverified matches. |
-| `learning.py work` | Project path | `--retry-blocked` queues validation of a saved candidate. |
+| `learning.py work` | Project path | Checks the due time in scheduled mode. In the checkpoint workflow, `--retry-blocked` queues validation of a saved proposal. |
 | `run_quality_eval.py` | `--evals`, `--workspace`, `--model`, and either `--skill` or both `--instruction-a` and `--instruction-b` | Paired quality runs. `--repeats` (3), `--workers` (1), `--judge-model`, `--judge-profile`, repeated `--pilot-case` (defaults to first case), `--previous` (skill mode), `--stop-threshold` (2), `--json`, `--timeout` (180), `--profile`, `--harness`. |
 | `run_eval.py` | `--skill`, `--evals`, `--workspace`, `--model` | Trigger runs. `--repeats` (3), `--workers` (1), optional independent `--judge-model` and `--judge-profile`, `--timeout` (180), `--profile`, `--harness`. |
 | `run_loop.py` | `--skill`, `--evals` (trigger set), `--quality-evals`, `--workspace`, `--model`, `--optimizer-model` | Trigger-based description optimization plus quality regression with Codex or OpenCode. Optional `--judge-model`, `--profile`, `--judge-profile`, `--optimizer-profile`, `--iterations` (3), `--repeats` (3), `--workers` (1), `--timeout` (180), `--seed` (42), `--harness`. |

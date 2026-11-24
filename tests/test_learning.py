@@ -1,6 +1,6 @@
 import json
 import importlib.util
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import os
 import shutil
@@ -110,6 +110,33 @@ class LearningTest(unittest.TestCase):
         with patch('scripts.learning_batch.run_batch', return_value={'status': 'started'}) as batch:
             self.assertEqual('started', learning_worker.work(self.config)['status'])
         batch.assert_called_once()
+
+    def test_scheduled_retry_reports_unsupported_without_queuing(self):
+        self.configuration['automation'] = {'improve': True}
+        write_json(self.project / learning.CONFIG, self.configuration)
+        self.config = learning.config_for(self.project, enrolling=True)
+        self.enable()
+        error = StringIO()
+        with (redirect_stderr(error), redirect_stdout(StringIO()),
+              patch.object(learning_worker, 'work', return_value=None) as worker):
+            result = learning.main(['work', str(self.project), '--retry-blocked'])
+
+        self.assertEqual(1, result)
+        self.assertIn('checkpoint-based Learning', error.getvalue())
+        worker.assert_not_called()
+        with learning.connection(self.config) as db:
+            self.assertEqual(0, db.execute('SELECT COUNT(*) FROM checkpoints').fetchone()[0])
+
+    def test_checkpoint_retry_queues_validation(self):
+        self.enable()
+        with patch.object(learning_worker, 'work', return_value=None) as worker:
+            self.assertEqual(0, learning.main(['work', str(self.project), '--retry-blocked']))
+
+        worker.assert_called_once()
+        with learning.connection(self.config) as db:
+            self.assertEqual(1, db.execute(
+                "SELECT COUNT(*) FROM checkpoints WHERE witness LIKE 'manual-retry:%' AND status='pending'"
+            ).fetchone()[0])
 
     def test_both_harnesses_attribute_corrections_to_loaded_revision(self):
         self.enable()

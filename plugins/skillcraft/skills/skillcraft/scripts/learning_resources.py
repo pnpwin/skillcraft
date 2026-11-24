@@ -4,6 +4,7 @@ from datetime import datetime
 from html import escape
 import json
 from pathlib import Path
+import sqlite3
 
 METRICS = ('tokens', 'cost', 'cached_tokens', 'wall_time_seconds')
 HARNESSES = {'codex', 'opencode', 'hermes'}
@@ -83,7 +84,28 @@ def _eval_attempts(workspace, state, harness, *, trigger=False):
             yield {**sample, 'stage': sample['stage'].replace('main_ab', 'pilot', 1)}
 
 
-def _item_attempts(item, state, batch_id):
+def _revision_attempt(item, state, batch_id, db):
+    if db is None:
+        return None
+    try:
+        row = db.execute(
+            'SELECT r.checkpoint, r.path FROM revisions r '
+            'JOIN checkpoints c ON c.id=r.checkpoint '
+            'WHERE c.witness=? AND r.skill=?',
+            (f'automation:{batch_id}:{item["name"]}', item['name']),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    attempt = state / 'revisions' / str(row[0]) / item['name']
+    persisted = _inside_state(row[1], state)
+    if persisted is None or persisted != attempt or not persisted.is_dir():
+        return None
+    return attempt
+
+
+def _item_attempts(item, state, batch_id, db=None):
     result = item.get('result') or {}
     result = result.get('candidate', result) if 'candidate' in result and 'status' in result else result
     if item['operation'] == 'create':
@@ -94,10 +116,15 @@ def _item_attempts(item, state, batch_id):
         for workspace in sorted(attempt.glob('verification-*')):
             yield from _eval_attempts(workspace, state, workspace.name.removeprefix('verification-').split('-')[0])
         return
-    report_path = _inside_state(result.get('report'), state)
-    if report_path is None:
+    if result.get('report') is not None:
+        report_path = _inside_state(result.get('report'), state)
+        if report_path is None:
+            return
+        attempt = report_path.parent
+    else:
+        attempt = _revision_attempt(item, state, batch_id, db)
+    if attempt is None:
         return
-    attempt = report_path.parent
     yield from _attempts(attempt / 'optimizer', state, 'optimizer', None)
     for workspace in sorted(attempt.glob('ab-*')):
         yield from _eval_attempts(workspace, state, workspace.name.removeprefix('ab-'))
@@ -164,14 +191,14 @@ def render_html(report):
             + ''.join(sections))
 
 
-def aggregate_batch_resources(config, batch_id, items, *, created_at=None, updated_at=None):
+def aggregate_batch_resources(config, batch_id, items, *, created_at=None, updated_at=None, db=None):
     state = Path(config['state']).resolve()
     all_samples = []
     candidates = []
     seen = set()
     for item in items:
         samples = []
-        for row in _item_attempts(item, state, batch_id):
+        for row in _item_attempts(item, state, batch_id, db):
             identity = (row['path'], row['stage'])
             if identity not in seen:
                 seen.add(identity)

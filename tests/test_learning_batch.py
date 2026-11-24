@@ -203,6 +203,42 @@ class LearningBatchTests(unittest.TestCase):
         self.assertEqual(1, len(seen))
         self.assertTrue(all(row["version"] == version for row in seen))
 
+    def test_blocked_improvement_recovers_optimizer_usage_from_checkpoint_revision(self):
+        from scripts.learning import SCHEMA
+        from scripts.utils import write_json
+
+        self.db.executescript(SCHEMA)
+        version = "approved-hash"
+        self.config["automation"] = {**self.config["automation"], "create": False, "improve": True}
+        self.db.execute(
+            "INSERT INTO evidence(witness,skill,version,origin,harness,session,turn,independent,kind,note,reproducible) "
+            "VALUES('e0','demo',?,'tool_check','codex','s0','t0','family0','failure','not working',1)",
+            (version,),
+        )
+
+        def interrupted_revision(name, settings, rows, batch_id):
+            witness = f"automation:{batch_id}:{name}"
+            self.db.execute("INSERT INTO checkpoints(witness,status) VALUES(?,'done')", (witness,))
+            checkpoint = self.db.execute("SELECT id FROM checkpoints WHERE witness=?", (witness,)).fetchone()["id"]
+            attempt = self.state / "revisions" / str(checkpoint) / name
+            self.db.execute(
+                "INSERT INTO revisions(checkpoint,skill,version,status,path) VALUES(?,?,?,'running',?)",
+                (checkpoint, name, version, str(attempt)),
+            )
+            write_json(attempt / "optimizer/run.json", {"harness": "codex", "status": "completed"})
+            write_json(attempt / "optimizer/usage.json", {"executor": {"total_tokens": 123}})
+            raise RuntimeError("worker interrupted after optimizer usage was persisted")
+
+        with patch("scripts.learning_batch.tree_hash", return_value=version):
+            report = run_batch(self.config, self.db, update=interrupted_revision, now=self.now)
+
+        self.assertEqual("blocked", report["status"])
+        self.assertEqual("blocked", report["items"][0]["status"])
+        self.assertIsNone(report["items"][0]["result"])
+        self.assertEqual(1, report["resources"]["summary"]["model_runs"])
+        self.assertEqual(123, report["resources"]["summary"]["tokens"]["total"])
+        self.assertEqual(0, report["resources"]["summary"]["failed_runs"])
+
     def test_draft_hides_holdout_from_optimizer_and_failed_check_never_applies(self):
         from scripts.learning_batch import create_candidate
 

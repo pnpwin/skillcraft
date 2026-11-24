@@ -136,6 +136,11 @@ actual files under `outputs/`, not just the response prose. Keep prompts and
 checks identical for both arms. SkillCraft stages one immutable candidate and
 fixture snapshot before dispatch.
 
+Prompt A/B is also available through `run_quality_eval.py` with
+`--instruction-a` and `--instruction-b`. It compares shared-system instruction
+files without attaching a skill; it still requires deterministic file checks and
+does not support judge arguments. See [prompt A/B evaluation](prompt-ab-evaluation.md).
+
 ```sh
 fixture="$PWD/tests/fixtures/hermes-file-ab/meeting-actions"
 workspace="$PWD/.agents/skillcraft-workspaces/hermes-file-ab-001"
