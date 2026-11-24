@@ -107,9 +107,10 @@ def run_model(prompt, output, model, *, mode='quality', skill=None, skill_id=Non
     harness = selection['harness']
     if harness == 'hermes' and (operation != 'run' or preparation or
                                  (mode == 'quality' and bool(skill) != attach) or
+                                 (mode == 'trigger' and (not skill or attach)) or
                                  (mode == 'optimizer' and (skill or attach or output_schema is None)) or
-                                 mode not in {'quality', 'optimizer'}):
-        raise ValueError('Hermes supports paired file-quality runs and schema-checked optimization')
+                                 mode not in {'quality', 'trigger', 'optimizer'}):
+        raise ValueError('Unsupported Hermes run: use paired files, natural skill selection, or schema-checked optimization')
     settings = profile_settings(profile, safe_id(skill_id or Path(skill).name) if skill else None, harness=harness)
     if timeout <= 0:
         raise ValueError('timeout must be positive')
@@ -158,6 +159,9 @@ def run_model(prompt, output, model, *, mode='quality', skill=None, skill_id=Non
         write_json(output / 'run.json', result)
         return result
     system = SYSTEM + tool_instructions(cli_state)
+    if controlled and mode in {'quality', 'trigger'}:
+        system += ('\nOpen requested input paths directly. When discovery is needed, search inside inputs/ '
+                   'or outputs/. Leave directory inspection out of text-only tasks.')
     if additional_instructions is not None:
         if not isinstance(additional_instructions, str) or not additional_instructions.strip():
             raise ValueError('Additional instructions must be nonempty text')

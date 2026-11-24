@@ -300,12 +300,17 @@ class LearningBatchTests(unittest.TestCase):
         self.config["automation"]["auto_apply"] = True
         settings = {"harnesses": {"opencode": {"model": "provider/test"}}}
         train = {"id": "train", "prompt": "Create a receipt for order 14."}
-        holdout = {"id": "holdout", "prompt": "Create a receipt for order 21."}
+        negative = ["Define a receipt without creating one.", "Explain the difference between an invoice and a receipt."]
+        holdout = {"id": "holdout", "prompt": "Create a receipt for order 21.",
+                   "trigger_negatives": [*negative, negative[0]]}
         observations = [{"id": 1, "case_id": "train", "independent": "training",
                          "kind": "success", "excerpt": "Verified receipt",
                          "details": json.dumps({"prompt": train["prompt"]})}]
-        counts = {"tp": 1, "fp": 1, "tn": 0, "fn": 0, "valid": 2, "errors": 0}
+        counts = {"tp": 3, "fp": 1, "tn": 5, "fn": 0, "valid": 9, "errors": 0}
         quality = {"improved": [{"case_id": "holdout"}]}
+        staged_path = self.state / "candidate" / "receipt"
+        staged_path.mkdir(parents=True)
+        (staged_path / "SKILL.md").write_text("draft", encoding="utf-8")
 
         def draft(_prompt, output, _model, **_kwargs):
             output.mkdir()
@@ -314,7 +319,12 @@ class LearningBatchTests(unittest.TestCase):
             }), encoding="utf-8")
             return {"status": "completed"}
 
-        def trigger(_skill, _evals, workspace, _model, **_kwargs):
+        def trigger(_skill, evals, workspace, _model, **kwargs):
+            probes = json.loads(evals.read_text(encoding="utf-8"))["evals"]
+            self.assertEqual([(holdout["prompt"], True), *((prompt, False) for prompt in negative)],
+                             [(case["prompt"], case["should_trigger"]) for case in probes])
+            self.assertNotIn("trigger_negatives", probes[0])
+            self.assertEqual(3, kwargs["repeats"])
             workspace.mkdir()
             (workspace / "report.html").write_text("<p>Trigger results</p>", encoding="utf-8")
             return {"summary": {**counts, "controlled": True}}
@@ -322,7 +332,7 @@ class LearningBatchTests(unittest.TestCase):
         with (patch("scripts.learning_observations.derived_cases", return_value=([train], [holdout])),
               patch("scripts.runtime.run_model", side_effect=draft),
               patch("scripts.learning_candidates.stage_candidate", return_value={
-                  "id": "draft", "candidate_path": "draft",
+                  "id": "draft", "candidate_path": str(staged_path),
               }),
               patch("scripts.learning_candidates.verify_candidate", return_value={
                   "trusted_pass": True, "candidate": {"verification": {"quality_evidence": quality}},

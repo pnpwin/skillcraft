@@ -122,6 +122,7 @@ Set these fields inside `automation`.
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `create` | `false` | Prepare a new skill from qualifying topic evidence. Requires `selection: all`. |
+| `reflect` | `false` | Review completed turns for durable corrections, user rules, and concrete confirmations. Uses the scheduled worker interval and candidate limit. Requires `create` or `improve`. |
 | `improve` | `false` | Prepare a revision from reproducible evidence for a current enrolled version. |
 | `auto_apply` | `false` | Allow eligible candidates to publish after their evaluation and native checks pass. For scheduled revisions this setting controls publication, and linked sources remain read-only. Requires `create` or `improve`. |
 | `interval_days` | `7` | Positive integer. The next due time is calculated from the previous batch start. The first eligible completed turn on or after that time can wake the worker. |
@@ -133,8 +134,15 @@ Re-enroll after enabling the policy or changing approved datasets, fixtures or
 executables. When an existing skill has both per-skill datasets, scheduled
 revisions use those datasets. Otherwise, the worker looks for qualifying
 verified session cases and protected checks. One verifiable case can support
-a draft. Automatic publication needs separate holdout evidence and a passing
-evaluation. A due scan with no eligible model work makes zero model calls.
+a draft. With `reflect: true`, completed corrections, user rules, and concrete
+confirmations are reviewed on the scheduled interval, up to the existing
+`max_candidates_per_batch` limit. Findings route first to a proven skill used
+in the turn, then to a matching existing skill in scope, then to a new skill
+when its name has no collision. Ambiguous attribution and read-only targets
+appear as suggestions in preview. A finding without an independent case may
+produce a staged text-only draft marked as awaiting checks. Automatic publication
+requires verified independent cases, trigger and native checks, and
+`auto_apply: true`. A due scan with no eligible model work makes zero model calls.
 [Batch workflow, statuses and reports](learning.md#scheduled-learning)
 
 ### Per-skill settings
@@ -263,7 +271,7 @@ are supported only with OpenCode. Codex and Hermes reject them.
 | --- | --- | --- | --- |
 | Skill quality A/B | Yes | Yes | macOS, deterministic file checks |
 | Prompt A/B | Yes | Yes | macOS, deterministic file checks |
-| Natural trigger evaluation and trigger-based optimization loop | Yes | Yes | Unavailable |
+| Natural trigger evaluation and trigger-based optimization loop | Yes | Yes | macOS, native skill loading |
 | Schema-checked description proposal with `improve_description.py` | Yes | Yes | Yes, with the configured Hermes runner |
 | Model-judged grading and blind comparison | Yes | Yes | Unavailable |
 

@@ -40,9 +40,8 @@ incomplete-pair accounting.
 
 ## Description optimization
 
-Codex and OpenCode support the trigger-based `run_loop.py` workflow. Hermes can
-propose descriptions from supplied training results with
-`improve_description.py`. It has no trigger-evaluation runner.
+Codex, OpenCode, and Hermes support the trigger-based `run_loop.py` workflow.
+Hermes uses its native skill catalog and isolated macOS profile.
 
 ```mermaid
 flowchart TD
@@ -85,15 +84,15 @@ flowchart TD
     P -->|Yes| Q["Use that profile's Hermes skills directory"]
     P -->|No| F
     Q --> F
-    F -->|Completed Codex or OpenCode chat| G["Verify the skill version and record eligible feedback"]
-    F -->|Completed Hermes chat| H["Record verified, version-bound feedback in its profile journal"]
+    F -->|Completed Codex or OpenCode chat| G["Record observations and bind verified feedback to the skill version"]
+    F -->|Completed Hermes chat| H["Record observations and verified feedback in the profile journal"]
     F -->|Completed A/B or reviewed feedback| I["Import verified evidence for the matching runs"]
     H --> J{"Automatic forwarding enabled or manual import requested?"}
     J -->|No| K["Keep evidence in the Hermes profile journal"]
     J -->|Yes, with shared enrollment| L["Import feedback only when scope, source, skill version, and completed turn match"]
     J -->|Yes, both scopes use automation| U["Import completed observations; some may remain unbound"]
     U --> UQ{"Owner-approved deterministic case or proof?"}
-    UQ -->|No| UD["Keep diagnostic; no creation candidate"]
+    UQ -->|No| UD["Keep unbound observations for optional reflection"]
     UQ -->|Yes| OBS["Admit checked observation for creation"]
     G --> M["Queue a checkpoint every 15th observed message or completed model step"]
     I --> N["Queue a checkpoint when new qualifying evidence arrives"]
@@ -108,7 +107,10 @@ flowchart TD
     DUE -->|Yes| SCAN["Plan the due batch from currently eligible items"]
     SCAN --> ANY{"Any eligible batch items?"}
     ANY -->|No| EMPTY["Record an empty scan; no model calls"]
-    ANY -->|Yes| READY{"Training evidence, approved inputs, models, and approval ready?"}
+    ANY -->|Yes, session reflection| REFLECT["Extract a reusable lesson and check existing skill coverage"]
+    REFLECT --> DRAFT["Stage a private text draft or report a review decision"]
+    DRAFT -->|Approved independent cases| READY
+    ANY -->|Yes, existing evaluation path| READY{"Training evidence, approved inputs, models, and approval ready?"}
     READY -->|No| WAIT
     READY -->|Yes| BATCH["Run the due batch"]
 ```
@@ -154,47 +156,38 @@ native catalog check; a failed check rolls back the change. The ordinary
 per-skill revision worker promotes atomically with recovery data but does not
 run this scheduled catalog probe.
 
-### Scheduled candidates
+### From a conversation or verified evidence to publication
 
 ```mermaid
 flowchart LR
     A["Explicit work or hook wake"] --> DUE{"Interval due or batch resuming?"}
     DUE -->|No| WAIT["Keep collecting; no scheduled batch calls"]
     DUE -->|Yes| B["Scan scoped evidence and artifact checks"]
-    B --> ANY{"Any eligible batch items?"}
-    ANY -->|No| EMPTY["Record empty scan; no model calls"]
-    ANY -->|Yes| R{"Approved inputs, models, and qualifying evidence?"}
-    R -->|No| WAIT
-    R -->|Yes| S{"Confirmed case or reproducible defect?"}
-    S -->|No| WAIT
-    S -->|Yes| GEN["Generate a candidate in isolation"]
-    GEN --> H{"Independent holdout available?"}
-    H -->|No| W["Keep draft/proposal; await independent checks"]
-    H -->|Yes| E["Paired train/holdout evaluation; holdout withheld from optimizer"]
-    E --> RPT["Keep candidate and reports for review"]
-    M["Manual draft"] --> ST["stage: save a separate candidate"]
-    ST --> VNOW["verify-now: run fresh A/B"]
-    VNOW --> ME["Evaluate supplied evals; do not apply"]
-    ST --> MREV["Review staged files and hashes"]
-    ME --> MREV
-    MREV -->|Explicit manual apply| MA["Publish by owner action; verification may be bypassed"]
-    MA --> MRES["Manual result; no native catalog probe"]
-    MRES --> RB
-    RPT -->|Manual revision publication| RST["Stage report candidate with --source"]
-    RST --> MREV
-    RPT -->|Explicit manual apply for staged ID| MA
-    RPT -->|Qualified auto-apply enabled| AC["Recheck approval and source hashes"]
-    AC --> CAT{"Native catalog matches?"}
-    CAT -->|Yes| Q["Record active hash and rollback history"]
-    CAT -->|No| V["Restore previous version"]
-    Q --> RB["Audit status and reports; rollback checks current hash"]
+    B -->|Verified experience and approved inputs| GEN["Prepare a candidate using existing Learning"]
+    B -->|Reflect enabled and eligible chat signals| REF["Extract a reusable lesson and check skill coverage"]
+    B -->|No eligible work| EMPTY["Record empty scan with zero model calls"]
+    REF -->|Suitable target or uncovered task| ST["Stage a private text draft"]
+    REF -->|Ambiguous, read-only, or one-off| P["Record the review outcome in preview"]
+    M["Explicit request in the current chat"] -->|Relevant turns, no waiting period| ST
+    ST -->|Scheduled Learning candidate| H{"Approved independent cases available?"}
+    GEN --> H
+    H -->|No| W["Keep the draft and await checks"]
+    W -->|Approve cases and resume| H
+    H -->|Yes| E["Evaluate the saved candidate"]
+    ST -->|Optional verify-now| AB["Run A/B and show the report"]
+    ST -->|Explicit apply, A/B optional| MA["Publish by owner action"]
+    AB -->|Explicit apply| MA
+    E --> G{"Quality, applicable trigger checks, and auto-apply pass?"}
+    G -->|No| RPT["Keep the candidate and report"]
+    G -->|Yes| AC["Recheck approval and hashes, then publish and probe the native catalog"]
+    AC -->|Exact version discovered| Q["Record active hash and rollback history"]
+    AC -->|Native check fails| V["Restore previous version or remove the new skill"]
+    Q --> RB["Rollback checks the active hash"]
+    MA --> RB
 ```
 
-Manual `apply` is an owner-controlled publication and can bypass verification;
-its result reports `applied_manual_unverified`. Run `verify-now` first for a
-fresh A/B. Scheduled auto-apply rechecks approval and hashes, then verifies the
-native catalog and restores the prior tree if that check fails. `status` exposes
-candidate state and revision history; revision reports retain recovery records
-for interrupted promotion and rollback. A scheduled revision's report candidate
-path is not a staged ID: stage it with `--source` before manual verification or
-apply. Scheduled new-skill reports already contain a staged candidate ID.
+Manual `apply` reports `applied_manual_unverified` when the owner publishes a
+draft without a passing verification. Scheduled auto-apply requires a passing
+evaluation and rechecks approval, hashes, and the native catalog. A revision
+from the existing Learning worker may need to be staged with `--source` to get
+an ID for manual verification or apply. Reflected drafts already have an ID.

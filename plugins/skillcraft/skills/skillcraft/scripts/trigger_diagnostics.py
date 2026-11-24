@@ -30,11 +30,17 @@ def diagnose(run_dir, result, skill_id):
         scoped_after_load = any(call['started_ms'] >= min(load_times) for call in cli)
     status = result.get('status')
     skill_load_evidence = 'successful skill tool event' if loaded else 'no successful load observed'
-    if result.get('harness') == 'codex':
+    harness = result.get('harness')
+    if harness == 'opencode' and result.get('mode') == 'trigger' and result.get('triggered') is None:
+        loaded = False
+        skill_load_evidence = 'native OpenCode observation unavailable'
+        after_load = None
+        scoped_after_load = None
+    if harness in {'codex', 'hermes'}:
         loaded = result.get('triggered') is True
-        skill_load_evidence = {True: 'native Codex implicit invocation event',
-                               False: 'no native invocation observed',
-                               None: 'Codex observation unavailable'}.get(result.get('triggered'))
+        native = 'native Codex implicit invocation event' if harness == 'codex' else 'verified Hermes skill_view result'
+        skill_load_evidence = {True: native, False: 'no native invocation observed',
+                               None: 'native observation unavailable'}[result.get('triggered')]
         after_load = None
         scoped_after_load = None
     return {'skill_loaded': loaded, 'skill_load_evidence': skill_load_evidence,

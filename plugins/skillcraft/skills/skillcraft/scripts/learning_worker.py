@@ -48,6 +48,26 @@ RUNNER_ENV = {
 MANUAL_RETRY_PREFIX = 'manual-retry:'
 
 
+def optimizer_profile(options, override):
+    if override is None:
+        harness, settings = next(iter(options.items()))
+        return harness, settings, settings.get('optimizer_model', settings['model'])
+    if (not isinstance(override, dict) or override.get('harness') != 'hermes'
+            or set(override) - {'harness', 'model', 'home'} or 'model' not in override):
+        raise ValueError('optimizer must configure a Hermes harness and model')
+    model = override['model']
+    settings = {'model': model}
+    if 'home' in override:
+        if not isinstance(override['home'], str) or not override['home']:
+            raise ValueError('optimizer.home must resolve to an absolute Hermes profile path')
+        home = Path(override['home']).expanduser()
+        if not home.is_absolute():
+            raise ValueError('optimizer.home must resolve to an absolute Hermes profile path')
+        settings['home'] = str(home)
+    model_ref(model, 'hermes')
+    return 'hermes', settings, model
+
+
 @contextmanager
 def runner_environment(harness, settings):
     overrides = {env: settings[key] for key, env in RUNNER_ENV[harness].items() if key in settings}
@@ -754,28 +774,7 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
                           **({'training_checks': training_checks} if scheduled else {})},
                          ensure_ascii=False)
         )
-        override = settings.get('optimizer')
-        if override is None:
-            optimizer = next(iter(options))
-            optimizer_settings = options[optimizer]
-            optimizer_model = optimizer_settings.get('optimizer_model', optimizer_settings['model'])
-        else:
-            if (not isinstance(override, dict) or override.get('harness') != 'hermes'
-                    or set(override) - {'harness', 'model', 'home'}
-                    or 'model' not in override):
-                raise ValueError('optimizer must configure a Hermes harness and model')
-            if 'home' in override:
-                if not isinstance(override['home'], str) or not override['home']:
-                    raise ValueError('optimizer.home must resolve to an absolute Hermes profile path')
-                home = Path(override['home']).expanduser()
-                if not home.is_absolute():
-                    raise ValueError('optimizer.home must resolve to an absolute Hermes profile path')
-                override = {**override, 'home': str(home)}
-            optimizer = 'hermes'
-            optimizer_settings = {key: override[key] for key in ('home',) if key in override}
-            optimizer_settings['model'] = override['model']
-            optimizer_model = override['model']
-            model_ref(optimizer_model, optimizer)
+        optimizer, optimizer_settings, optimizer_model = optimizer_profile(options, settings.get('optimizer'))
         configured_optimizer = settings.get('harnesses', {}).get(optimizer, {})
         runtime_overrides = {}
         for key, env in RUNNER_ENV[optimizer].items():
@@ -885,6 +884,15 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
         if not improved or any(value['regressed'] for value in report['validations'].values()):
             report['status'] = 'rejected'
             return report
+        if scheduled:
+            from scripts.learning_triggers import qualify
+            verify_frozen(evals, evals_hash, frozen_rows, frozen_hashes)
+            triggers = qualify(candidate, holdout, attempt, options, repeats=repeats, timeout=timeout,
+                               runner=runner_environment)
+            report.update(triggers)
+            if triggers['trigger_validation'] != 'passed':
+                report['status'] = 'rejected'
+                return report
         report['status'] = 'qualified'
         # Persist the exact hashes, successful A/B evidence and protected cases
         # before activation can make the candidate visible to the runtime.
@@ -895,6 +903,7 @@ def revise(config, name, settings, source, version, rows, attempt, db, *, reuse_
                 'policy_hash': report.get('policy_hash'),
                 'validation_hash': validation_hash,
                 'passed_ab': True,
+                'trigger_validation': report['trigger_validation'],
                 'auto_apply': settings.get('auto_apply') is True and not is_linked,
                 'candidate_modes': candidate_modes,
                 'validations': report['validations'],
@@ -964,7 +973,8 @@ def recover_attempt(attempt, source, state, *, linked=False, config=None, settin
                 if (not config or not settings or settings.get('auto_apply') is not True
                         or intent.get('policy_hash') != config['fingerprint']
                         or not approval_still_current(config, require_model_approval(config, name=name), name=name)
-                        or intent.get('passed_ab') is not True or intent.get('source') != str(source.resolve())
+                        or intent.get('passed_ab') is not True or intent.get('trigger_validation') != 'passed'
+                        or intent.get('source') != str(source.resolve())
                         or not candidate.is_relative_to(attempt.resolve())
                         or _tree_hash(source) != intent['before_hash']
                         or _tree_hash(candidate) != intent['after_hash']

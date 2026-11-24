@@ -1,4 +1,7 @@
 """File-only quality evaluation through the native Hermes Chat CLI gateway."""
+from contextlib import contextmanager
+import errno
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -90,7 +93,14 @@ def regular_artifacts(root):
 def check_requests(rows, request, session, home, *, block):
     requests, responses = {}, {}
     skill = [request['skill_id']] if request.get('skill_path') else []
-    if skill:
+    natural = request.get('mode') == 'trigger' and not request.get('attach_skill')
+    if request.get('mode') == 'trigger' and not natural:
+        raise ValueError('Hermes trigger evaluation must use natural skill selection')
+    allowed_tools = (worker.ADVERTISED_TOOLS if natural else
+                     worker.ADVERTISED_TOOLS - worker.NATURAL_SKILL_TOOLS - worker.BLOCKED_SKILL_TOOLS)
+    if natural and not skill:
+        raise ValueError('Natural Hermes selection requires a controlled candidate')
+    if skill and not natural:
         if not isinstance(block, str) or not re.fullmatch(r'[a-f0-9]{64}', block):
             raise ValueError('Missing or invalid expected skill preload hash')
     elif block is not None:
@@ -111,7 +121,7 @@ def check_requests(rows, request, session, home, *, block):
                     or row.get('catalog') != skill or 'block_sha256' not in row
                     or row['block_sha256'] != block or row.get('skill_sha256') != request.get('skill_sha256')
                     or not {'read_file', 'write_file', 'terminal'} <= set(row.get('tools', []))
-                    or set(row['tools']) - worker.ADVERTISED_TOOLS):
+                    or set(row['tools']) - allowed_tools):
                 raise ValueError('Invalid native request receipt')
             # Hermes can repeat the receipt for an identical provider attempt.
             # Every retry must keep the original catalog and preload evidence.
@@ -130,6 +140,66 @@ def check_requests(rows, request, session, home, *, block):
             'response_models': sorted({r['response_model'] for r in responses.values() if r.get('response_model')})}
 
 
+def natural_skill_load(rows, request, receipts, *, session_id, turn_id, request_ids, profile):
+    """Classify native Hermes skill_view evidence: exact load, no load, or unknown."""
+    if not (request.get('mode') == 'trigger' and not request.get('attach_skill')
+            and request.get('skill_path') and request.get('skill_id')):
+        return {'status': 'unknown', 'skill_id': request.get('skill_id'), 'reason': 'not a natural-selection request'}
+    calls = {}
+    for row in rows:
+        if row.get('type') not in {'tool_use', 'tool_result'}:
+            continue
+        key = row.get('tool_call_id') or row.get('name')
+        if not key:
+            return {'status': 'unknown', 'skill_id': request['skill_id'], 'reason': 'missing native tool call id'}
+        if row['type'] == 'tool_use':
+            if key in calls:
+                return {'status': 'unknown', 'skill_id': request['skill_id'], 'reason': 'duplicate native tool call'}
+            calls[key] = {'use': row, 'result': None}
+        elif row.get('name') == 'skill_view' and key not in calls:
+            return {'status': 'unknown', 'skill_id': request['skill_id'], 'reason': 'orphan native skill result'}
+        elif key in calls:
+            if calls[key]['result'] is not None:
+                return {'status': 'unknown', 'skill_id': request['skill_id'], 'reason': 'duplicate native tool result'}
+            calls[key]['result'] = row
+    relevant = [entry for entry in calls.values()
+                if entry['use'].get('name') == 'skill_view']
+    if any(entry['use'].get('name') in worker.BLOCKED_SKILL_TOOLS for entry in calls.values()):
+        return {'status': 'unknown', 'skill_id': request['skill_id'],
+                'reason': 'a blocked skill-management tool was attempted'}
+    if not relevant:
+        if receipts:
+            return {'status': 'unknown', 'skill_id': request['skill_id'],
+                    'reason': 'private load receipt has no matching native tool event'}
+        return {'status': 'not_loaded', 'skill_id': request['skill_id']}
+    expected = Path(request['skill_path']).read_text(encoding='utf-8-sig', errors='replace')
+    for entry in relevant:
+        use, result = entry['use'], entry['result']
+        args = use.get('input')
+        call_id = use.get('tool_call_id')
+        if (not isinstance(args, dict) or args.get('name') != request['skill_id'] or args.get('file_path') is not None
+                or result is None or result.get('name') != 'skill_view' or result.get('is_error') or not call_id):
+            continue
+        matching = [row for row in receipts if row.get('schema_version') == 1
+                    and row.get('run_id') == request['run_id'] and row.get('profile') == str(profile)
+                    and row.get('tool_call_id') == call_id
+                    and row.get('tool_name') == 'skill_view' and row.get('skill_id') == request['skill_id']
+                    and row.get('returned_name') == request['skill_id']
+                    and row.get('session_id') == session_id and row.get('turn_id') == turn_id
+                    and row.get('api_request_id') in request_ids and row.get('skill_sha256') == request['skill_sha256']
+                    and row.get('content_sha256') == worker.sha(expected.encode('utf-8'))
+                    and row.get('status') == 'ok' and row.get('success') is True and row.get('exact_content') is True
+                    and row.get('receipt_sha256') == worker.sha(json.dumps(
+                        {key: value for key, value in row.items() if key != 'receipt_sha256'},
+                        sort_keys=True, separators=(',', ':')).encode('utf-8'))]
+        if len(matching) == 1:
+            return {'status': 'loaded', 'skill_id': request['skill_id'],
+                    'content_sha256': worker.sha(expected.encode('utf-8')),
+                    'tool_call_id': call_id, 'receipt_sha256': matching[0]['receipt_sha256']}
+    return {'status': 'unknown', 'skill_id': request['skill_id'],
+            'reason': 'skill_view was attempted but exact successful content was not confirmed'}
+
+
 def verify_saved_run(path, run):
     for name in ('request.json', 'events.jsonl', 'hermes-proof.json', 'hermes-requests.json', 'response.txt'):
         if digest(path / name) != run['evidence_hashes'].get(name):
@@ -144,9 +214,14 @@ def verify_saved_run(path, run):
         block = request['preload_block_sha256']
     else:
         raise ValueError('Unsupported Hermes proof schema')
-    native, _ = native_events(read_lines(path / 'events.jsonl'))
+    event_rows = read_lines(path / 'events.jsonl')
+    native, _ = native_events(event_rows)
     observed = check_requests(read_json(path / 'hermes-requests.json'), request,
                               native['session_id'], run['profile_home'], block=block)
+    selection = natural_skill_load(event_rows, request, read_json(path / 'natural-load-receipts.json'),
+                                   session_id=native['session_id'], turn_id=observed['turn_id'],
+                                   request_ids=observed['request_ids'], profile=run['profile_home']) if request.get('mode') == 'trigger' else None
+    expected_trigger = (selection['status'] == 'loaded' if selection and selection['status'] != 'unknown' else None)
     output_files = regular_artifacts(path / 'outputs')
     if (output_files.pop('_response.txt', None) != digest(path / 'response.txt')
             or request['run_id'] != run['run_id'] or request['model'] != run['model']
@@ -154,6 +229,9 @@ def verify_saved_run(path, run):
             or proof['profile'] != run['profile_home'] or native['session_id'] != run['session_id']
             or native.get('exit_code') != 0 or proof['turn_id'] != run['turn_id']
             or proof['outputs'] != output_files or any(proof.get(key) != value for key, value in observed.items())
+            or selection is not None and proof.get('natural_load_receipts_sha256') != digest(path / 'natural-load-receipts.json')
+            or selection is not None and proof.get('natural_selection') != selection
+            or selection is not None and (run.get('skill_selection') != selection or run.get('triggered') != expected_trigger)
             or proof['sandbox'] != {'read_input': 0, 'write_output': 0, 'deny_input_write': 1,
                                    'deny_host_read': 1, 'deny_network': 1}):
         raise ValueError('Hermes proof or output artifacts do not match the run')
@@ -346,6 +424,65 @@ def invoke(command, cwd, env, timeout):
         proc.stderr.close()
 
 
+@contextmanager
+def private_profile(parent):
+    directory = Path(tempfile.mkdtemp(prefix='hermes-', dir=parent)).resolve()
+    try:
+        yield directory
+    finally:
+        home = directory / 'profile'
+        (home / 'auth.json').unlink(missing_ok=True)
+        if gateway_lock_active(home):
+            raise ValueError(f'Private Hermes gateway is still active. Preserved its runtime directory: {directory}')
+        for attempt in range(10):
+            try:
+                shutil.rmtree(directory)
+                break
+            except OSError as error:
+                if error.errno != errno.ENOTEMPTY or attempt == 9:
+                    raise
+                time.sleep(0.1)
+
+
+def gateway_lock_active(home):
+    try:
+        fd = os.open(home / 'gateway.lock', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return False
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+            raise ValueError('Unsafe private Hermes gateway lock')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        return False
+    finally:
+        os.close(fd)
+
+
+def stop_private_gateway(launcher, directory, env, home):
+    deadline = time.monotonic() + 12
+    while gateway_lock_active(home):
+        try:
+            record = read_json(home / 'gateway.pid')
+        except (FileNotFoundError, json.JSONDecodeError):
+            record = None
+        if record is not None:
+            if not isinstance(record, dict) or record.get('hermes_home') != str(home):
+                raise ValueError('Private Hermes gateway identity does not match evaluation profile')
+            try:
+                code, _, _ = invoke([launcher, 'gateway', 'stop'], directory, env, 10)
+            except subprocess.TimeoutExpired:
+                code = None
+            if code == 0 and not gateway_lock_active(home):
+                return
+        if time.monotonic() >= deadline:
+            raise ValueError('Private Hermes gateway did not release its runtime lock')
+        time.sleep(0.15)
+
+
 def run(request):
     output, directory = Path(request['output']), Path(request['directory'])
     response = {'schema_version': 1, 'harness': 'hermes', 'status': 'runner_error',
@@ -357,13 +494,15 @@ def run(request):
     require_private(directory.parent)
     require_private(directory)
     launcher = binary()
-    block = worker.sha(worker.native_block(request).encode()) if request.get('skill_path') else None
+    natural = request.get('mode') == 'trigger' and not request.get('attach_skill')
+    if request.get('mode') == 'trigger' and not natural:
+        raise ValueError('Hermes trigger evaluation must use natural skill selection')
+    block = worker.sha(worker.native_block(request).encode()) if request.get('skill_path') and not natural else None
     write_json(output / 'request.json', {**request, 'preload_block_sha256': block})
     source = Path(os.environ.get('SKILLCRAFT_HERMES_HOME', os.environ.get('HERMES_HOME', '~/.hermes'))).expanduser().resolve()
     provider, model = request['model']['provider'], request['model']['id']
     (directory / '.tool-tmp').mkdir(mode=0o700)
-    with tempfile.TemporaryDirectory(prefix='hermes-', dir=directory.parent) as scratch:
-        private = Path(scratch).resolve()
+    with private_profile(directory.parent) as private:
         home = private / 'profile'
         home.mkdir(mode=0o700)
         (home / '.no-bundled-skills').touch()
@@ -372,7 +511,7 @@ def run(request):
         shutil.copyfile(worker.__file__, plugin / '__init__.py')
         (plugin / 'plugin.yaml').write_text('name: skillcraft_eval\nversion: 0.1.0\ndescription: SkillCraft evaluation\n')
         write_json(home / 'skillcraft-eval.json', {key: request[key] for key in
-                   ('directory', 'run_id', 'skill_id', 'skill_path', 'skill_sha256') if key in request})
+                   ('directory', 'run_id', 'mode', 'attach_skill', 'skill_id', 'skill_path', 'skill_sha256') if key in request})
         outside = private / 'outside'
         outside.write_text('sandbox canary')
         sandbox = sandbox_test(request, outside)
@@ -400,6 +539,7 @@ def run(request):
         bundled.mkdir()
         env = {'HERMES_BUNDLED_SKILLS': str(bundled), 'PATH': '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin', 'HOME': str(private),
                'HERMES_HOME': str(home), 'HERMES_DISABLE_LAZY_INSTALLS': '1', 'PYTHONDONTWRITEBYTECODE': '1',
+               'HERMES_GATEWAY_LOCK_DIR': str(private / 'gateway-locks'),
                'SKILLCRAFT_LEARNING_INTERNAL': '1', 'LANG': 'en_US.UTF-8'}
         try:
             version_code, version, _ = invoke([launcher, '--version'], directory, env, min(30, request['timeout_seconds']))
@@ -407,8 +547,8 @@ def run(request):
                 raise ValueError('The isolated Hermes CLI did not report an installed version')
             command = [launcher, 'chat', '--query-file', str(prompt), '--format', 'stream-json',
                        '--in', str(directory), '--ignore-rules', '--provider', provider, '--model', model,
-                       '--toolsets', 'file,terminal', *provider_args]
-            if request.get('skill_path'):
+                       '--toolsets', 'file,terminal,skills' if request.get('mode') == 'trigger' else 'file,terminal', *provider_args]
+            if request.get('skill_path') and request.get('mode') != 'trigger' and request.get('attach_skill', True):
                 command += ['--skills', request['skill_id']]
             code, stdout, stderr = invoke(command, directory, env, request['timeout_seconds'])
             events = output / 'events.jsonl'
@@ -431,6 +571,14 @@ def run(request):
             receipts = read_lines(home / 'requests.jsonl')
             write_json(output / 'hermes-requests.json', receipts)
             proof = check_requests(receipts, request, session, home, block=block)
+            natural_receipts = read_lines(home / 'natural-load-receipts.jsonl') if (home / 'natural-load-receipts.jsonl').exists() else []
+            write_json(output / 'natural-load-receipts.json', natural_receipts)
+            selection = natural_skill_load(read_lines(events), request, natural_receipts,
+                                           session_id=session, turn_id=proof['turn_id'],
+                                           request_ids=proof['request_ids'], profile=home) if request.get('mode') == 'trigger' else None
+            if selection is not None:
+                proof['natural_selection'] = selection
+                proof['natural_load_receipts_sha256'] = digest(output / 'natural-load-receipts.json')
             proof.update(schema_version=2, run_id=request['run_id'], session_id=session, profile=str(home),
                          sandbox=sandbox, outputs=regular_artifacts(directory / 'outputs'))
             write_json(output / 'hermes-proof.json', proof)
@@ -438,23 +586,25 @@ def run(request):
                            if request.get('skill_path') else None, 'background': False, 'plugins': [PLUGIN],
                            'controlled': True, 'model_settings': model_settings, 'configuration_fingerprint': worker.sha(json.dumps({
                                'terminal': worker.BACKEND, 'provider': provider, 'model': model,
-                               'base_url': config['model'].get('base_url'), 'model_settings': model_settings, 'toolsets': ['file', 'terminal'],
+                               'base_url': config['model'].get('base_url'), 'model_settings': model_settings,
+                               'toolsets': ['file', 'terminal', 'skills'] if request.get('mode') == 'trigger' else ['file', 'terminal'],
                                'timeout': request['timeout_seconds']}, sort_keys=True).encode())}
             write_json(output / 'environment.json', environment)
             write_json(output / 'messages.json', [
                 {'id': proof['turn_id'], 'type': 'user', 'content': [{'type': 'text', 'text': request['prompt']}]},
                 {'id': session, 'type': 'assistant', 'content': parts}])
             (output / 'response.txt').write_text(final.get('text') or '', encoding='utf-8')
-            response.update(status='completed', environment=environment, attached=bool(request.get('skill_path')),
+            response.update(status='completed', environment=environment,
+                            attached=bool(request.get('skill_path') and request.get('attach_skill', True)),
                             session_id=session, turn_id=proof['turn_id'], profile_home=str(home),
+                            triggered=(selection['status'] == 'loaded' if selection and selection['status'] != 'unknown' else None)
+                                      if selection is not None else None,
+                            skill_selection=selection,
                             response_models=proof['response_models'],
                             duration_ms=final.get('duration_ms'), usage={
                                 key: usage[key] for key in ('input', 'output', 'total', 'cache_read', 'cache_write') if key in usage})
         finally:
-            if (home / 'gateway.pid').is_file() or (home / 'gateway.sock').exists():
-                code, _, _ = invoke([launcher, 'gateway', 'stop'], directory, env, 20)
-                if code:
-                    raise ValueError('Could not stop the private Hermes gateway')
+            stop_private_gateway(launcher, directory, env, home)
     return {**response, 'duration_ms': response.get('duration_ms') or round((time.monotonic() - started) * 1000)}
 
 

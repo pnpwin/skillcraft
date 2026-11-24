@@ -109,7 +109,8 @@ class ScheduledPublicationRecovery(unittest.TestCase):
         after = learning_promotion._tree_hash(candidate)
         intent = {
             "source": str(source), "before_hash": before, "after_hash": after, "policy_hash": "policy",
-            "passed_ab": True, "auto_apply": True, "candidate_modes": learning_promotion.tree_modes(candidate),
+            "passed_ab": True, "trigger_validation": "passed", "auto_apply": True,
+            "candidate_modes": learning_promotion.tree_modes(candidate),
             "protected_cases": [{"group": "held", "id": "hold", "protect": True}],
         }
         report = {

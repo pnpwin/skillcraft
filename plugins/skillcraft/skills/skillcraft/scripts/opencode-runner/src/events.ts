@@ -35,7 +35,7 @@ export class Events {
       const call = this.calls.get(key) ?? {};
       if (event.type === 'session.tool.input.started') call.name = event.data.name;
       if (event.type === 'session.tool.called') call.input = event.data.input;
-      if (event.type === 'session.tool.success') call.status = 'success';
+      if (event.type === 'session.tool.success') call.status = event.data.executed === false ? 'unexecuted' : 'success';
       if (event.type === 'session.tool.failed') {
         call.status = 'failed';
         if (/permission|denied|rejected/i.test(JSON.stringify(event.data.error))) this.policyBlocked = true;
@@ -79,9 +79,12 @@ export class Events {
       for (const p of m.content) {
         if (p.type !== 'tool') continue;
         const state = p.state;
+        const key = `${sessionID}/${m.id}/${p.id}`;
+        const unexecuted = this.calls.get(key)?.status === 'unexecuted';
         const call = { name: p.name, input: 'input' in state && typeof state.input === 'object' ? state.input : undefined,
-          status: state.status === 'completed' ? 'success' : state.status === 'error' ? 'failed' : state.status };
-        this.calls.set(`${sessionID}/${m.id}/${p.id}`, call);
+          status: unexecuted ? 'unexecuted'
+            : state.status === 'completed' ? 'success' : state.status === 'error' ? 'failed' : state.status };
+        this.calls.set(key, call);
         if (state.status === 'error' && /permission|denied|rejected/i.test(JSON.stringify(state))) this.policyBlocked = true;
       }
       if (m.time.completed && m.tokens && !this.stepIDs.has(m.id)) {
@@ -99,7 +102,8 @@ export class Events {
   }
   triggered(id: string | undefined, complete: boolean): boolean | null {
     if (!id) return null;
-    if ([...this.calls.values()].some(c => c.name === 'skill' && c.input?.id === id && c.status === 'success')) return true;
-    return complete ? false : null;
+    const attempts = [...this.calls.values()].filter(c => c.name === 'skill');
+    if (attempts.some(c => c.input?.id === id && c.status === 'success')) return true;
+    return complete && attempts.length === 0 ? false : null;
   }
 }

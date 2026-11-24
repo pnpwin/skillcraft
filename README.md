@@ -166,17 +166,26 @@ or home turn on or after the stored due time can wake the worker. The default
 interval is seven days, with up to three candidates across that scope per
 batch. An empty batch requires zero model calls.
 
-One independently verifiable case can qualify a draft. Automatic publication
-requires the relevant `auto_apply` setting, a passing A/B with independent
-holdout coverage, and the required native checks. `learning.py status` shows
-the schedule, queue and batch resource report.
+Opt in to session reflection with `automation.reflect: true`. A single
+reusable rule from a completed conversation can produce a private draft before
+independent checks exist. For example, “Remember: keep duplicate rows” is a
+signal to review, while a request to save an output file is part of the current
+task. Reflection prefers improving the relevant skill before creating a new
+one. Ambiguous attribution and read-only targets are shown in preview.
+Automatic publication requires verified independent cases, applicable trigger
+and native checks, and `auto_apply: true`.
+`learning.py status` shows the schedule, queue and batch resource report.
 [Configuration and examples](plugins/skillcraft/skills/skillcraft/references/learning.md#scheduled-learning)
 
 ```text
-Install from Git → select a profile → open skillcraft
-Manual: task → candidate → optional A/B → report → owner decision
-Scheduled: completed turns and evaluated evidence → journal → due batch
-           → eligible candidate → A/B and report → publication gates
+Manual request → draft now → optional A/B → explicit apply
+
+Completed turns and A/B feedback → journal → due batch
+  Verified experience → existing Learning evaluation
+  Reusable chat lesson + reflect enabled → private text draft
+    → approved independent cases → evaluate the same draft
+
+Passing evaluation + automatic publication gates → apply and record rollback
 ```
 
 ## Validate and evaluate
