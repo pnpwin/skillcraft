@@ -28,6 +28,7 @@ def compare(a):
     if meta['prompt'] != right_meta['prompt']:
         raise ValueError('Comparison prompts differ')
     with tempfile.TemporaryDirectory(prefix='skill-compare-') as tmp:
+        temp_root = Path(tmp).resolve()
         files, labels = [], {}
         for label, run in mapping.items():
             labels[label] = []
@@ -36,7 +37,7 @@ def compare(a):
                     continue
                 if source.is_symlink():
                     raise ValueError('Symlink in comparison artifact')
-                target = Path(tmp) / f'{label}-{index:03d}{source.suffix}'
+                target = temp_root / f'{label}-{index:03d}{source.suffix}'
                 shutil.copy2(source, target)
                 files.append(target)
                 labels[label].append('inputs/' + target.name)

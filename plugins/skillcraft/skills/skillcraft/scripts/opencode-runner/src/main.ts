@@ -7,7 +7,7 @@ import { Events, isBusy } from './events.ts';
 import { connect } from './connection.ts';
 
 type Request = {
-  schema_version: 1; operation?: 'run' | 'probe'; directory: string; output: string;
+  schema_version: 1; operation?: 'run' | 'probe' | 'catalog_probe'; directory: string; output: string;
   prompt: string; model: ModelRef; agent: string; timeout_seconds: number;
   mode: 'quality' | 'trigger' | 'judge' | 'optimizer';
   skill_id?: string; skill_path?: string; skill_sha256?: string; attach_skill?: boolean;
@@ -57,7 +57,7 @@ async function messages(client: Client, sessionID: string): Promise<SessionMessa
 
 async function audit(client: Client, r: Request) {
   const location = { directory: r.directory };
-  if (r.operation === 'probe') {
+  if (r.operation === 'catalog_probe') {
     // Publication probes use a disposable server/profile and allowlisted
     // built-ins only; wait for that isolated native registry before validation.
     const readyDeadline = Date.now() + 15000;
@@ -192,7 +192,7 @@ async function run(r: Request) {
     }
     environment = { ...await audit(client, r), server_version: info.version };
     await json(out('environment.json'), { version: info.version, ...environment as object });
-    if (r.operation === 'probe') {
+    if (r.operation === 'probe' || r.operation === 'catalog_probe') {
       status = 'completed';
     } else {
       const session = await client.session.create({ location: { directory: r.directory }, model: r.model, agent: r.agent,
